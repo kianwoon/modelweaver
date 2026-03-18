@@ -234,6 +234,7 @@ export interface RequestContext {
   tier: string;
   providerChain: RoutingEntry[];
   startTime: number;
+  rawBody: string;       // cached request body for re-use across fallbacks
 }
 ```
 
@@ -259,7 +260,7 @@ git commit -m "feat: add shared TypeScript types"
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, findConfigFile, resolveEnvVars, validateConfig } from "../src/config.js";
+import { loadConfig, findConfigFile, resolveEnvVars } from "../src/config.js";
 import type { AppConfig } from "../src/types.js";
 
 const TEST_DIR = join(import.meta.dirname, ".tmp-config-test");
@@ -343,7 +344,7 @@ tierPatterns:
   sonnet: ["sonnet"]
 `);
 
-    const config = loadConfig(TEST_DIR);
+    const { config } = loadConfig(TEST_DIR);
     expect(config.server.port).toBe(4000);
     expect(config.server.host).toBe("localhost");
     expect(config.providers.get("anthro")?.baseUrl).toBe("https://api.anthropic.com");
@@ -428,7 +429,7 @@ tierPatterns:
   t: ["t"]
 `);
 
-    const config = loadConfig(TEST_DIR);
+    const { config } = loadConfig(TEST_DIR);
     expect(config.server.host).toBe("localhost");
     delete process.env.KEY;
   });
@@ -478,16 +479,13 @@ const rawConfigSchema = z.object({
 // --- Env var resolution ---
 
 export function resolveEnvVars(value: string): string {
-  const matches = value.matchAll(/\$\{([^}]+)\}/g);
-  for (const match of matches) {
-    const varName = match[1];
+  return value.replace(/\$\{([^}]+)\}/g, (_, varName) => {
     const envValue = process.env[varName];
     if (envValue === undefined || envValue === "") {
       throw new Error(`Missing environment variable: ${varName}`);
     }
-    value = value.replace(match[0], envValue);
-  }
-  return value;
+    return envValue;
+  });
 }
 
 function resolveAllEnvStrings(obj: unknown): unknown {
@@ -519,7 +517,7 @@ export function findConfigFile(cwd: string = process.cwd()): string | null {
 
 // --- Load & validate ---
 
-export function loadConfig(configPath?: string, cwd?: string): AppConfig {
+export function loadConfig(configPath?: string, cwd?: string): { config: AppConfig; configPath: string } {
   const path = configPath || findConfigFile(cwd);
   if (!path) {
     throw new Error(
@@ -580,7 +578,8 @@ export function loadConfig(configPath?: string, cwd?: string): AppConfig {
     host: validated.server.host,
   };
 
-  return { server, providers, routing, tierPatterns };
+  const config: AppConfig = { server, providers, routing, tierPatterns };
+  return { config, configPath: path };
 }
 ```
 
@@ -717,13 +716,14 @@ export function buildRoutingChain(
 }
 
 /**
- * Build a RequestContext from an incoming model name.
+ * Build a RequestContext from an incoming model name and raw body.
  * Returns null if no tier matches.
  */
 export function resolveRequest(
   model: string,
   requestId: string,
-  config: AppConfig
+  config: AppConfig,
+  rawBody: string
 ): RequestContext | null {
   const tier = matchTier(model, config.tierPatterns);
   if (!tier) return null;
@@ -734,6 +734,7 @@ export function resolveRequest(
     tier,
     providerChain: buildRoutingChain(tier, config.routing),
     startTime: Date.now(),
+    rawBody,
   };
 }
 ```
@@ -819,7 +820,7 @@ Expected: FAIL
 
 ```typescript
 // src/logger.ts
-export type LogLevel = "info" | "debug";
+export type LogLevel = "info" | "debug" | "error";
 
 export interface Logger {
   info: (message: string, data?: Record<string, unknown>) => void;
@@ -1040,15 +1041,16 @@ describe("forwardRequest (integration)", () => {
       timeout: 5000,
     };
     const entry: RoutingEntry = { provider: "mock" };
+    const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
     const ctx: RequestContext = {
       requestId: "test-123",
       model: "claude-sonnet-4",
       tier: "sonnet",
       providerChain: [entry],
       startTime: Date.now(),
+      rawBody: body,
     };
 
-    const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
     const result = await forwardRequest(provider, entry, ctx, new Request("http://localhost/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
@@ -1074,15 +1076,16 @@ describe("forwardRequest (integration)", () => {
       timeout: 5000,
     };
     const entry: RoutingEntry = { provider: "mock" };
+    const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
     const ctx: RequestContext = {
       requestId: "test-401",
       model: "claude-sonnet-4",
       tier: "sonnet",
       providerChain: [entry],
       startTime: Date.now(),
+      rawBody: body,
     };
 
-    const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
     const result = await forwardRequest(provider, entry, ctx, new Request("http://localhost/v1/messages", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1151,6 +1154,7 @@ export function buildOutboundHeaders(
 
 /**
  * Forward a request to a single provider.
+ * Uses ctx.rawBody as the body source; incomingRequest is used for metadata only (url, headers).
  * Returns the Response object — caller decides fallback logic.
  */
 export async function forwardRequest(
@@ -1162,23 +1166,18 @@ export async function forwardRequest(
   const outgoingPath = incomingRequest.url.replace(/^https?:\/\/[^/]+/, "");
   const url = buildOutboundUrl(provider.baseUrl, outgoingPath);
 
-  // Prepare body (with optional model override)
-  let body: string | null = null;
+  // Prepare body from ctx.rawBody (with optional model override)
+  let body: string = ctx.rawBody;
   const contentType = incomingRequest.headers.get("content-type") || "";
 
   if (contentType.includes("application/json") && entry.model) {
-    const parsed = await incomingRequest.json();
+    const parsed = JSON.parse(ctx.rawBody);
     parsed.model = entry.model;
     body = JSON.stringify(parsed);
-  } else if (incomingRequest.body) {
-    body = await incomingRequest.text();
   }
 
   const headers = buildOutboundHeaders(incomingRequest.headers, provider, ctx.requestId);
-
-  if (body) {
-    headers.set("content-length", new TextEncoder().encode(body).byteLength.toString());
-  }
+  headers.set("content-length", new TextEncoder().encode(body).byteLength.toString());
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), provider.timeout);
@@ -1189,8 +1188,6 @@ export async function forwardRequest(
       headers,
       body,
       signal: controller.signal,
-      // @ts-expect-error Node.js fetch duplex
-      duplex: body ? "half" : undefined,
     });
 
     clearTimeout(timeout);
@@ -1242,8 +1239,7 @@ export async function forwardWithFallback(
 
     onAttempt?.(entry.provider, i);
 
-    // Re-create the request for each attempt (body can only be read once)
-    // We store the raw body in ctx for re-use
+    // forwardRequest uses ctx.rawBody, so body can be re-read on each attempt
     const response = await forwardRequest(provider, entry, ctx, incomingRequest);
     lastResponse = response;
 
@@ -1275,23 +1271,21 @@ export async function forwardWithFallback(
 }
 ```
 
-- [ ] **Step 4: Fix: handle request body re-use across fallback attempts**
+- [ ] **Step 4: Update tests to set `rawBody` on the context**
 
-The body can only be read once from a Request. Update the test helper and proxy to cache the raw body. Add this to `types.ts`:
+The `forwardRequest` function now reads the body from `ctx.rawBody` instead of the incoming request. Update the test `RequestContext` objects to include `rawBody` matching the request body string. For example, in the `forwardRequest (integration)` tests, add `rawBody` to each `ctx` object:
 
 ```typescript
-// Add to RequestContext in src/types.ts
-export interface RequestContext {
-  requestId: string;
-  model: string;
-  tier: string;
-  providerChain: RoutingEntry[];
-  startTime: number;
-  rawBody: string;       // cached request body for re-use across fallbacks
-}
+const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
+const ctx: RequestContext = {
+  requestId: "test-123",
+  model: "claude-sonnet-4",
+  tier: "sonnet",
+  providerChain: [entry],
+  startTime: Date.now(),
+  rawBody: body,  // <-- add this
+};
 ```
-
-Update `forwardRequest` to use `ctx.rawBody` instead of reading from the request. Update tests to set `rawBody` on the context.
 
 - [ ] **Step 5: Run tests to verify they pass**
 
@@ -1445,6 +1439,68 @@ describe("server", () => {
 
     expect(res.headers.get("x-request-id")).toBeTruthy();
   });
+
+  it("falls back to second provider when first returns 429", async () => {
+    const mock2 = createMockProvider();
+    mock.setBehavior("error-429");
+
+    const config = makeConfig({
+      providers: new Map([
+        ["mock", { name: "mock", baseUrl: mock.url, apiKey: "sk-test", timeout: 5000 }],
+        ["mock2", { name: "mock2", baseUrl: mock2.url, apiKey: "sk-test", timeout: 5000 }],
+      ]),
+      routing: new Map([
+        ["sonnet", [
+          { provider: "mock" },
+          { provider: "mock2" },
+        ]],
+      ]),
+    });
+
+    const app = createApp(config, "info");
+    const res = await app.fetch(
+      new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] }),
+      })
+    );
+
+    expect(res.status).toBe(200);
+    const text = await res.text();
+    expect(text).toContain("Hello from mock provider");
+    await mock2.close();
+  });
+
+  it("fails immediately on non-retriable error (401) without trying fallback", async () => {
+    const mock2 = createMockProvider();
+    mock.setBehavior("error-401");
+
+    const config = makeConfig({
+      providers: new Map([
+        ["mock", { name: "mock", baseUrl: mock.url, apiKey: "sk-test", timeout: 5000 }],
+        ["mock2", { name: "mock2", baseUrl: mock2.url, apiKey: "sk-test", timeout: 5000 }],
+      ]),
+      routing: new Map([
+        ["sonnet", [
+          { provider: "mock" },
+          { provider: "mock2" },
+        ]],
+      ]),
+    });
+
+    const app = createApp(config, "info");
+    const res = await app.fetch(
+      new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] }),
+      })
+    );
+
+    expect(res.status).toBe(401);
+    await mock2.close();
+  });
 });
 ```
 
@@ -1498,7 +1554,8 @@ export function createApp(config: AppConfig, logLevel: LogLevel): Hono {
     }
 
     // Resolve routing
-    const ctx = resolveRequest(model, requestId, config);
+    const rawBody = JSON.stringify(body);
+    const ctx = resolveRequest(model, requestId, config, rawBody);
     if (!ctx) {
       logger.info("No tier match", { requestId, model });
       return anthropicError(
@@ -1507,10 +1564,6 @@ export function createApp(config: AppConfig, logLevel: LogLevel): Hono {
         requestId
       );
     }
-
-    // Cache raw body for re-use across fallback attempts
-    const rawBody = JSON.stringify(body);
-    ctx.rawBody = rawBody;
 
     logger.info("Routing request", {
       requestId,
@@ -1630,8 +1683,11 @@ function main() {
 
   // Load config
   let config;
+  let configPath;
   try {
-    config = loadConfig(args.config);
+    const result = loadConfig(args.config);
+    config = result.config;
+    configPath = result.configPath;
   } catch (error) {
     console.error(`Config error: ${(error as Error).message}`);
     process.exit(1);
@@ -1647,7 +1703,8 @@ function main() {
 
   // Print startup info
   console.log(`\n  ModelWeaver v0.1.0`);
-  console.log(`  Listening: http://${host}:${port}\n`);
+  console.log(`  Listening: http://${host}:${port}`);
+  console.log(`  Config: ${configPath}\n`);
 
   console.log("  Routes:");
   for (const [tier, entries] of config.routing) {
@@ -1704,7 +1761,7 @@ Expected: `dist/index.js` created
 In two terminals:
 ```bash
 # Terminal 1
-npm run dev -c modelweaver.example.yaml
+npm run dev -- -c modelweaver.example.yaml
 
 # Terminal 2
 curl -X POST http://localhost:3456/v1/messages \
