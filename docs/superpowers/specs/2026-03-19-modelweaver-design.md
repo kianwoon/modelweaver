@@ -53,13 +53,37 @@ Claude Code ──→ ModelWeaver ──→ Provider A (Anthropic-compatible end
 7. On retriable error → tries next provider in chain → streams from fallback
 8. All providers exhausted → returns 502 to Claude Code
 
+### Path Handling
+
+ModelWeaver appends the incoming request path (e.g., `/v1/messages`) to the provider's `baseUrl`. Query parameters are forwarded as-is. The outbound URL is constructed as: `{provider.baseUrl}{incoming.path}`.
+
 ### What ModelWeaver Does NOT Do
 
-- No request body modification (passthrough)
 - No format translation (providers speak Anthropic format natively)
 - No state between requests (stateless)
 - No response body modification
 - No retry on non-retriable errors (4xx)
+- Note: request body IS modified when `model` override is configured (see below)
+
+### Model Override (Exception to Passthrough)
+
+When a routing entry specifies a `model` override, ModelWeaver:
+1. Parses the request JSON body
+2. Replaces the `model` field with the override value
+3. Re-serializes the body
+4. Updates the `Content-Length` header accordingly
+
+This is the only case where the request body is modified. When `model` override is omitted, the original body is forwarded unchanged.
+
+### Header Handling
+
+| Category | Headers | Behavior |
+|---|---|---|
+| **Forwarded as-is** | `anthropic-version`, `anthropic-beta`, `content-type`, `accept` | Passed to upstream without modification |
+| **Rewritten** | `x-api-key` | Replaced with the provider-specific key from config env var |
+| **Rewritten** | `host` | Set to match the upstream provider's hostname |
+| **Rewritten** | `content-length` | Updated if model override modifies the body |
+| **Added by ModelWeaver** | `x-request-id` | UUID for request traceability across logs |
 
 ## Configuration
 
@@ -68,6 +92,8 @@ Claude Code ──→ ModelWeaver ──→ Provider A (Anthropic-compatible end
 Location (checked in order):
 1. `./modelweaver.yaml` (project-local)
 2. `~/.modelweaver/config.yaml` (user-global)
+
+**First file found wins. Files are not merged.** If a project-local config exists, the global config is completely ignored.
 
 ### Schema
 
@@ -137,8 +163,28 @@ tierPatterns:
 
 - API keys are stored as environment variables only — never in config files
 - Config references env vars using `${VAR_NAME}` syntax
-- On startup, ModelWeaver validates all referenced env vars are set; fails fast with clear error if missing
+- `${VAR}` interpolation applies to all string fields (not just `apiKey`)
+- On startup, ModelWeaver validates all referenced env vars are set and non-empty; fails fast with clear error if missing or empty
+- `apiKey` is required for every provider — missing `apiKey` field is a validation error
 - The `x-api-key` header is rewritten per-provider for each outbound request
+
+### Tier Pattern Matching
+
+- Model names are matched against `tierPatterns` using **case-sensitive substring matching** (`String.includes`)
+- The model name is tested against all patterns for all tiers
+- **First tier whose patterns contain any match wins** — tier order in config determines priority
+- If no tier matches, return HTTP 502 with Anthropic-format error body (see Error Responses)
+
+### Startup Validation
+
+On startup, ModelWeaver validates:
+1. All `${VAR}` references resolve to non-empty environment variables
+2. All `provider` names referenced in `routing` exist in the `providers` section
+3. All tiers defined in `routing` have at least one entry in `tierPatterns`
+4. Server port is a valid number (1-65535)
+5. All `baseUrl` values are valid URLs
+
+Any validation failure prints a clear error message and exits with code 1.
 
 ## Error Handling
 
@@ -155,25 +201,54 @@ tierPatterns:
 - `401` — Authentication error (config problem)
 - `403` — Forbidden
 
-### Fallback Chain Behavior
+### Fallback Chain Behavior (Generalized)
 
 ```
-Request → Provider #1
-  ├── Success (200) → stream response ✓
-  ├── Retriable error → log → try Provider #2
-  └── Non-retriable error → log → return error to Claude Code ✗
+For each provider in chain (ordered):
+  1. If no SSE bytes sent yet:
+     ├── Success (200) → pipe SSE stream to Claude Code ✓
+     ├── Retriable error → log → try next provider
+     └── Non-retriable error → log → return error to Claude Code ✗
+  2. If SSE bytes already sent (mid-stream):
+     └── Any failure → forward the error/termination to Claude Code as-is ✗
+       (Cannot fallback mid-stream — Claude Code expects coherent SSE sequence)
 
-Provider #2 (fallback)
-  ├── Success (200) → stream response ✓
-  └── Any error → log → return 502 to Claude Code ✗
+All providers exhausted:
+  └── Return 502 with Anthropic-format error body to Claude Code ✗
 ```
+
+**Mid-stream failure**: Fallback only applies before any SSE bytes have been sent to Claude Code. Once the upstream provider has returned HTTP 200 and SSE events have started streaming, a connection failure mid-stream is forwarded directly to Claude Code. Claude Code already handles reconnection logic internally.
+
+### Error Responses
+
+All error responses returned to Claude Code follow the Anthropic error format:
+
+```json
+{
+  "type": "error",
+  "error": {
+    "type": "<error_type>",
+    "message": "<human-readable description>"
+  }
+}
+```
+
+Error types used:
+- `invalid_request_error` — no matching tier for model name
+- `authentication_error` — wrapped from upstream 401
+- `overloaded_error` — all providers in chain exhausted (502)
+- `api_error` — unexpected errors
 
 ### Logging
 
-- Each request gets a unique UUID for traceability
+- Each request gets a unique UUID (also sent as `x-request-id` header) for traceability
 - Log entries include: request ID, model, matched tier, provider attempted, latency, status
 - Structured JSON logging (stdout)
 - Log levels: INFO (default), DEBUG (`--verbose` flag)
+
+### SSE Error Detection (Known Limitation)
+
+MVP only inspects HTTP status codes for error classification. Some providers may return HTTP 200 with error events inside the SSE stream payload (e.g., `event: error` with error data). ModelWeaver does **not** inspect SSE event payloads for errors — it relies solely on the HTTP status code. This is a known limitation for future improvement.
 
 ## Core Components
 
@@ -201,9 +276,18 @@ src/
 | Package | Purpose |
 |---|---|
 | `hono` | Lightweight HTTP framework with native SSE support (~14KB) |
+| `@hono/node-server` | Node.js adapter for Hono |
 | `yaml` | YAML config file parsing |
 | `zod` | Config schema validation |
 | `dotenv` | Load .env file for `${VAR}` resolution |
+
+### Runtime & Build
+
+- **Runtime**: Node.js 18+ (LTS)
+- **Module format**: ESM (`"type": "module"` in package.json)
+- **Dev**: `tsx` for running TypeScript directly
+- **Build**: `tsup` for production bundling (single output file)
+- **Package manager**: npm (publishing target)
 
 ## CLI Interface
 
@@ -268,3 +352,9 @@ Note: `ANTHROPIC_API_KEY` in Terminal 2 is required by Claude Code but ignored b
 - OpenAI format translation
 - Dashboard / web UI
 - Authentication on the ModelWeaver endpoint itself
+- SSE payload error detection (currently HTTP status code only)
+- Graceful shutdown with in-flight request drain
+
+### Graceful Shutdown
+
+ModelWeaver handles `SIGTERM` and `SIGINT` by stopping acceptance of new requests and exiting immediately. In-flight SSE streams are terminated without graceful drain. This is acceptable for a local dev tool — users can restart and re-run their Claude Code command.
