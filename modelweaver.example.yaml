@@ -1,0 +1,33 @@
+server:
+  port: 3456
+  host: localhost
+
+providers:
+  anthropic:
+    baseUrl: https://api.anthropic.com
+    apiKey: ${ANTHROPIC_API_KEY}
+  openrouter:
+    baseUrl: https://openrouter.ai/api
+    apiKey: ${OPENROUTER_API_KEY}
+
+routing:
+  sonnet:
+    - provider: anthropic
+      model: claude-sonnet-4-20250514
+    - provider: openrouter
+      model: anthropic/claude-sonnet-4
+  opus:
+    - provider: anthropic
+      model: claude-opus-4-20250514
+    - provider: openrouter
+      model: anthropic/claude-opus-4
+  haiku:
+    - provider: anthropic
+      model: claude-haiku-4-5-20251001
+    - provider: openrouter
+      model: anthropic/claude-haiku-4
+
+tierPatterns:
+  sonnet: ["sonnet", "3-5-sonnet", "3.5-sonnet"]
+  opus: ["opus", "3-opus", "3.5-opus"]
+  haiku: ["haiku", "3-haiku", "3.5-haiku"]
