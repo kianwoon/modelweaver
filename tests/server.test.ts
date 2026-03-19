@@ -18,6 +18,7 @@ function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       ["opus", ["opus"]],
       ["haiku", ["haiku"]],
     ]),
+    modelRouting: new Map(),
     ...overrides,
   };
 }

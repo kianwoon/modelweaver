@@ -1,7 +1,7 @@
 // tests/router.test.ts
 import { describe, it, expect } from "vitest";
-import { matchTier, buildRoutingChain } from "../src/router.js";
-import type { RoutingEntry } from "../src/types.js";
+import { matchTier, buildRoutingChain, resolveRequest } from "../src/router.js";
+import type { RoutingEntry, AppConfig } from "../src/types.js";
 
 describe("matchTier", () => {
   const patterns = new Map<string, string[]>([
@@ -60,5 +60,93 @@ describe("buildRoutingChain", () => {
 
   it("returns empty array for unknown tier", () => {
     expect(buildRoutingChain("unknown", routing)).toEqual([]);
+  });
+});
+
+describe("resolveRequest", () => {
+  const baseConfig: AppConfig = {
+    server: { port: 3456, host: "localhost" },
+    providers: new Map(),
+    routing: new Map([
+      ["sonnet", [{ provider: "anthro" }]],
+    ]),
+    tierPatterns: new Map([
+      ["sonnet", ["sonnet"]],
+    ]),
+    modelRouting: new Map(),
+  };
+
+  it("returns null when no route matches", () => {
+    expect(resolveRequest("unknown-model", "req-1", baseConfig, "{}")).toBeNull();
+  });
+
+  it("exact modelRouting match returns correct chain with (modelRouting) tier", () => {
+    const config: AppConfig = {
+      ...baseConfig,
+      modelRouting: new Map([
+        ["glm-5-turbo", [{ provider: "glm" }]],
+      ]),
+    };
+    const ctx = resolveRequest("glm-5-turbo", "req-1", config, '{"test":true}');
+    expect(ctx).not.toBeNull();
+    expect(ctx!.tier).toBe("(modelRouting)");
+    expect(ctx!.providerChain).toEqual([{ provider: "glm" }]);
+    expect(ctx!.model).toBe("glm-5-turbo");
+    expect(ctx!.rawBody).toBe('{"test":true}');
+  });
+
+  it("modelRouting with multiple entries returns full chain", () => {
+    const config: AppConfig = {
+      ...baseConfig,
+      modelRouting: new Map([
+        ["custom-model", [
+          { provider: "primary" },
+          { provider: "fallback" },
+        ]],
+      ]),
+    };
+    const ctx = resolveRequest("custom-model", "req-2", config, "{}");
+    expect(ctx!.providerChain).toHaveLength(2);
+    expect(ctx!.providerChain[0].provider).toBe("primary");
+    expect(ctx!.providerChain[1].provider).toBe("fallback");
+  });
+
+  it("modelRouting takes priority over tier pattern matching", () => {
+    const config: AppConfig = {
+      ...baseConfig,
+      modelRouting: new Map([
+        ["claude-sonnet-4", [{ provider: "custom-provider" }]],
+      ]),
+    };
+    // "claude-sonnet-4" contains "sonnet" so would match tier pattern,
+    // but modelRouting should win
+    const ctx = resolveRequest("claude-sonnet-4", "req-3", config, "{}");
+    expect(ctx!.tier).toBe("(modelRouting)");
+    expect(ctx!.providerChain[0].provider).toBe("custom-provider");
+  });
+
+  it("falls back to tier patterns when no modelRouting match", () => {
+    const ctx = resolveRequest("claude-sonnet-4", "req-4", baseConfig, "{}");
+    expect(ctx).not.toBeNull();
+    expect(ctx!.tier).toBe("sonnet");
+    expect(ctx!.providerChain).toEqual([{ provider: "anthro" }]);
+  });
+
+  it("empty modelRouting map falls through to tier patterns", () => {
+    expect(baseConfig.modelRouting.size).toBe(0);
+    const ctx = resolveRequest("claude-sonnet-4", "req-5", baseConfig, "{}");
+    expect(ctx!.tier).toBe("sonnet");
+  });
+
+  it("modelRouting with empty chain falls through to tier patterns", () => {
+    const config: AppConfig = {
+      ...baseConfig,
+      modelRouting: new Map([
+        ["glm-5-turbo", []],
+      ]),
+    };
+    // Empty chain should be skipped, fall through to tier pattern
+    const ctx = resolveRequest("claude-sonnet-4", "req-6", config, "{}");
+    expect(ctx!.tier).toBe("sonnet");
   });
 });

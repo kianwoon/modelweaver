@@ -26,6 +26,7 @@ export interface AppConfig {
   providers: Map<string, ProviderConfig>;
   routing: Map<string, RoutingEntry[]>;
   tierPatterns: Map<string, string[]>;
+  modelRouting: Map<string, RoutingEntry[]>;
 }
 
 export interface RequestContext {

@@ -258,4 +258,102 @@ tierPatterns:
     expect(() => loadConfig(TEST_DIR)).toThrow(/baseUrl must use http/);
     delete process.env.KEY;
   });
+
+  describe("modelRouting", () => {
+    it("loads config without modelRouting (backward compatible)", () => {
+      process.env.KEY = "sk-123";
+      writeTestConfig(`
+server:
+  port: 8080
+providers:
+  p:
+    baseUrl: https://example.com
+    apiKey: \${KEY}
+routing:
+  t:
+    - provider: p
+tierPatterns:
+  t: ["t"]
+`);
+      const { config } = loadConfig(TEST_DIR);
+      expect(config.modelRouting).toBeDefined();
+      expect(config.modelRouting.size).toBe(0);
+      delete process.env.KEY;
+    });
+
+    it("loads config with modelRouting and valid providers", () => {
+      process.env.KEY1 = "sk-1";
+      process.env.KEY2 = "sk-2";
+      writeTestConfig(`
+server:
+  port: 8080
+providers:
+  glm:
+    baseUrl: https://api.z.ai/api/anthropic
+    apiKey: \${KEY1}
+  minimax:
+    baseUrl: https://api.minimax.io/anthropic
+    apiKey: \${KEY2}
+routing:
+  t:
+    - provider: glm
+tierPatterns:
+  t: ["t"]
+modelRouting:
+  "glm-5-turbo":
+    - provider: glm
+  "MiniMax-M2.7":
+    - provider: minimax
+`);
+      const { config } = loadConfig(TEST_DIR);
+      expect(config.modelRouting.size).toBe(2);
+      expect(config.modelRouting.get("glm-5-turbo")).toEqual([{ provider: "glm" }]);
+      expect(config.modelRouting.get("MiniMax-M2.7")).toEqual([{ provider: "minimax" }]);
+      delete process.env.KEY1;
+      delete process.env.KEY2;
+    });
+
+    it("throws if modelRouting references unknown provider", () => {
+      process.env.KEY = "sk-123";
+      writeTestConfig(`
+server:
+  port: 8080
+providers:
+  p:
+    baseUrl: https://example.com
+    apiKey: \${KEY}
+routing:
+  t:
+    - provider: p
+tierPatterns:
+  t: ["t"]
+modelRouting:
+  "custom-model":
+    - provider: nonexistent
+`);
+      expect(() => loadConfig(TEST_DIR)).toThrow(/nonexistent/);
+      delete process.env.KEY;
+    });
+
+    it("loads config with empty modelRouting object", () => {
+      process.env.KEY = "sk-123";
+      writeTestConfig(`
+server:
+  port: 8080
+providers:
+  p:
+    baseUrl: https://example.com
+    apiKey: \${KEY}
+routing:
+  t:
+    - provider: p
+tierPatterns:
+  t: ["t"]
+modelRouting: {}
+`);
+      const { config } = loadConfig(TEST_DIR);
+      expect(config.modelRouting.size).toBe(0);
+      delete process.env.KEY;
+    });
+  });
 });

@@ -31,7 +31,9 @@ export function buildRoutingChain(
 
 /**
  * Build a RequestContext from an incoming model name and raw body.
- * Returns null if no tier matches.
+ * Priority 1: exact model name match in modelRouting.
+ * Priority 2: substring match via tierPatterns.
+ * Returns null if no route matches.
  */
 export function resolveRequest(
   model: string,
@@ -39,6 +41,20 @@ export function resolveRequest(
   config: AppConfig,
   rawBody: string
 ): RequestContext | null {
+  // Priority 1: exact model name match in modelRouting
+  const modelChain = config.modelRouting.get(model);
+  if (modelChain && modelChain.length > 0) {
+    return {
+      requestId,
+      model,
+      tier: "(modelRouting)",
+      providerChain: modelChain,
+      startTime: Date.now(),
+      rawBody,
+    };
+  }
+
+  // Priority 2: substring match via tierPatterns (existing behavior)
   const tier = matchTier(model, config.tierPatterns);
   if (!tier) return null;
 

@@ -44,9 +44,12 @@ export function createApp(config: AppConfig, logLevel: LogLevel): Hono {
     const ctx = resolveRequest(model, requestId, config, rawBody);
     if (!ctx) {
       logger.info("No tier match", { requestId, model });
+      const configuredModels = config.modelRouting.size > 0
+        ? ` Configured model routes: ${[...config.modelRouting.keys()].join(", ")}.`
+        : "";
       return anthropicError(
         "invalid_request_error",
-        `No routing tier matches model "${model}". Configured tiers: ${[...config.tierPatterns.keys()].join(", ")}`,
+        `No route matches model "${model}". Configured tiers: ${[...config.tierPatterns.keys()].join(", ")}.${configuredModels}`,
         requestId
       );
     }

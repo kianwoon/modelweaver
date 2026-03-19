@@ -10,6 +10,14 @@ providers:
     baseUrl: https://openrouter.ai/api
     apiKey: ${OPENROUTER_API_KEY}
 
+# Exact model name routing (checked FIRST, before tier patterns)
+modelRouting:
+  "glm-5-turbo":
+    - provider: anthropic
+  "MiniMax-M2.7":
+    - provider: openrouter
+
+# Tier-based routing (fallback)
 routing:
   sonnet:
     - provider: anthropic

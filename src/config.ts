@@ -32,6 +32,7 @@ const rawConfigSchema = z.object({
   providers: z.record(z.string(), providerSchema),
   routing: z.record(z.string(), z.array(routingEntrySchema)),
   tierPatterns: z.record(z.string(), z.array(z.string())),
+  modelRouting: z.record(z.string(), z.array(routingEntrySchema)).optional(),
 });
 
 // --- Env var resolution ---
@@ -130,6 +131,19 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
     }
   }
 
+  // Cross-validate modelRouting provider references
+  if (validated.modelRouting) {
+    for (const [modelName, entries] of Object.entries(validated.modelRouting)) {
+      for (const entry of entries) {
+        if (!providerNames.has(entry.provider)) {
+          throw new Error(
+            `modelRouting for model "${modelName}" references unknown provider "${entry.provider}". Available: ${[...providerNames].join(", ")}`
+          );
+        }
+      }
+    }
+  }
+
   // Build typed config
   const providers = new Map<string, ProviderConfig>();
   for (const [name, p] of Object.entries(validated.providers)) {
@@ -152,11 +166,18 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
     tierPatterns.set(tier, patterns);
   }
 
+  const modelRouting = new Map<string, RoutingEntry[]>();
+  if (validated.modelRouting) {
+    for (const [model, entries] of Object.entries(validated.modelRouting)) {
+      modelRouting.set(model, entries);
+    }
+  }
+
   const server: ServerConfig = {
     port: validated.server.port,
     host: validated.server.host,
   };
 
-  const config: AppConfig = { server, providers, routing, tierPatterns };
+  const config: AppConfig = { server, providers, routing, tierPatterns, modelRouting };
   return { config, configPath: path };
 }

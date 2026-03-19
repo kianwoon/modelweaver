@@ -117,6 +117,17 @@ async function main() {
   }
   console.log();
 
+  if (config.modelRouting.size > 0) {
+    console.log("  Model Routes:");
+    for (const [model, entries] of config.modelRouting) {
+      const providerList = entries
+        .map((e, i) => `${e.provider}${i === 0 ? " (primary)" : " (fallback)"}`)
+        .join(", ");
+      console.log(`    ${model.padEnd(20)} → ${providerList}`);
+    }
+    console.log();
+  }
+
   // Start server
   serve({ fetch: app.fetch, hostname: host, port });
 
