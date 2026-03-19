@@ -234,20 +234,20 @@ describe("daemon", () => {
       removeWorkerPidFile();
     });
 
-    it("reports not running and cleans up log file when daemon not running", () => {
+    it("reports not running and cleans up log file when daemon not running", async () => {
       ensureDir();
       writeFileSync(getLogPath(), "old log\n");
       writeWorkerPidFile(12345);
 
-      const result = removeDaemon();
+      const result = await removeDaemon();
       expect(result.success).toBe(true);
       expect(result.message).toContain("not running");
       expect(existsSync(getLogPath())).toBe(false);
       expect(existsSync(getWorkerPidPath())).toBe(false);
     });
 
-    it("cleans up even with no log file", () => {
-      const result = removeDaemon();
+    it("cleans up even with no log file", async () => {
+      const result = await removeDaemon();
       expect(result.success).toBe(true);
       expect(result.message).toContain("not running");
     });

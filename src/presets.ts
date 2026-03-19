@@ -83,9 +83,9 @@ const PRESETS: ProviderPreset[] = [
     authType: "anthropic",
     testPath: "/v1/messages",
     models: {
-      sonnet: "claude-sonnet-4-20250514",
-      opus: "claude-opus-4-20250514",
-      haiku: "claude-haiku-4-5-20251001",
+      sonnet: "MiniMax-M2.7",
+      opus: "MiniMax-M2.7",
+      haiku: "MiniMax-M2.7",
     },
   },
   {
@@ -94,7 +94,7 @@ const PRESETS: ProviderPreset[] = [
     baseUrl: "https://api.fireworks.ai/inference/v1",
     envKey: "FIREWORKS_API_KEY",
     authType: "bearer",
-    testPath: "/v1/chat/completions",
+    testPath: "/chat/completions",
     models: {
       sonnet: "accounts/fireworks/models/claude-sonnet-4",
       opus: "accounts/fireworks/models/claude-opus-4",

@@ -2,7 +2,7 @@
 import prompts from 'prompts';
 import { getPresets, getPreset, type ProviderPreset } from './presets.js';
 import { stringify as stringifyYaml } from 'yaml';
-import { writeFileSync, existsSync, readFileSync } from 'node:fs';
+import { writeFileSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { readSettings, backupSettings, mergeSettings, writeSettings, getSettingsPath } from './settings.js';
 
@@ -100,34 +100,42 @@ async function configureProvider(id: string): Promise<ConfiguredProvider | null>
     return null;
   }
 
-  const { baseUrl } = await prompts(
-    { type: 'text', name: 'baseUrl', message: `[${preset.name}] Base URL:`, initial: preset.baseUrl },
-    CANCEL,
-  );
+  const MAX_RETRIES = 3;
 
-  const { apiKey } = await prompts(
-    { type: 'password', name: 'apiKey', message: `[${preset.name}] API key:` },
-    CANCEL,
-  );
-
-  // Spinner-style test
-  process.stdout.write(`  Testing API key for ${preset.name}...`);
-  const result = await testApiKey(baseUrl as string, apiKey as string, preset);
-  process.stdout.write('\r' + ' '.repeat(50) + '\r');
-
-  if (!result.ok) {
-    fail(`${preset.name}: ${result.error}`);
-    const { retry } = await prompts(
-      { type: 'confirm', name: 'retry', message: 'Retry?', initial: true },
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    const { baseUrl } = await prompts(
+      { type: 'text', name: 'baseUrl', message: `[${preset.name}] Base URL:`, initial: preset.baseUrl },
       CANCEL,
     );
-    if (retry) return configureProvider(id);
-    console.log(`  ${RED}Warning:${RESET} ${preset.name} will be skipped — incomplete configuration.`);
-    return null;
+
+    const { apiKey } = await prompts(
+      { type: 'password', name: 'apiKey', message: `[${preset.name}] API key:` },
+      CANCEL,
+    );
+
+    // Spinner-style test
+    process.stdout.write(`  Testing API key for ${preset.name}...`);
+    const result = await testApiKey(baseUrl as string, apiKey as string, preset);
+    process.stdout.write('\r' + ' '.repeat(50) + '\r');
+
+    if (result.ok) {
+      check(`${preset.name} API key accepted`);
+      return { id, name: preset.name, baseUrl: baseUrl as string, envKey: preset.envKey, apiKey: apiKey as string, authType: preset.authType, models: preset.models };
+    }
+
+    fail(`${preset.name}: ${result.error}`);
+
+    if (attempt < MAX_RETRIES - 1) {
+      const { retry } = await prompts(
+        { type: 'confirm', name: 'retry', message: `Retry? (${attempt + 1}/${MAX_RETRIES - 1} retries used)`, initial: true },
+        CANCEL,
+      );
+      if (!retry) break;
+    }
   }
 
-  check(`${preset.name} API key accepted`);
-  return { id, name: preset.name, baseUrl: baseUrl as string, envKey: preset.envKey, apiKey: apiKey as string, authType: preset.authType, models: preset.models };
+  console.log(`  ${RED}Warning:${RESET} ${preset.name} will be skipped — max retries (${MAX_RETRIES}) exceeded.`);
+  return null;
 }
 
 async function configureRouting(providers: ConfiguredProvider[]): Promise<Record<string, RoutingTier[]>> {
@@ -293,6 +301,17 @@ function buildYamlConfig(
   routing: Record<string, RoutingTier[]>,
   server: { port: number; host: string },
 ): string {
+  // Build modelRouting from routing entries
+  const modelRouting: Record<string, { provider: string; model: string }[]> = {};
+  for (const [tier, entries] of Object.entries(routing)) {
+    if (entries.length > 0) {
+      const primaryModel = entries[0].model;
+      if (!modelRouting[primaryModel]) {
+        modelRouting[primaryModel] = entries.map(e => ({ provider: e.provider, model: e.model }));
+      }
+    }
+  }
+
   const configObj = {
     server,
     providers: {} as Record<string, Record<string, unknown>>,
@@ -302,6 +321,7 @@ function buildYamlConfig(
       opus: ['opus'],
       haiku: ['haiku'],
     },
+    modelRouting,
   };
 
   for (const p of providers) {
@@ -320,19 +340,28 @@ function buildYamlConfig(
 }
 
 function writeEnvFile(entries: ConfiguredProvider[]): void {
-  const envPath = join(process.cwd(), '.env');
+  const envDir = join(process.env.HOME || process.env.USERPROFILE || '', '.modelweaver');
+  const envPath = join(envDir, '.env');
+  mkdirSync(envDir, { recursive: true });
   let existing = '';
 
   if (existsSync(envPath)) {
     existing = readFileSync(envPath, 'utf-8');
   }
 
-  const lines: string[] = existing ? [''] : [];
+  if (existing && !existing.endsWith('\n')) existing += '\n';
+
+  const lines: string[] = [];
 
   for (const entry of entries) {
-    const regex = new RegExp(`^${entry.envKey}=`, 'm');
-    if (!regex.test(existing)) {
-      lines.push(`${entry.envKey}=${entry.apiKey}`);
+    // Escape regex metacharacters in env key name
+    const escapedKey = entry.envKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(`^${escapedKey}=.*$`, 'm');
+    const quotedValue = entry.apiKey.includes('"') ? `'${entry.apiKey}'` : `"${entry.apiKey}"`;
+    if (regex.test(existing)) {
+      existing = existing.replace(regex, `${entry.envKey}=${quotedValue}`);
+    } else {
+      lines.push(`${entry.envKey}=${quotedValue}`);
     }
   }
 
@@ -410,7 +439,9 @@ export async function runInit(): Promise<void> {
   }
 
   // Step 7 — Write files
-  const configPath = join(process.cwd(), 'modelweaver.yaml');
+  const modelweaverDir = join(process.env.HOME || process.env.USERPROFILE || '', '.modelweaver');
+  mkdirSync(modelweaverDir, { recursive: true });
+  const configPath = join(modelweaverDir, 'config.yaml');
   if (existsSync(configPath)) {
     console.log(`\n  ⚠  Warning: ${configPath} already exists and will be overwritten.\n`);
     const { overwrite } = await prompts({
@@ -443,8 +474,6 @@ export async function runInit(): Promise<void> {
   settingsConfig = await configureClaudeCodeSettings(routing, configured, server);
 
   if (settingsConfig) {
-    // Use the primary provider's API key for the auth token
-    const primaryProvider = configured[0];
     const baseUrl = server.host === 'localhost'
       ? `http://localhost:${server.port}`
       : `http://${server.host}:${server.port}`;
@@ -457,7 +486,6 @@ export async function runInit(): Promise<void> {
     const existing = readSettings();
     const merged = mergeSettings(existing, {
       baseUrl,
-      authToken: primaryProvider.apiKey,
       defaultModel: settingsConfig.defaultModel,
       tierModels: settingsConfig.tierModels,
     });

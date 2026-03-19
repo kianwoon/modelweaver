@@ -1,5 +1,5 @@
 // src/daemon.ts — Daemon lifecycle management for background mode
-import { fork } from "node:child_process";
+import { fork, spawn } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -11,6 +11,7 @@ import {
 import { join } from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { createServer } from "node:net";
 
 // ---------------------------------------------------------------------------
 // Paths
@@ -138,11 +139,28 @@ export interface DaemonStartResult {
   logPath: string;
 }
 
-export function startDaemon(
+export function isPortInUse(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.once("error", (err: NodeJS.ErrnoException) => {
+      if (err.code === "EADDRINUSE") {
+        resolve(true);
+      } else {
+        resolve(false);
+      }
+    });
+    server.once("listening", () => {
+      server.close(() => resolve(false));
+    });
+    server.listen(port);
+  });
+}
+
+export async function startDaemon(
   configPath?: string,
   port?: number,
   verbose?: boolean,
-): DaemonStartResult {
+): Promise<DaemonStartResult> {
   // Check if already running
   const currentStatus = statusDaemon();
   if (currentStatus.running) {
@@ -154,20 +172,28 @@ export function startDaemon(
     };
   }
 
-  // Resolve the entry script path for forking
+  // Check if port is already in use (only when port is explicitly provided)
+  if (port && await isPortInUse(port)) {
+    return {
+      success: false,
+      message: `Port ${port} is already in use. Is ModelWeaver or another process running on it?`,
+      logPath: getLogPath(),
+    };
+  }
+
+  // Resolve the entry script path
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = dirname(__filename);
-  // The daemon child will be the same entry point (index.js after build)
-  // When running via tsx, fork the same script; when built, fork dist/index.js
-  const entryScript = process.argv[1] || join(__dirname, "index.js");
+  // Use dist/index.js (built output) — works with both npx and direct node
+  const entryScript = join(__dirname, "index.js");
 
-  // Build args — fork a monitor process; monitor spawns the actual daemon child
-  const childArgs: string[] = ["--monitor"];
+  // Build args — spawn a monitor process; monitor spawns the actual daemon child
+  const childArgs: string[] = [entryScript, "--monitor"];
   if (configPath) childArgs.push("--config", configPath);
   if (port) childArgs.push("--port", String(port));
   if (verbose) childArgs.push("--verbose");
 
-  const child = fork(entryScript, childArgs, {
+  const child = spawn(process.execPath, childArgs, {
     detached: true,
     stdio: "ignore",
     env: { ...process.env },
@@ -185,11 +211,8 @@ export function startDaemon(
       pid = checkPid;
       break;
     }
-    // Sleep 100ms synchronously-ish
-    const start = Date.now();
-    while (Date.now() - start < 100) {
-      // busy wait — only 100ms max
-    }
+    // Sleep 100ms
+    await new Promise(r => setTimeout(r, 100));
   }
 
   if (!pid) {
@@ -217,13 +240,33 @@ export interface DaemonStopResult {
   message: string;
 }
 
-export function stopDaemon(): DaemonStopResult {
+export async function stopDaemon(): Promise<DaemonStopResult> {
   const pid = readPidFile();
   if (pid === null) {
     return { success: false, message: "ModelWeaver is not running (no PID file found)" };
   }
 
   if (!isProcessAlive(pid)) {
+    // Monitor is dead — check for orphaned worker and kill it
+    const workerPid = readWorkerPidFile();
+    if (workerPid !== null && isProcessAlive(workerPid)) {
+      try {
+        process.kill(workerPid, "SIGTERM");
+      } catch {
+        // Already dead
+      }
+      const workerDeadline = Date.now() + 5000;
+      while (Date.now() < workerDeadline) {
+        if (!isProcessAlive(workerPid)) break;
+        await new Promise(r => setTimeout(r, 100));
+      }
+      try {
+        process.kill(workerPid, "SIGKILL");
+      } catch {
+        // Already dead
+      }
+      removeWorkerPidFile();
+    }
     removePidFile();
     return { success: false, message: "ModelWeaver is not running (stale PID file cleaned up)" };
   }
@@ -241,10 +284,7 @@ export function stopDaemon(): DaemonStopResult {
       removePidFile();
       return { success: true, message: `ModelWeaver stopped (PID ${pid})` };
     }
-    const start = Date.now();
-    while (Date.now() - start < 100) {
-      // busy wait 100ms
-    }
+    await new Promise(r => setTimeout(r, 100));
   }
 
   // Force kill if still running
@@ -269,8 +309,8 @@ export function removeLogFile(): void {
   }
 }
 
-export function removeDaemon(): DaemonStopResult {
-  const stopResult = stopDaemon();
+export async function removeDaemon(): Promise<DaemonStopResult> {
+  const stopResult = await stopDaemon();
   removeLogFile();
   removeWorkerPidFile();
   return {

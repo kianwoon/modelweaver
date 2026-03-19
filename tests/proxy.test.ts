@@ -19,6 +19,32 @@ describe("buildOutboundUrl", () => {
     expect(buildOutboundUrl("https://api.example.com", "/v1/messages?foo=bar"))
       .toBe("https://api.example.com/v1/messages?foo=bar");
   });
+
+  it("deduplicates /v1 when baseUrl already ends with it", () => {
+    // Fireworks: baseUrl has /inference/v1, incoming path has /v1/chat/completions
+    expect(buildOutboundUrl("https://api.fireworks.ai/inference/v1", "/v1/chat/completions"))
+      .toBe("https://api.fireworks.ai/inference/v1/chat/completions");
+  });
+
+  it("deduplicates /v1 with Anthropic-style paths", () => {
+    expect(buildOutboundUrl("https://api.fireworks.ai/inference/v1", "/v1/messages"))
+      .toBe("https://api.fireworks.ai/inference/v1/messages");
+  });
+
+  it("deduplicates /v1 with query string", () => {
+    expect(buildOutboundUrl("https://api.fireworks.ai/inference/v1", "/v1/chat/completions?model=test"))
+      .toBe("https://api.fireworks.ai/inference/v1/chat/completions?model=test");
+  });
+
+  it("does not deduplicate when only base has /v1", () => {
+    expect(buildOutboundUrl("https://api.example.com/v1", "/chat/completions"))
+      .toBe("https://api.example.com/v1/chat/completions");
+  });
+
+  it("does not deduplicate when only incoming path has /v1", () => {
+    expect(buildOutboundUrl("https://api.example.com", "/v1/messages"))
+      .toBe("https://api.example.com/v1/messages");
+  });
 });
 
 describe("buildOutboundHeaders", () => {

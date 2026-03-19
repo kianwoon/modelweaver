@@ -29,7 +29,7 @@ describe("findConfigFile", () => {
   });
 
   it("returns null when no config found", () => {
-    const result = findConfigFile(TEST_DIR);
+    const result = findConfigFile(TEST_DIR, { skipGlobal: true });
     expect(result).toBeNull();
   });
 });
@@ -50,9 +50,9 @@ describe("resolveEnvVars", () => {
     expect(() => resolveEnvVars("${NONEXISTENT_VAR}")).toThrow("Missing environment variable: NONEXISTENT_VAR");
   });
 
-  it("throws if referenced env var is empty string", () => {
+  it("returns empty string if referenced env var is empty", () => {
     process.env.EMPTY_VAR = "";
-    expect(() => resolveEnvVars("${EMPTY_VAR}")).toThrow("Missing environment variable: EMPTY_VAR");
+    expect(resolveEnvVars("${EMPTY_VAR}")).toBe("");
     delete process.env.EMPTY_VAR;
   });
 });

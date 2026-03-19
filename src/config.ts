@@ -7,6 +7,11 @@ import type { AppConfig, ProviderConfig, RoutingEntry, ServerConfig } from "./ty
 
 // --- Zod schemas for raw (pre-resolution) config ---
 
+const modelLimitsSchema = z.object({
+  maxInputTokens: z.number().int().positive(),
+  maxOutputTokens: z.number().int().positive(),
+}).optional();
+
 const providerSchema = z.object({
   baseUrl: z.string().url().refine(
     (url) => /^https?:\/\//.test(url),
@@ -15,6 +20,7 @@ const providerSchema = z.object({
   apiKey: z.string().min(1, "apiKey is required"),
   timeout: z.number().default(30000),
   authType: z.enum(["anthropic", "bearer"]).default("anthropic"),
+  modelLimits: modelLimitsSchema,
 });
 
 const routingEntrySchema = z.object({
@@ -40,7 +46,7 @@ const rawConfigSchema = z.object({
 export function resolveEnvVars(value: string): string {
   return value.replace(/\$\{([^}]+)\}/g, (_, varName) => {
     const envValue = process.env[varName];
-    if (envValue === undefined || envValue === "") {
+    if (envValue === undefined) {
       throw new Error(`Missing environment variable: ${varName}`);
     }
     return envValue;
@@ -62,15 +68,17 @@ function resolveAllEnvStrings(obj: unknown): unknown {
 
 // --- Config file discovery ---
 
-export function findConfigFile(cwd: string = process.cwd()): string | null {
+export function findConfigFile(cwd: string = process.cwd(), { skipGlobal = false } = {}): string | null {
   const localPath = join(cwd, "modelweaver.yaml");
   if (existsSync(localPath)) return localPath;
-  const globalPath = join(
-    process.env.HOME || process.env.USERPROFILE || "",
-    ".modelweaver",
-    "config.yaml"
-  );
-  if (existsSync(globalPath)) return globalPath;
+  if (!skipGlobal) {
+    const globalPath = join(
+      process.env.HOME || process.env.USERPROFILE || "",
+      ".modelweaver",
+      "config.yaml"
+    );
+    if (existsSync(globalPath)) return globalPath;
+  }
   return null;
 }
 
@@ -153,6 +161,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
       apiKey: p.apiKey,
       timeout: p.timeout,
       authType: p.authType,
+      modelLimits: p.modelLimits ? { maxInputTokens: p.modelLimits.maxInputTokens, maxOutputTokens: p.modelLimits.maxOutputTokens } : undefined,
     });
   }
 

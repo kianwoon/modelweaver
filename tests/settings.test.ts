@@ -80,10 +80,9 @@ describe("settings module", () => {
     it("adds env keys to empty settings", () => {
       const result = mergeSettings({}, {
         baseUrl: "http://localhost:3456",
-        authToken: "sk-test",
       });
       expect(result.env?.ANTHROPIC_BASE_URL).toBe("http://localhost:3456");
-      expect(result.env?.ANTHROPIC_AUTH_TOKEN).toBe("sk-test");
+      expect(result.env?.ANTHROPIC_AUTH_TOKEN).toBeUndefined();
     });
 
     it("preserves existing env keys not managed by modelweaver", () => {
@@ -96,7 +95,6 @@ describe("settings module", () => {
       };
       const result = mergeSettings(existing, {
         baseUrl: "http://localhost:3456",
-        authToken: "sk-test",
       });
       expect(result.env?.MY_CUSTOM_VAR).toBe("keep-this");
       expect(result.env?.ANTHROPIC_BASE_URL).toBe("http://localhost:3456");
@@ -106,7 +104,6 @@ describe("settings module", () => {
     it("sets tier alias models when provided", () => {
       const result = mergeSettings({}, {
         baseUrl: "http://localhost:3456",
-        authToken: "sk-test",
         tierModels: {
           sonnet: "glm-5-turbo",
           opus: "glm-5-turbo",
@@ -122,7 +119,6 @@ describe("settings module", () => {
       const existing = { env: { ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-4" } };
       const result = mergeSettings(existing, {
         baseUrl: "http://localhost:3456",
-        authToken: "sk-test",
         tierModels: { opus: "glm-5-turbo" },
       });
       // sonnet was not provided in tierModels, so it should be preserved
@@ -133,7 +129,6 @@ describe("settings module", () => {
     it("sets top-level model when provided", () => {
       const result = mergeSettings({}, {
         baseUrl: "http://localhost:3456",
-        authToken: "sk-test",
         defaultModel: "opus[1m]",
       });
       expect(result.model).toBe("opus[1m]");
@@ -143,7 +138,6 @@ describe("settings module", () => {
       const existing = { model: "sonnet" };
       const result = mergeSettings(existing, {
         baseUrl: "http://localhost:3456",
-        authToken: "sk-test",
       });
       expect(result.model).toBe("sonnet");
     });
@@ -158,7 +152,6 @@ describe("settings module", () => {
       };
       const result = mergeSettings(existing, {
         baseUrl: "http://localhost:3456",
-        authToken: "sk-test",
         defaultModel: "opus[1m]",
       });
       expect(result.includeCoAuthoredBy).toBe(false);
@@ -174,7 +167,6 @@ describe("settings module", () => {
       const settings = {
         env: {
           ANTHROPIC_BASE_URL: "http://localhost:3456",
-          ANTHROPIC_AUTH_TOKEN: "sk-test",
           CUSTOM: "preserved",
         },
         model: "opus[1m]",
