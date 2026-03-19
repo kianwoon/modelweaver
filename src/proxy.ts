@@ -15,8 +15,15 @@ export function isRetriable(status: number): boolean {
 
 export function buildOutboundUrl(baseUrl: string, incomingPath: string): string {
   const base = new URL(baseUrl);
-  const full = new URL(incomingPath, base);
-  return full.toString();
+  // new URL("/v1/messages", base) replaces base's path entirely (URL spec).
+  // We need to append instead: base.path + incomingPath, normalizing slashes.
+  const basePath = base.pathname.replace(/\/+$/, "");
+  // Split off query string before path join to avoid encoding issues
+  const [pathOnly, queryString] = incomingPath.split("?", 2);
+  const resolvedPath = (basePath + pathOnly).replace(/\/+/g, "/");
+  base.pathname = resolvedPath;
+  if (queryString) base.search = "?" + queryString;
+  return base.toString();
 }
 
 export function buildOutboundHeaders(
