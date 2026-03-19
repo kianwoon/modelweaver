@@ -5,3 +5,4 @@ dist/
 .env
 *.log
 modelweaver.yaml
+gui/target/

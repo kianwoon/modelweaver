@@ -3,6 +3,8 @@ import { serve } from "@hono/node-server";
 import { createApp } from "./server.js";
 import { loadConfig } from "./config.js";
 import type { LogLevel } from "./logger.js";
+import { MetricsStore } from "./metrics.js";
+import { attachWebSocket } from "./ws.js";
 
 function parseArgs(argv: string[]): { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean } {
   const args: { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean } = { verbose: false, help: false, daemon: false, monitor: false };
@@ -76,7 +78,21 @@ async function main() {
   // Load .env file if present (created by modelweaver init)
   try {
     const dotenv = await import('dotenv');
-    dotenv.config();
+    const { existsSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const home = process.env.HOME || process.env.USERPROFILE || '';
+    // Try cwd/.env first, then ~/.modelweaver/.env, then ~/.env
+    const paths = [
+      join(process.cwd(), '.env'),
+      join(home, '.modelweaver', '.env'),
+      join(home, '.env'),
+    ];
+    for (const p of paths) {
+      if (existsSync(p)) {
+        dotenv.config({ path: p });
+        break;
+      }
+    }
   } catch {
     // dotenv not installed or .env not present — continue without it
   }
@@ -91,7 +107,7 @@ async function main() {
   // Handle 'start' subcommand
   if (process.argv[2] === 'start') {
     const { startDaemon } = await import('./daemon.js');
-    const result = startDaemon(args.config, args.port, args.verbose);
+    const result = await startDaemon(args.config, args.port, args.verbose);
     console.log(`  ${result.message}`);
     console.log(`  Log file: ${result.logPath}`);
     process.exit(result.success ? 0 : 1);
@@ -100,7 +116,7 @@ async function main() {
   // Handle 'stop' subcommand
   if (process.argv[2] === 'stop') {
     const { stopDaemon } = await import('./daemon.js');
-    const result = stopDaemon();
+    const result = await stopDaemon();
     console.log(`  ${result.message}`);
     process.exit(result.success ? 0 : 1);
   }
@@ -116,7 +132,7 @@ async function main() {
   // Handle 'remove' subcommand — stop + clean up PID and log files
   if (process.argv[2] === 'remove') {
     const { removeDaemon } = await import('./daemon.js');
-    const result = removeDaemon();
+    const result = await removeDaemon();
     console.log(`  ${result.message}`);
     process.exit(result.success ? 0 : 1);
   }
@@ -143,9 +159,12 @@ async function main() {
   const host = config.server.host;
   const logLevel: LogLevel = args.verbose ? "debug" : "info";
 
+  // Initialize metrics store
+  const metricsStore = new MetricsStore();
+
   // --- Monitor mode (spawns daemon child, auto-restarts on crash) ---
   if (args.monitor) {
-    const { fork } = await import('node:child_process');
+    const { spawn } = await import('node:child_process');
     const { writePidFile, removePidFile, removeWorkerPidFile, getLogPath } = await import('./daemon.js');
     const { dirname, join: pathJoin } = await import('node:path');
     const { fileURLToPath } = await import('node:url');
@@ -159,15 +178,15 @@ async function main() {
     const RATE_WINDOW_MS = 60_000;
     const RESTART_DELAY_MS = 2_000;
     let restartTimestamps: number[] = [];
-    let child: ReturnType<typeof fork> | null = null;
+    let child: ReturnType<typeof spawn> | null = null;
 
     function spawnDaemon(): void {
-      const childArgs: string[] = ["--daemon"];
+      const childArgs: string[] = [entryScript, "--daemon"];
       if (args.config) childArgs.push("--config", args.config);
       if (args.port) childArgs.push("--port", String(args.port));
       if (args.verbose) childArgs.push("--verbose");
 
-      child = fork(entryScript, childArgs, {
+      child = spawn(process.execPath, childArgs, {
         detached: true,
         stdio: "ignore",
         env: { ...process.env },
@@ -234,7 +253,7 @@ async function main() {
     process.stderr.write = logStream.write.bind(logStream) as typeof process.stderr.write;
 
     // Create app with mutable config
-    const handle = createApp(config, logLevel);
+    const handle = createApp(config, logLevel, metricsStore);
 
     // Hot-reload: watch config file for changes
     if (configPath) {
@@ -270,7 +289,8 @@ async function main() {
     });
 
     // Start server
-    serve({ fetch: handle.app.fetch, hostname: host, port });
+    const server = serve({ fetch: handle.app.fetch, hostname: host, port });
+    attachWebSocket(server as any, metricsStore);
 
     // Graceful shutdown
     const shutdown = () => {
@@ -285,7 +305,7 @@ async function main() {
   }
 
   // --- Foreground mode ---
-  const handle = createApp(config, logLevel);
+  const handle = createApp(config, logLevel, metricsStore);
 
   // Print startup info
   console.log(`\n  ModelWeaver v0.1.0`);
@@ -313,7 +333,8 @@ async function main() {
   }
 
   // Start server
-  serve({ fetch: handle.app.fetch, hostname: host, port });
+  const server = serve({ fetch: handle.app.fetch, hostname: host, port });
+  attachWebSocket(server as any, metricsStore);
 
   // Graceful shutdown
   const shutdown = () => {

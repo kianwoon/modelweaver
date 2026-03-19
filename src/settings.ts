@@ -13,7 +13,6 @@ export interface ClaudeSettings {
 
 export interface SettingsWriteOptions {
   baseUrl: string;       // e.g., "http://localhost:3456"
-  authToken: string;     // API key for the primary provider
   defaultModel?: string; // top-level model override
   tierModels?: {         // tier alias overrides
     sonnet?: string;
@@ -73,7 +72,6 @@ export function mergeSettings(
   // Our keys to set
   const envKeys: Record<string, string> = {
     ANTHROPIC_BASE_URL: options.baseUrl,
-    ANTHROPIC_AUTH_TOKEN: options.authToken,
   };
 
   for (const [key, value] of Object.entries(envKeys)) {

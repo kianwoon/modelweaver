@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>ModelWeaver</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Custom title bar -->
+    <div class="titlebar" data-tauri-drag-region>
+      <span class="title">ModelWeaver</span>
+      <div class="titlebar-buttons">
+        <button id="btn-minimize" class="titlebar-btn" title="Minimize">&#x2014;</button>
+        <button id="btn-close" class="titlebar-btn close-btn" title="Close">&#x2715;</button>
+      </div>
+    </div>
+
+    <!-- Connection status -->
+    <div id="status" class="status disconnected">
+      <span class="status-dot"></span>
+      <span class="status-text">Connecting...</span>
+      <span id="proxy-url" class="proxy-url">http://localhost:3456</span>
+      <span id="last-refresh" class="last-refresh"></span>
+    </div>
+
+    <!-- Stats overview -->
+    <div class="stats">
+      <div class="stat">
+        <span class="stat-value" id="stat-speed">--</span>
+        <span class="stat-label">tok/s</span>
+      </div>
+      <div class="stat">
+        <span class="stat-value" id="stat-requests">0</span>
+        <span class="stat-label">requests</span>
+      </div>
+      <div class="stat">
+        <span class="stat-value" id="stat-input-tokens">0</span>
+        <span class="stat-label">input</span>
+      </div>
+      <div class="stat">
+        <span class="stat-value" id="stat-output-tokens">0</span>
+        <span class="stat-label">output</span>
+      </div>
+    </div>
+
+    <!-- Active Models -->
+    <section class="section">
+      <h3 class="section-title">Active Models</h3>
+      <div id="models" class="section-content">
+        <div class="empty">No requests yet</div>
+      </div>
+    </section>
+
+    <!-- Providers -->
+    <section class="section">
+      <h3 class="section-title">Providers</h3>
+      <div id="providers" class="section-content">
+        <div class="empty">No requests yet</div>
+      </div>
+    </section>
+
+    <!-- Recent Requests -->
+    <section class="section">
+      <h3 class="section-title">Recent</h3>
+      <div id="recent" class="section-content recent-list">
+        <div class="empty">No requests yet</div>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
