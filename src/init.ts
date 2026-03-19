@@ -15,6 +15,7 @@ interface ConfiguredProvider {
   baseUrl: string;
   envKey: string;
   apiKey: string;
+  authType: "anthropic" | "bearer";
   models: Record<string, string>;
 }
 
@@ -54,7 +55,7 @@ export async function testApiKey(
       : { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' };
 
   try {
-    const res = await fetch(`${baseUrl}/v1/messages`, {
+    const res = await fetch(`${baseUrl}${preset.testPath}`, {
       method: 'POST',
       headers,
       body: JSON.stringify({ model: preset.models.sonnet, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
@@ -125,7 +126,7 @@ async function configureProvider(id: string): Promise<ConfiguredProvider | null>
   }
 
   check(`${preset.name} API key accepted`);
-  return { id, name: preset.name, baseUrl: baseUrl as string, envKey: preset.envKey, apiKey: apiKey as string, models: preset.models };
+  return { id, name: preset.name, baseUrl: baseUrl as string, envKey: preset.envKey, apiKey: apiKey as string, authType: preset.authType, models: preset.models };
 }
 
 async function configureRouting(providers: ConfiguredProvider[]): Promise<Record<string, RoutingTier[]>> {
@@ -208,11 +209,15 @@ function buildYamlConfig(
   };
 
   for (const p of providers) {
-    configObj.providers[p.id] = {
+    const providerConfig: Record<string, unknown> = {
       baseUrl: p.baseUrl,
       apiKey: `\${${p.envKey}}`,
       timeout: 30000,
     };
+    if (p.authType === "bearer") {
+      providerConfig.authType = "bearer";
+    }
+    configObj.providers[p.id] = providerConfig;
   }
 
   return stringifyYaml(configObj);

@@ -10,8 +10,8 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 // ---------------------------------------------------------------------------
 
 describe('presets', () => {
-  it('getPresets returns 5 presets', () => {
-    expect(getPresets()).toHaveLength(5);
+  it('getPresets returns 4 presets', () => {
+    expect(getPresets()).toHaveLength(4);
   });
 
   it('each preset has required fields and model tiers', () => {
@@ -21,6 +21,8 @@ describe('presets', () => {
       expect(p.baseUrl).toBeDefined();
       expect(p.envKey).toBeDefined();
       expect(['anthropic', 'bearer']).toContain(p.authType);
+      expect(p.testPath).toBeDefined();
+      expect(p.testPath).toMatch(/^\//);
       expect(p.models.sonnet).toBeDefined();
       expect(p.models.opus).toBeDefined();
       expect(p.models.haiku).toBeDefined();
@@ -118,6 +120,17 @@ describe('testApiKey', () => {
     await testApiKey('https://api.example.com', 'key', anthropic);
     const [, options] = fetchMock.mock.calls[0];
     expect(options.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it('uses preset.testPath in the request URL', async () => {
+    fetchMock = vi.fn().mockResolvedValue({ status: 200 });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await testApiKey('https://api.example.com', 'key', openrouter);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://api.example.com/v1/chat/completions',
+      expect.any(Object),
+    );
   });
 });
 

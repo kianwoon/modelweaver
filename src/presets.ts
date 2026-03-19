@@ -13,6 +13,8 @@ export interface ProviderPreset {
   envKey: string;
   /** How to send the API key */
   authType: "bearer" | "anthropic";
+  /** API endpoint path used for key validation */
+  testPath: string;
   models: {
     sonnet: string;
     opus: string;
@@ -27,6 +29,7 @@ const PRESETS: ProviderPreset[] = [
     baseUrl: "https://api.anthropic.com",
     envKey: "ANTHROPIC_API_KEY",
     authType: "anthropic",
+    testPath: "/v1/messages",
     models: {
       sonnet: "claude-sonnet-4-20250514",
       opus: "claude-opus-4-20250514",
@@ -39,6 +42,7 @@ const PRESETS: ProviderPreset[] = [
     baseUrl: "https://openrouter.ai/api",
     envKey: "OPENROUTER_API_KEY",
     authType: "bearer",
+    testPath: "/v1/chat/completions",
     models: {
       sonnet: "anthropic/claude-sonnet-4",
       opus: "anthropic/claude-opus-4",
@@ -51,22 +55,11 @@ const PRESETS: ProviderPreset[] = [
     baseUrl: "https://api.together.xyz",
     envKey: "TOGETHER_API_KEY",
     authType: "bearer",
+    testPath: "/v1/chat/completions",
     models: {
       sonnet: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
       opus: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
       haiku: "meta-llama/Llama-3.3-70B-Instruct-Turbo",
-    },
-  },
-  {
-    id: "vertex",
-    name: "Google Vertex",
-    baseUrl: "https://aiplatform.googleapis.com",
-    envKey: "GOOGLE_APPLICATION_CREDENTIALS",
-    authType: "bearer",
-    models: {
-      sonnet: "claude-sonnet-4@vertex",
-      opus: "claude-opus-4@vertex",
-      haiku: "claude-haiku-4@vertex",
     },
   },
   {
@@ -75,6 +68,7 @@ const PRESETS: ProviderPreset[] = [
     baseUrl: "https://api.fireworks.ai/inference/v1",
     envKey: "FIREWORKS_API_KEY",
     authType: "bearer",
+    testPath: "/v1/chat/completions",
     models: {
       sonnet: "accounts/fireworks/models/claude-sonnet-4",
       opus: "accounts/fireworks/models/claude-opus-4",
