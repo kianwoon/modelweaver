@@ -14,7 +14,9 @@ export function isRetriable(status: number): boolean {
 }
 
 export function buildOutboundUrl(baseUrl: string, incomingPath: string): string {
-  return `${baseUrl}${incomingPath}`;
+  const base = new URL(baseUrl);
+  const full = new URL(incomingPath, base);
+  return full.toString();
 }
 
 export function buildOutboundHeaders(
@@ -30,8 +32,12 @@ export function buildOutboundHeaders(
     if (value) headers.set(name, value);
   }
 
-  // Rewrite headers
-  headers.set("x-api-key", provider.apiKey);
+  // Rewrite auth headers based on provider authType
+  if (provider.authType === "bearer") {
+    headers.set("Authorization", `Bearer ${provider.apiKey}`);
+  } else {
+    headers.set("x-api-key", provider.apiKey);
+  }
   headers.set("x-request-id", requestId);
 
   // Set host to provider hostname
@@ -150,11 +156,16 @@ export async function forwardWithFallback(
       return response;
     }
 
-    // Retriable error — try next provider
+    // Retriable error — drain body to prevent connection leak, then try next provider
+    await response.body?.cancel();
     continue;
   }
 
-  // All providers exhausted
+  // All providers exhausted — return the last real error response if available
+  if (lastResponse) {
+    return lastResponse;
+  }
+
   return new Response(
     JSON.stringify({
       type: "error",

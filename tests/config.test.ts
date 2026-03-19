@@ -175,4 +175,87 @@ tierPatterns:
     expect(config.server.host).toBe("localhost");
     delete process.env.KEY;
   });
+
+  it("defaults authType to anthropic when not specified", () => {
+    process.env.KEY = "sk-123";
+    writeTestConfig(`
+server:
+  port: 8080
+providers:
+  p:
+    baseUrl: https://example.com
+    apiKey: \${KEY}
+routing:
+  t:
+    - provider: p
+tierPatterns:
+  t: ["t"]
+`);
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.providers.get("p")?.authType).toBe("anthropic");
+    delete process.env.KEY;
+  });
+
+  it("accepts authType bearer when specified", () => {
+    process.env.KEY = "sk-123";
+    writeTestConfig(`
+server:
+  port: 8080
+providers:
+  p:
+    baseUrl: https://openrouter.ai/api
+    apiKey: \${KEY}
+    authType: bearer
+routing:
+  t:
+    - provider: p
+tierPatterns:
+  t: ["t"]
+`);
+
+    const { config } = loadConfig(TEST_DIR);
+    expect(config.providers.get("p")?.authType).toBe("bearer");
+    delete process.env.KEY;
+  });
+
+  it("rejects baseUrl with non-http scheme", () => {
+    process.env.KEY = "sk-123";
+    writeTestConfig(`
+server:
+  port: 8080
+providers:
+  p:
+    baseUrl: file:///etc/passwd
+    apiKey: \${KEY}
+routing:
+  t:
+    - provider: p
+tierPatterns:
+  t: ["t"]
+`);
+
+    expect(() => loadConfig(TEST_DIR)).toThrow(/baseUrl must use http/);
+    delete process.env.KEY;
+  });
+
+  it("rejects baseUrl with ftp scheme", () => {
+    process.env.KEY = "sk-123";
+    writeTestConfig(`
+server:
+  port: 8080
+providers:
+  p:
+    baseUrl: ftp://evil.com
+    apiKey: \${KEY}
+routing:
+  t:
+    - provider: p
+tierPatterns:
+  t: ["t"]
+`);
+
+    expect(() => loadConfig(TEST_DIR)).toThrow(/baseUrl must use http/);
+    delete process.env.KEY;
+  });
 });

@@ -3,6 +3,7 @@ export interface ProviderConfig {
   baseUrl: string;
   apiKey: string;
   timeout: number;
+  authType?: "anthropic" | "bearer";
 }
 
 export interface RoutingEntry {

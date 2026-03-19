@@ -38,6 +38,19 @@ describe("buildOutboundHeaders", () => {
     expect(headers.get("x-api-key")).toBe("sk-test");
   });
 
+  it("uses Authorization: Bearer when authType is bearer", () => {
+    const bearerProvider: ProviderConfig = {
+      name: "bearer-test",
+      baseUrl: "https://openrouter.ai/api",
+      apiKey: "sk-or-123",
+      timeout: 30000,
+      authType: "bearer",
+    };
+    const headers = buildOutboundHeaders(new Headers(), bearerProvider, "req-456");
+    expect(headers.get("Authorization")).toBe("Bearer sk-or-123");
+    expect(headers.get("x-api-key")).toBeNull();
+  });
+
   it("adds x-request-id", () => {
     const headers = buildOutboundHeaders(new Headers(), provider, "req-123");
     expect(headers.get("x-request-id")).toBe("req-123");

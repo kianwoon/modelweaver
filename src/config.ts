@@ -8,9 +8,13 @@ import type { AppConfig, ProviderConfig, RoutingEntry, ServerConfig } from "./ty
 // --- Zod schemas for raw (pre-resolution) config ---
 
 const providerSchema = z.object({
-  baseUrl: z.string().url(),
+  baseUrl: z.string().url().refine(
+    (url) => /^https?:\/\//.test(url),
+    "baseUrl must use http:// or https://"
+  ),
   apiKey: z.string().min(1, "apiKey is required"),
   timeout: z.number().default(30000),
+  authType: z.enum(["anthropic", "bearer"]).default("anthropic"),
 });
 
 const routingEntrySchema = z.object({
@@ -134,6 +138,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
       baseUrl: p.baseUrl,
       apiKey: p.apiKey,
       timeout: p.timeout,
+      authType: p.authType,
     });
   }
 

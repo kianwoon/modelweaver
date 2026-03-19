@@ -81,7 +81,7 @@ describe("server", () => {
     expect(json.error.type).toBe("invalid_request_error");
   });
 
-  it("returns 502 with overloaded_error when all providers fail", async () => {
+  it("returns actual provider error status when all providers fail", async () => {
     mock.setBehavior("error-500");
     const config = makeConfig({
       providers: new Map([
@@ -103,7 +103,8 @@ describe("server", () => {
       })
     );
 
-    expect(res.status).toBe(502);
+    // When all providers are exhausted, the last real error response is returned (500)
+    expect(res.status).toBe(500);
   });
 
   it("adds x-request-id to response headers", async () => {
