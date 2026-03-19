@@ -4,3 +4,4 @@ dist/
 *.tmp-config-test/
 .env
 *.log
+modelweaver.yaml
