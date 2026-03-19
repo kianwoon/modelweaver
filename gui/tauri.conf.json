@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "identifier": "com.modelweaver.gui",
   "build": {
-    "frontendDist": "../gui/frontend"
+    "frontendDist": "./frontend"
   },
   "app": {
     "withGlobalTauri": true,

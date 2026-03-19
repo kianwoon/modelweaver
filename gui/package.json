@@ -1,10 +1,13 @@
 {
   "name": "gui",
   "version": "1.0.0",
-  "description": "",
+  "description": "ModelWeaver GUI",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "dev": "npm run tauri dev",
+    "build": "npm run tauri build",
+    "icons": "npm run tauri icons",
+    "tauri": "tauri"
   },
   "keywords": [],
   "author": "",
@@ -12,5 +15,8 @@
   "type": "commonjs",
   "dependencies": {
     "@tauri-apps/api": "^2.10.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2"
   }
 }

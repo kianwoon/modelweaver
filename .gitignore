@@ -6,3 +6,4 @@ dist/
 *.log
 modelweaver.yaml
 gui/target/
+gui/node_modules/

@@ -6,8 +6,8 @@ import type { LogLevel } from "./logger.js";
 import { MetricsStore } from "./metrics.js";
 import { attachWebSocket } from "./ws.js";
 
-function parseArgs(argv: string[]): { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean } {
-  const args: { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean } = { verbose: false, help: false, daemon: false, monitor: false };
+function parseArgs(argv: string[]): { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean; gui: boolean } {
+  const args: { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean; gui: boolean } = { verbose: false, help: false, daemon: false, monitor: false, gui: false };
   for (let i = 2; i < argv.length; i++) {
     switch (argv[i]) {
       case "-p":
@@ -59,6 +59,7 @@ Commands:
   stop                    Stop background daemon
   status                  Show daemon status
   remove                  Stop daemon and remove PID + log files
+  gui                     Launch the GUI (downloads if needed)
 
 Options:
   -p, --port <number>      Server port                    (default: from config)
@@ -135,6 +136,13 @@ async function main() {
     const result = await removeDaemon();
     console.log(`  ${result.message}`);
     process.exit(result.success ? 0 : 1);
+  }
+
+  // Handle 'gui' subcommand
+  if (process.argv[2] === 'gui') {
+    const { launchGui } = await import('./gui-launcher.js');
+    await launchGui();
+    process.exit(0);
   }
 
   if (args.help) {
