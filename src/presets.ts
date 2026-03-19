@@ -63,6 +63,32 @@ const PRESETS: ProviderPreset[] = [
     },
   },
   {
+    id: "glm",
+    name: "GLM (Z.ai)",
+    baseUrl: "https://api.z.ai/api/anthropic",
+    envKey: "GLM_API_KEY",
+    authType: "anthropic",
+    testPath: "/v1/messages",
+    models: {
+      sonnet: "claude-sonnet-4-20250514",
+      opus: "claude-opus-4-20250514",
+      haiku: "claude-haiku-4-5-20251001",
+    },
+  },
+  {
+    id: "minimax",
+    name: "Minimax",
+    baseUrl: "https://api.minimax.io/anthropic",
+    envKey: "MINIMAX_API_KEY",
+    authType: "anthropic",
+    testPath: "/v1/messages",
+    models: {
+      sonnet: "claude-sonnet-4-20250514",
+      opus: "claude-opus-4-20250514",
+      haiku: "claude-haiku-4-5-20251001",
+    },
+  },
+  {
     id: "fireworks",
     name: "Fireworks",
     baseUrl: "https://api.fireworks.ai/inference/v1",

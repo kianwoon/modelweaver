@@ -10,8 +10,8 @@ import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
 // ---------------------------------------------------------------------------
 
 describe('presets', () => {
-  it('getPresets returns 4 presets', () => {
-    expect(getPresets()).toHaveLength(4);
+  it('getPresets returns 6 presets', () => {
+    expect(getPresets()).toHaveLength(6);
   });
 
   it('each preset has required fields and model tiers', () => {
