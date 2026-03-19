@@ -64,9 +64,13 @@ export async function forwardRequest(
   const contentType = incomingRequest.headers.get("content-type") || "";
 
   if (contentType.includes("application/json") && entry.model) {
-    const parsed = JSON.parse(ctx.rawBody);
-    parsed.model = entry.model;
-    body = JSON.stringify(parsed);
+    try {
+      const parsed = JSON.parse(ctx.rawBody);
+      parsed.model = entry.model;
+      body = JSON.stringify(parsed);
+    } catch {
+      // If body can't be parsed, send it as-is without model override
+    }
   }
 
   const headers = buildOutboundHeaders(incomingRequest.headers, provider, ctx.requestId);

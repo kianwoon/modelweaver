@@ -309,6 +309,19 @@ export async function runInit(): Promise<void> {
 
   // Step 7 — Write files
   const configPath = join(process.cwd(), 'modelweaver.yaml');
+  if (existsSync(configPath)) {
+    console.log(`\n  ⚠  Warning: ${configPath} already exists and will be overwritten.\n`);
+    const { overwrite } = await prompts({
+      type: 'confirm',
+      name: 'overwrite',
+      message: 'Overwrite existing config?',
+      initial: false,
+    }, { onCancel: () => { console.log('\n  Setup cancelled. No files were changed.'); process.exit(0); } });
+    if (!overwrite) {
+      console.log('\n  Setup cancelled. No files were changed.');
+      process.exit(0);
+    }
+  }
   writeFileSync(configPath, yaml);
   writeEnvFile(configured);
 

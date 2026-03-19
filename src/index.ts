@@ -10,11 +10,21 @@ function parseArgs(argv: string[]): { port?: number; config?: string; verbose: b
     switch (argv[i]) {
       case "-p":
       case "--port":
-        args.port = parseInt(argv[++i], 10);
+        const portStr = argv[++i];
+        if (!portStr || isNaN(parseInt(portStr, 10))) {
+          console.error("Error: -p/--port requires a number");
+          process.exit(1);
+        }
+        args.port = parseInt(portStr, 10);
         break;
       case "-c":
       case "--config":
-        args.config = argv[++i];
+        const configPath = argv[++i];
+        if (!configPath) {
+          console.error("Error: -c/--config requires a path");
+          process.exit(1);
+        }
+        args.config = configPath;
         break;
       case "-v":
       case "--verbose":
@@ -52,6 +62,14 @@ Config locations (first found wins):
 
 async function main() {
   const args = parseArgs(process.argv);
+
+  // Load .env file if present (created by modelweaver init)
+  try {
+    const dotenv = await import('dotenv');
+    dotenv.config();
+  } catch {
+    // dotenv not installed or .env not present — continue without it
+  }
 
   // Handle 'init' subcommand — dynamic import to avoid loading prompts for normal startup
   if (process.argv[2] === 'init') {
