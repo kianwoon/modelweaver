@@ -1,0 +1,48 @@
+# CI workflow for ModelWeaver
+# Runs type checking, build, and tests across supported Node.js versions.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    name: Node.js ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version: [18, 20, 22]
+
+    steps:
+      # - Checkout repository code
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # - Setup Node.js with npm caching for faster installs
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      # - Install dependencies (clean install for CI)
+      - name: Install dependencies
+        run: npm ci
+
+      # - Type check without emitting output
+      - name: Type check
+        run: npx tsc --noEmit
+
+      # - Build the project (tsup)
+      - name: Build
+        run: npm run build
+
+      # - Run the test suite (vitest)
+      - name: Test
+        run: npm test

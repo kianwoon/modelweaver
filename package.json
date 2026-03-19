@@ -5,7 +5,8 @@
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "modelweaver": "dist/index.js"
+    "modelweaver": "dist/index.js",
+    "mw": "dist/index.js"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
@@ -18,14 +19,16 @@
     "@hono/node-server": "^1.13.0",
     "yaml": "^2.7.0",
     "zod": "^3.24.0",
-    "dotenv": "^16.4.0"
+    "dotenv": "^16.4.0",
+    "prompts": "^2.4.1"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
     "tsx": "^4.19.0",
     "tsup": "^8.3.0",
     "vitest": "^3.0.0",
-    "@types/node": "^22.0.0"
+    "@types/node": "^22.0.0",
+    "@types/prompts": "^2.4.9"
   },
   "engines": {
     "node": ">=18"

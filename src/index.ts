@@ -33,7 +33,10 @@ function printHelp() {
   console.log(`
 ModelWeaver — Multi-provider model orchestration proxy for Claude Code
 
-Usage: modelweaver [options]
+Usage: modelweaver [command] [options]
+
+Commands:
+  init                    Run interactive setup wizard
 
 Options:
   -p, --port <number>      Server port                    (default: from config)
@@ -47,8 +50,15 @@ Config locations (first found wins):
 `);
 }
 
-function main() {
+async function main() {
   const args = parseArgs(process.argv);
+
+  // Handle 'init' subcommand — dynamic import to avoid loading prompts for normal startup
+  if (process.argv[2] === 'init') {
+    const { runInit } = await import('./init.js');
+    await runInit();
+    process.exit(0);
+  }
 
   if (args.help) {
     printHelp();

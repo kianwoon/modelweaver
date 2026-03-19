@@ -15,6 +15,20 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
               Falls back on error
 ```
 
+## Interactive Setup
+
+The fastest way to get started — run the setup wizard:
+
+```bash
+npx modelweaver init
+```
+
+The wizard guides you through:
+- Selecting and configuring providers (Anthropic, OpenRouter, Together AI, Google Vertex, Fireworks)
+- Testing API keys to verify connectivity
+- Setting up model routing (sonnet, opus, haiku tiers)
+- Generating `modelweaver.yaml` and `.env` files
+
 ## Quick Start
 
 ### 1. Create a config file
