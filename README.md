@@ -8,7 +8,8 @@
 
 Multi-provider model orchestration proxy for Claude Code. Route different agent roles (planning, coding, research, review) to different model providers with automatic fallback, exact model routing, config hot-reload, and crash recovery.
 
-<img width="357" height="476" alt="Screenshot 2026-03-20 at 4 13 13 AM" src="https://github.com/user-attachments/assets/94293920-d9ee-481d-87f7-2f4ca506a162" />
+
+<img width="358" height="479" alt="Screenshot 2026-03-20 at 5 11 55 AM" src="https://github.com/user-attachments/assets/a973a707-0cd7-4701-8d19-f6cd028f6c56" />
 
 
 ## How It Works
