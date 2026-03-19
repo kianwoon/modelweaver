@@ -1,0 +1,137 @@
+// tests/proxy.test.ts
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { createMockProvider } from "./helpers/mock-provider.js";
+import { forwardRequest, isRetriable, buildOutboundUrl, buildOutboundHeaders } from "../src/proxy.js";
+import type { RoutingEntry, ProviderConfig, RequestContext } from "../src/types.js";
+
+describe("isRetriable", () => {
+  it("429 is retriable", () => expect(isRetriable(429)).toBe(true));
+  it("500 is retriable", () => expect(isRetriable(500)).toBe(true));
+  it("502 is retriable", () => expect(isRetriable(502)).toBe(true));
+  it("503 is retriable", () => expect(isRetriable(503)).toBe(true));
+  it("400 is not retriable", () => expect(isRetriable(400)).toBe(false));
+  it("401 is not retriable", () => expect(isRetriable(401)).toBe(false));
+  it("403 is not retriable", () => expect(isRetriable(403)).toBe(false));
+});
+
+describe("buildOutboundUrl", () => {
+  it("appends incoming path to provider baseUrl", () => {
+    expect(buildOutboundUrl("https://api.example.com", "/v1/messages?foo=bar"))
+      .toBe("https://api.example.com/v1/messages?foo=bar");
+  });
+});
+
+describe("buildOutboundHeaders", () => {
+  const provider: ProviderConfig = {
+    name: "test",
+    baseUrl: "https://api.example.com",
+    apiKey: "sk-test",
+    timeout: 30000,
+  };
+
+  it("rewrites x-api-key to provider key", () => {
+    const headers = buildOutboundHeaders(
+      new Headers({ "x-api-key": "original-key", "anthropic-version": "2023-06-01" }),
+      provider,
+      "req-123"
+    );
+    expect(headers.get("x-api-key")).toBe("sk-test");
+  });
+
+  it("adds x-request-id", () => {
+    const headers = buildOutboundHeaders(new Headers(), provider, "req-123");
+    expect(headers.get("x-request-id")).toBe("req-123");
+  });
+
+  it("rewrites host header to provider hostname", () => {
+    const headers = buildOutboundHeaders(
+      new Headers({ host: "localhost:3456" }),
+      provider,
+      "req-123"
+    );
+    expect(headers.get("host")).toBe("api.example.com");
+  });
+
+  it("forwards anthropic-version as-is", () => {
+    const headers = buildOutboundHeaders(
+      new Headers({ "anthropic-version": "2023-06-01" }),
+      provider,
+      "req-123"
+    );
+    expect(headers.get("anthropic-version")).toBe("2023-06-01");
+  });
+});
+
+describe("forwardRequest (integration)", () => {
+  let mock: ReturnType<typeof createMockProvider>;
+
+  beforeEach(async () => {
+    mock = createMockProvider();
+  });
+
+  afterEach(async () => {
+    await mock.close();
+  });
+
+  it("streams successful response from provider", async () => {
+    const provider: ProviderConfig = {
+      name: "mock",
+      baseUrl: mock.url,
+      apiKey: "sk-test",
+      timeout: 5000,
+    };
+    const entry: RoutingEntry = { provider: "mock" };
+    const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
+    const ctx: RequestContext = {
+      requestId: "test-123",
+      model: "claude-sonnet-4",
+      tier: "sonnet",
+      providerChain: [entry],
+      startTime: Date.now(),
+      rawBody: body,
+    };
+
+    const result = await forwardRequest(provider, entry, ctx, new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "anthropic-version": "2023-06-01" },
+      body,
+    }));
+
+    expect(result.status).toBe(200);
+    expect(result.headers.get("content-type")).toContain("text/event-stream");
+
+    // Verify SSE events
+    const text = await result.text();
+    expect(text).toContain("message_start");
+    expect(text).toContain("Hello from mock provider");
+    expect(text).toContain("message_stop");
+  });
+
+  it("returns error response for non-retriable status", async () => {
+    mock.setBehavior("error-401");
+    const provider: ProviderConfig = {
+      name: "mock",
+      baseUrl: mock.url,
+      apiKey: "sk-test",
+      timeout: 5000,
+    };
+    const entry: RoutingEntry = { provider: "mock" };
+    const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
+    const ctx: RequestContext = {
+      requestId: "test-401",
+      model: "claude-sonnet-4",
+      tier: "sonnet",
+      providerChain: [entry],
+      startTime: Date.now(),
+      rawBody: body,
+    };
+
+    const result = await forwardRequest(provider, entry, ctx, new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    }));
+
+    expect(result.status).toBe(401);
+  });
+});
