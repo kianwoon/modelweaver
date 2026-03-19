@@ -2,6 +2,7 @@
 
 [![CI](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml)
+[![Release](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub stars](https://img.shields.io/github/stars/kianwoon/modelweaver?style=social)](https://github.com/kianwoon/modelweaver/stargazers)
 
@@ -37,6 +38,7 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 - **Per-provider timeouts** — configurable timeout with AbortController
 - **Structured logging** — JSON logs with request IDs for tracing
 - **Env var substitution** — config references like `${API_KEY}` resolved from environment
+- **Desktop GUI** — native app with one-command launch (`modelweaver gui`), auto-downloads from GitHub Releases
 
 ## Quick Start
 
@@ -78,6 +80,7 @@ npx modelweaver start             # Start as background daemon
 npx modelweaver stop              # Stop background daemon
 npx modelweaver status            # Show daemon status
 npx modelweaver remove            # Stop daemon + remove PID and log files
+npx modelweaver gui               # Launch desktop GUI (auto-downloads binary)
 npx modelweaver [options]         # Run in foreground
 ```
 
@@ -112,6 +115,27 @@ modelweaver.pid        → Monitor process (handles signals, watches child)
 - `~/.modelweaver/modelweaver.pid` — monitor PID
 - `~/.modelweaver/modelweaver.worker.pid` — worker PID
 - `~/.modelweaver/modelweaver.log` — daemon output log
+
+## Desktop GUI
+
+ModelWeaver ships a native desktop GUI built with Tauri. No Rust toolchain needed — the binary is auto-downloaded from GitHub Releases.
+
+```bash
+npx modelweaver gui
+```
+
+First run downloads the latest binary for your platform (~10-30 MB). Subsequent launches use the cached version.
+
+**Supported platforms:**
+
+| Platform | Format |
+|---|---|
+| macOS (Apple Silicon) | `.dmg` |
+| macOS (Intel) | `.dmg` |
+| Linux (x86_64) | `.AppImage` |
+| Windows (x86_64) | `.msi` |
+
+**Cached files** are stored in `~/.modelweaver/gui/` with version tracking — new versions download automatically on the next `gui` launch.
 
 ## Configuration
 
