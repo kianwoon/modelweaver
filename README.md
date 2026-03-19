@@ -5,103 +5,61 @@
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub stars](https://img.shields.io/github/stars/kianwoon/modelweaver?style=social)](https://github.com/kianwoon/modelweaver/stargazers)
 
-Multi-provider model orchestration proxy for Claude Code. Route different agent roles (planning, coding, research, review) to different model providers based on what each model does best.
+Multi-provider model orchestration proxy for Claude Code. Route different agent roles (planning, coding, research, review) to different model providers with automatic fallback, exact model routing, config hot-reload, and crash recovery.
 
 ## How It Works
 
-ModelWeaver sits between Claude Code and upstream model providers as a local HTTP proxy. It inspects the `model` field in each Anthropic Messages API request, matches it to an agent tier (sonnet/opus/haiku), and routes to the best-fit provider with automatic fallback on failure.
+ModelWeaver sits between Claude Code and upstream model providers as a local HTTP proxy. It inspects the `model` field in each Anthropic Messages API request and routes it to the best-fit provider.
 
 ```
 Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
                    (localhost)   ──→  OpenRouter (fallback)
                    │
-              Inspects model field
-              Routes by tier
-              Falls back on error
+              1. Match exact model name (modelRouting)
+              2. Match tier via substring (tierPatterns)
+              3. Fallback on 429 / 5xx errors
 ```
 
-## Interactive Setup
+## Features
 
-The fastest way to get started — run the setup wizard:
+- **Tier-based routing** — route by model family (sonnet/opus/haiku) using substring pattern matching
+- **Exact model routing** — route specific model names to dedicated providers (checked first)
+- **Automatic fallback** — transparent failover on rate limits (429) and server errors (5xx)
+- **Model name rewriting** — each provider in the chain can use a different model name
+- **Interactive setup wizard** — guided configuration with API key validation
+- **Config hot-reload** — changes to config file are picked up automatically, no restart needed
+- **Daemon mode** — run as a background process with start/stop/status/remove commands
+- **Crash recovery** — auto-restarts on crash with rate limiting (max 5 restarts/60s)
+- **Multiple auth types** — supports `x-api-key` (Anthropic) and `Bearer` token auth
+- **Per-provider timeouts** — configurable timeout with AbortController
+- **Structured logging** — JSON logs with request IDs for tracing
+- **Env var substitution** — config references like `${API_KEY}` resolved from environment
+
+## Quick Start
+
+### 1. Run the setup wizard
 
 ```bash
 npx modelweaver init
 ```
 
 The wizard guides you through:
-- Selecting and configuring providers (Anthropic, OpenRouter, Together AI, Google Vertex, Fireworks)
+- Selecting from 6 preset providers (Anthropic, OpenRouter, Together AI, GLM/Z.ai, Minimax, Fireworks)
 - Testing API keys to verify connectivity
-- Setting up model routing (sonnet, opus, haiku tiers)
-- Generating `modelweaver.yaml` and `.env` files
+- Setting up model routing tiers
+- Auto-configuring `~/.claude/settings.json` for Claude Code integration
 
-## Quick Start
-
-### 1. Create a config file
+### 2. Start ModelWeaver
 
 ```bash
-cp modelweaver.example.yaml modelweaver.yaml
-```
-
-```yaml
-server:
-  port: 3456
-
-providers:
-  anthropic:
-    baseUrl: https://api.anthropic.com
-    apiKey: ${ANTHROPIC_API_KEY}
-  openrouter:
-    baseUrl: https://openrouter.ai/api
-    apiKey: ${OPENROUTER_API_KEY}
-
-routing:
-  sonnet:
-    - provider: anthropic
-      model: claude-sonnet-4-20250514
-    - provider: openrouter
-      model: anthropic/claude-sonnet-4
-  opus:
-    - provider: anthropic
-      model: claude-opus-4-20250514
-    - provider: openrouter
-      model: anthropic/claude-opus-4
-  haiku:
-    - provider: anthropic
-      model: claude-haiku-4-5-20251001
-    - provider: openrouter
-      model: anthropic/claude-haiku-4
-
-tierPatterns:
-  sonnet: ["sonnet", "3-5-sonnet", "3.5-sonnet"]
-  opus: ["opus", "3-opus", "3.5-opus"]
-  haiku: ["haiku", "3-haiku", "3.5-haiku"]
-```
-
-### 2. Set provider API keys
-
-```bash
-export ANTHROPIC_API_KEY=sk-ant-...
-export OPENROUTER_API_KEY=sk-or-...
-```
-
-### 3. Start ModelWeaver
-
-```bash
+# Foreground (see logs in terminal)
 npx modelweaver
+
+# Background daemon (auto-restarts on crash)
+npx modelweaver start
 ```
 
-```
-ModelWeaver v0.1.0
-Config: ./modelweaver.yaml
-Listening: http://localhost:3456
-
-Routes:
-  sonnet   → anthropic (primary), openrouter (fallback)
-  opus     → anthropic (primary), openrouter (fallback)
-  haiku    → anthropic (primary), openrouter (fallback)
-```
-
-### 4. Point Claude Code to ModelWeaver
+### 3. Point Claude Code to ModelWeaver
 
 ```bash
 export ANTHROPIC_BASE_URL=http://localhost:3456
@@ -109,37 +67,140 @@ export ANTHROPIC_API_KEY=unused-but-required
 claude
 ```
 
-## CLI Options
+## CLI Commands
+
+```bash
+npx modelweaver init              # Interactive setup wizard
+npx modelweaver start             # Start as background daemon
+npx modelweaver stop              # Stop background daemon
+npx modelweaver status            # Show daemon status
+npx modelweaver remove            # Stop daemon + remove PID and log files
+npx modelweaver [options]         # Run in foreground
+```
+
+### CLI Options
 
 ```
-npx modelweaver [options]
-
-  -p, --port <number>      Server port                    (default: 3456)
+  -p, --port <number>      Server port                    (default: from config)
   -c, --config <path>      Config file path               (auto-detected)
   -v, --verbose            Enable debug logging           (default: off)
   -h, --help               Show help
 ```
 
+## Daemon Mode
+
+Run ModelWeaver as a background process that survives terminal closure and auto-recovers from crashes.
+
+```bash
+npx modelweaver start             # Start (forks monitor + daemon)
+npx modelweaver status            # Check if running
+npx modelweaver stop               # Graceful stop (SIGTERM → SIGKILL after 5s)
+npx modelweaver remove             # Stop + remove PID file + log file
+```
+
+**How it works**: `start` forks a lightweight monitor process that owns the PID file. The monitor spawns the actual daemon worker. If the worker crashes, the monitor auto-restarts it after a 2-second delay (up to 5 restarts per 60-second window to prevent crash loops).
+
+```
+modelweaver.pid        → Monitor process (handles signals, watches child)
+  └── modelweaver.worker.pid → Daemon worker (runs HTTP server)
+```
+
+**Files**:
+- `~/.modelweaver/modelweaver.pid` — monitor PID
+- `~/.modelweaver/modelweaver.worker.pid` — worker PID
+- `~/.modelweaver/modelweaver.log` — daemon output log
+
 ## Configuration
 
-### Config File Locations
+### Config file locations
 
 Checked in order (first found wins):
 1. `./modelweaver.yaml` (project-local)
 2. `~/.modelweaver/config.yaml` (user-global)
 
-### Routing
+### Full config schema
 
-Each model name is matched against `tierPatterns` using case-sensitive substring matching. The first tier whose patterns contain a match wins. The ordered list under that tier defines the provider fallback chain.
+```yaml
+server:
+  port: 3456                  # Server port          (default: 3456)
+  host: localhost             # Bind address         (default: localhost)
 
-- **Provider chain order matters** — first provider is primary, rest are fallbacks
-- **Model override** — use the `model` field to rewrite the model name per provider (different providers may use different model names)
-- **Fallback triggers** — 429 (rate limit) and 5xx errors
-- **No fallback on** — 4xx errors (bad request, auth failure, forbidden)
+providers:
+  anthropic:
+    baseUrl: https://api.anthropic.com
+    apiKey: ${ANTHROPIC_API_KEY}  # Env var substitution
+    timeout: 30000                # Request timeout in ms  (default: 30000)
+    authType: anthropic           # "anthropic" | "bearer"  (default: anthropic)
+  openrouter:
+    baseUrl: https://openrouter.ai/api
+    apiKey: ${OPENROUTER_API_KEY}
+    authType: bearer
+    timeout: 60000
 
-### API Keys
+# Tier-based routing (substring pattern matching)
+routing:
+  sonnet:
+    - provider: anthropic
+      model: claude-sonnet-4-20250514      # Optional: rewrite model name
+    - provider: openrouter
+      model: anthropic/claude-sonnet-4      # Fallback
+  opus:
+    - provider: anthropic
+      model: claude-opus-4-20250514
+  haiku:
+    - provider: anthropic
+      model: claude-haiku-4-5-20251001
 
-API keys are stored as environment variables only. Config references them with `${VAR_NAME}` syntax. ModelWeaver validates all keys are set on startup and fails fast if any are missing.
+# Pattern matching: model name includes any string → matched to tier
+tierPatterns:
+  sonnet: ["sonnet", "3-5-sonnet", "3.5-sonnet"]
+  opus: ["opus", "3-opus", "3.5-opus"]
+  haiku: ["haiku", "3-haiku", "3.5-haiku"]
+
+# Exact model name routing (checked FIRST, before tier patterns)
+modelRouting:
+  "glm-5-turbo":
+    - provider: anthropic               # Route to specific provider
+  "MiniMax-M2.7":
+    - provider: openrouter
+      model: minimax/MiniMax-M2.7        # With model name rewrite
+```
+
+### Routing priority
+
+1. **Exact model name** (`modelRouting`) — if the request model matches exactly, use that route
+2. **Tier pattern** (`tierPatterns` + `routing`) — substring match the model name against patterns, then use the tier's provider chain
+3. **No match** — returns 502 with a descriptive error listing configured tiers and model routes
+
+### Provider chain behavior
+
+- **First provider is primary**, rest are fallbacks
+- **Fallback triggers** on: 429 (rate limit), 5xx (server error), network timeout
+- **No fallback on**: 4xx (bad request, auth failure, forbidden) — returned immediately
+- **Model rewriting**: each provider entry can override the `model` field in the request body
+
+### Supported providers
+
+| Provider | Auth Type | Base URL |
+|---|---|---|
+| Anthropic | `x-api-key` | `https://api.anthropic.com` |
+| OpenRouter | Bearer | `https://openrouter.ai/api` |
+| Together AI | Bearer | `https://api.together.xyz` |
+| GLM (Z.ai) | `x-api-key` | `https://api.z.ai/api/anthropic` |
+| Minimax | `x-api-key` | `https://api.minimax.io/anthropic` |
+| Fireworks | Bearer | `https://api.fireworks.ai/inference/v1` |
+
+Any OpenAI/Anthropic-compatible API works — just set `baseUrl` and `authType` appropriately.
+
+### Config hot-reload
+
+In daemon mode, ModelWeaver watches the config file for changes and reloads automatically (debounced 300ms). You can also send a manual reload signal:
+
+```bash
+kill -SIGUSR1 $(cat ~/.modelweaver/modelweaver.pid)
+```
+
+Or just re-run `npx modelweaver init` — it automatically signals the running daemon to reload.
 
 ## How Claude Code Uses Model Tiers
 
@@ -157,17 +218,10 @@ ModelWeaver uses the model name to determine which agent tier is calling, then r
 ## Development
 
 ```bash
-# Install dependencies
-npm install
-
-# Run tests
-npm test
-
-# Run in dev mode
-npm run dev
-
-# Build for production
-npm run build
+npm install          # Install dependencies
+npm test             # Run tests (113 tests)
+npm run build        # Build for production (tsup)
+npm run dev          # Run in dev mode (tsx)
 ```
 
 ## License
