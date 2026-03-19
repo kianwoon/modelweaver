@@ -427,6 +427,18 @@ export async function runInit(): Promise<void> {
   writeFileSync(configPath, yaml);
   writeEnvFile(configured);
 
+  // Signal daemon to reload config if it's running
+  try {
+    const { readPidFile, isProcessAlive } = await import('./daemon.js');
+    const pid = readPidFile();
+    if (pid && isProcessAlive(pid)) {
+      process.kill(pid, 'SIGUSR1');
+      check('ModelWeaver daemon reloaded with new config');
+    }
+  } catch {
+    // Daemon not running or daemon.js not available — silently ignore
+  }
+
   // Step 8 — Configure Claude Code settings.json
   settingsConfig = await configureClaudeCodeSettings(routing, configured, server);
 

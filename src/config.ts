@@ -181,3 +181,10 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
   const config: AppConfig = { server, providers, routing, tierPatterns, modelRouting };
   return { config, configPath: path };
 }
+
+// --- Reload helper ---
+
+export function reloadConfig(configPath: string): AppConfig {
+  const { config } = loadConfig(configPath);
+  return config;
+}

@@ -19,7 +19,14 @@ function anthropicError(type: string, message: string, requestId: string): Respo
   );
 }
 
-export function createApp(config: AppConfig, logLevel: LogLevel): Hono {
+export interface AppHandle {
+  app: Hono;
+  getConfig: () => AppConfig;
+  setConfig: (config: AppConfig) => void;
+}
+
+export function createApp(initConfig: AppConfig, logLevel: LogLevel): AppHandle {
+  let config: AppConfig = initConfig;
   const logger = createLogger(logLevel);
   const app = new Hono();
 
@@ -93,5 +100,5 @@ export function createApp(config: AppConfig, logLevel: LogLevel): Hono {
     return finalResponse;
   });
 
-  return app;
+  return { app, getConfig: () => config, setConfig: (c) => { config = c; } };
 }

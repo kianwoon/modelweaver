@@ -41,7 +41,7 @@ describe("server", () => {
       ]),
     });
 
-    const app = createApp(config, "info");
+    const { app } = createApp(config, "info");
     const res = await app.fetch(
       new Request("http://localhost/v1/messages", {
         method: "POST",
@@ -66,7 +66,7 @@ describe("server", () => {
 
   it("returns 502 when no tier matches the model", async () => {
     const config = makeConfig();
-    const app = createApp(config, "info");
+    const { app } = createApp(config, "info");
 
     const res = await app.fetch(
       new Request("http://localhost/v1/messages", {
@@ -95,7 +95,7 @@ describe("server", () => {
       ]),
     });
 
-    const app = createApp(config, "info");
+    const { app } = createApp(config, "info");
     const res = await app.fetch(
       new Request("http://localhost/v1/messages", {
         method: "POST",
@@ -115,7 +115,7 @@ describe("server", () => {
       ]),
     });
 
-    const app = createApp(config, "info");
+    const { app } = createApp(config, "info");
     const res = await app.fetch(
       new Request("http://localhost/v1/messages", {
         method: "POST",
@@ -145,7 +145,7 @@ describe("server", () => {
       ]),
     });
 
-    const app = createApp(config, "info");
+    const { app } = createApp(config, "info");
     const res = await app.fetch(
       new Request("http://localhost/v1/messages", {
         method: "POST",
@@ -177,7 +177,7 @@ describe("server", () => {
       ]),
     });
 
-    const app = createApp(config, "info");
+    const { app } = createApp(config, "info");
     const res = await app.fetch(
       new Request("http://localhost/v1/messages", {
         method: "POST",
@@ -188,5 +188,48 @@ describe("server", () => {
 
     expect(res.status).toBe(401);
     await mock2.close();
+  });
+
+  it("hot-reloads config via setConfig", async () => {
+    const config = makeConfig({
+      providers: new Map([
+        ["mock", { name: "mock", baseUrl: mock.url, apiKey: "sk-test", timeout: 5000 }],
+      ]),
+      routing: new Map([
+        ["sonnet", [{ provider: "mock", model: "claude-sonnet-4" }]],
+      ]),
+    });
+
+    const { app, setConfig, getConfig } = createApp(config, "info");
+
+    // Verify initial config
+    expect(getConfig().routing.get("sonnet")![0].model).toBe("claude-sonnet-4");
+
+    // Update config — add a new model routing entry
+    const newConfig = makeConfig({
+      providers: new Map([
+        ["mock", { name: "mock", baseUrl: mock.url, apiKey: "sk-test", timeout: 5000 }],
+      ]),
+      routing: new Map([
+        ["sonnet", [{ provider: "mock", model: "claude-sonnet-4" }]],
+      ]),
+      modelRouting: new Map([
+        ["my-custom-model", [{ provider: "mock", model: "claude-sonnet-4" }]],
+      ]),
+    });
+    setConfig(newConfig);
+
+    // Verify config was updated
+    expect(getConfig().modelRouting.has("my-custom-model")).toBe(true);
+
+    // Verify the route is accessible
+    const res = await app.fetch(
+      new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ model: "my-custom-model", max_tokens: 100, messages: [] }),
+      })
+    );
+    expect(res.status).toBe(200);
   });
 });

@@ -4,8 +4,8 @@ import { createApp } from "./server.js";
 import { loadConfig } from "./config.js";
 import type { LogLevel } from "./logger.js";
 
-function parseArgs(argv: string[]): { port?: number; config?: string; verbose: boolean; help: boolean } {
-  const args: { port?: number; config?: string; verbose: boolean; help: boolean } = { verbose: false, help: false };
+function parseArgs(argv: string[]): { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean } {
+  const args: { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean } = { verbose: false, help: false, daemon: false, monitor: false };
   for (let i = 2; i < argv.length; i++) {
     switch (argv[i]) {
       case "-p":
@@ -34,6 +34,12 @@ function parseArgs(argv: string[]): { port?: number; config?: string; verbose: b
       case "--help":
         args.help = true;
         break;
+      case "--daemon":
+        args.daemon = true;
+        break;
+      case "--monitor":
+        args.monitor = true;
+        break;
     }
   }
   return args;
@@ -47,6 +53,10 @@ Usage: modelweaver [command] [options]
 
 Commands:
   init                    Run interactive setup wizard
+  start                   Start as background daemon
+  stop                    Stop background daemon
+  status                  Show daemon status
+  remove                  Stop daemon and remove PID + log files
 
 Options:
   -p, --port <number>      Server port                    (default: from config)
@@ -78,6 +88,39 @@ async function main() {
     process.exit(0);
   }
 
+  // Handle 'start' subcommand
+  if (process.argv[2] === 'start') {
+    const { startDaemon } = await import('./daemon.js');
+    const result = startDaemon(args.config, args.port, args.verbose);
+    console.log(`  ${result.message}`);
+    console.log(`  Log file: ${result.logPath}`);
+    process.exit(result.success ? 0 : 1);
+  }
+
+  // Handle 'stop' subcommand
+  if (process.argv[2] === 'stop') {
+    const { stopDaemon } = await import('./daemon.js');
+    const result = stopDaemon();
+    console.log(`  ${result.message}`);
+    process.exit(result.success ? 0 : 1);
+  }
+
+  // Handle 'status' subcommand
+  if (process.argv[2] === 'status') {
+    const { statusDaemon } = await import('./daemon.js');
+    const result = statusDaemon();
+    console.log(`  ${result.message}`);
+    process.exit(0);
+  }
+
+  // Handle 'remove' subcommand — stop + clean up PID and log files
+  if (process.argv[2] === 'remove') {
+    const { removeDaemon } = await import('./daemon.js');
+    const result = removeDaemon();
+    console.log(`  ${result.message}`);
+    process.exit(result.success ? 0 : 1);
+  }
+
   if (args.help) {
     printHelp();
     process.exit(0);
@@ -100,8 +143,149 @@ async function main() {
   const host = config.server.host;
   const logLevel: LogLevel = args.verbose ? "debug" : "info";
 
-  // Create app
-  const app = createApp(config, logLevel);
+  // --- Monitor mode (spawns daemon child, auto-restarts on crash) ---
+  if (args.monitor) {
+    const { fork } = await import('node:child_process');
+    const { writePidFile, removePidFile, removeWorkerPidFile, getLogPath } = await import('./daemon.js');
+    const { dirname, join: pathJoin } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+
+    // Monitor writes its own PID to modelweaver.pid
+    writePidFile(process.pid);
+
+    const entryScript = process.argv[1] || pathJoin(dirname(fileURLToPath(import.meta.url)), "index.js");
+
+    const MAX_RESTARTS = 5;
+    const RATE_WINDOW_MS = 60_000;
+    const RESTART_DELAY_MS = 2_000;
+    let restartTimestamps: number[] = [];
+    let child: ReturnType<typeof fork> | null = null;
+
+    function spawnDaemon(): void {
+      const childArgs: string[] = ["--daemon"];
+      if (args.config) childArgs.push("--config", args.config);
+      if (args.port) childArgs.push("--port", String(args.port));
+      if (args.verbose) childArgs.push("--verbose");
+
+      child = fork(entryScript, childArgs, {
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env },
+      });
+      child.unref();
+
+      child.on("exit", (code) => {
+        removeWorkerPidFile();
+        if (code === 0) {
+          // Clean shutdown — monitor exits too
+          removePidFile();
+          process.exit(0);
+        }
+        // Crash — check rate limit before restarting
+        const now = Date.now();
+        restartTimestamps = restartTimestamps.filter((t) => now - t < RATE_WINDOW_MS);
+        if (restartTimestamps.length >= MAX_RESTARTS) {
+          // Too many restarts — give up
+          removePidFile();
+          process.exit(1);
+        }
+        restartTimestamps.push(now);
+        setTimeout(spawnDaemon, RESTART_DELAY_MS);
+      });
+    }
+
+    // SIGTERM from `stop` → kill child, then exit
+    process.on("SIGTERM", () => {
+      if (child) {
+        try { child.kill("SIGTERM"); } catch { /* already dead */ }
+      }
+      removePidFile();
+      removeWorkerPidFile();
+      process.exit(0);
+    });
+
+    process.on("SIGINT", () => {
+      if (child) {
+        try { child.kill("SIGTERM"); } catch { /* already dead */ }
+      }
+      removePidFile();
+      removeWorkerPidFile();
+      process.exit(0);
+    });
+
+    spawnDaemon();
+    return;
+  }
+
+  // --- Daemon mode ---
+  if (args.daemon) {
+    const { writePidFile, removePidFile, removeWorkerPidFile, writeWorkerPidFile, createDebouncedReload, getLogPath } = await import('./daemon.js');
+    const { reloadConfig } = await import('./config.js');
+    const { createWriteStream } = await import('node:fs');
+    const { createLogger } = await import('./logger.js');
+    const logger = createLogger(logLevel);
+
+    // Write worker PID file (monitor owns modelweaver.pid)
+    writeWorkerPidFile(process.pid);
+
+    // Redirect stdout/stderr to log file
+    const logStream = createWriteStream(getLogPath(), { flags: 'a' });
+    process.stdout.write = logStream.write.bind(logStream) as typeof process.stdout.write;
+    process.stderr.write = logStream.write.bind(logStream) as typeof process.stderr.write;
+
+    // Create app with mutable config
+    const handle = createApp(config, logLevel);
+
+    // Hot-reload: watch config file for changes
+    if (configPath) {
+      const debounced = createDebouncedReload(() => {
+        try {
+          const newConfig = reloadConfig(configPath);
+          handle.setConfig(newConfig);
+          logger.info("Config reloaded", { path: configPath });
+        } catch (err) {
+          logger.error("Config reload failed — keeping old config", { error: (err as Error).message });
+        }
+      }, 300);
+
+      try {
+        const { watchFile } = await import('node:fs');
+        watchFile(configPath, { interval: 500 }, () => {
+          debounced.reload();
+        });
+      } catch {
+        // fs.watchFile not available — hot-reload disabled
+      }
+    }
+
+    // SIGUSR1 for manual reload signal
+    process.on('SIGUSR1', () => {
+      try {
+        const newConfig = reloadConfig(configPath!);
+        handle.setConfig(newConfig);
+        logger.info("Config reloaded (SIGUSR1)", { path: configPath });
+      } catch (err) {
+        logger.error("Config reload failed (SIGUSR1)", { error: (err as Error).message });
+      }
+    });
+
+    // Start server
+    serve({ fetch: handle.app.fetch, hostname: host, port });
+
+    // Graceful shutdown
+    const shutdown = () => {
+      removeWorkerPidFile();
+      logStream.end();
+      process.exit(0);
+    };
+    process.on('SIGTERM', shutdown);
+    process.on('SIGINT', shutdown);
+
+    return; // Don't fall through to foreground mode
+  }
+
+  // --- Foreground mode ---
+  const handle = createApp(config, logLevel);
 
   // Print startup info
   console.log(`\n  ModelWeaver v0.1.0`);
@@ -129,7 +313,7 @@ async function main() {
   }
 
   // Start server
-  serve({ fetch: app.fetch, hostname: host, port });
+  serve({ fetch: handle.app.fetch, hostname: host, port });
 
   // Graceful shutdown
   const shutdown = () => {
