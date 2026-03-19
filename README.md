@@ -7,6 +7,9 @@
 
 Multi-provider model orchestration proxy for Claude Code. Route different agent roles (planning, coding, research, review) to different model providers with automatic fallback, exact model routing, config hot-reload, and crash recovery.
 
+<img width="357" height="476" alt="Screenshot 2026-03-20 at 4 13 13 AM" src="https://github.com/user-attachments/assets/94293920-d9ee-481d-87f7-2f4ca506a162" />
+
+
 ## How It Works
 
 ModelWeaver sits between Claude Code and upstream model providers as a local HTTP proxy. It inspects the `model` field in each Anthropic Messages API request and routes it to the best-fit provider.
