@@ -1,0 +1,13 @@
+src/
+tests/
+docs/
+.claude/
+.github/
+*.md
+!README.md
+!CONTRIBUTING.md
+tsconfig.json
+tsup.config.ts
+vitest.config.ts
+.gitignore
+.gitattributes
