@@ -125,6 +125,7 @@ describe("server", () => {
     expect(res.headers.get("x-request-id")).toBeTruthy();
   });
 
+  // 10s timeout: two sequential provider requests with 5s timeout each can exceed default on slow CI
   it("falls back to second provider when first returns 429", async () => {
     const mock2 = createMockProvider();
     mock.setBehavior("error-429");
@@ -155,7 +156,7 @@ describe("server", () => {
     const text = await res.text();
     expect(text).toContain("Hello from mock provider");
     await mock2.close();
-  });
+  }, 10_000);
 
   it("fails immediately on non-retriable error (401) without trying fallback", async () => {
     const mock2 = createMockProvider();
