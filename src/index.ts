@@ -172,7 +172,7 @@ async function main() {
         stdio: "ignore",
         env: { ...process.env },
       });
-      child.unref();
+      // NOTE: do NOT child.unref() here — the monitor must stay alive to watch the child
 
       child.on("exit", (code) => {
         removeWorkerPidFile();
@@ -219,7 +219,7 @@ async function main() {
 
   // --- Daemon mode ---
   if (args.daemon) {
-    const { writePidFile, removePidFile, removeWorkerPidFile, writeWorkerPidFile, createDebouncedReload, getLogPath } = await import('./daemon.js');
+    const { removeWorkerPidFile, writeWorkerPidFile, createDebouncedReload, getLogPath } = await import('./daemon.js');
     const { reloadConfig } = await import('./config.js');
     const { createWriteStream } = await import('node:fs');
     const { createLogger } = await import('./logger.js');
