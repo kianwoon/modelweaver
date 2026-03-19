@@ -13,8 +13,6 @@ jobs:
   ci:
     name: Node.js ${{ matrix.node-version }}
     runs-on: ubuntu-latest
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
     strategy:
       fail-fast: false
@@ -24,11 +22,11 @@ jobs:
     steps:
       # - Checkout repository code
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       # - Setup Node.js with npm caching for faster installs
       - name: Setup Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
