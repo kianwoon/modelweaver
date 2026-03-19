@@ -4,6 +4,7 @@ import { getPresets, getPreset, type ProviderPreset } from './presets.js';
 import { stringify as stringifyYaml } from 'yaml';
 import { writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { readSettings, backupSettings, mergeSettings, writeSettings, getSettingsPath } from './settings.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -192,6 +193,101 @@ async function configureServer(): Promise<{ port: number; host: string }> {
   return { port: port as number, host: host as string };
 }
 
+function collectAvailableModels(
+  routing: Record<string, RoutingTier[]>,
+): { id: string; source: string }[] {
+  const models: { id: string; source: string }[] = [];
+
+  // Collect unique primary models from each tier
+  for (const [tier, entries] of Object.entries(routing)) {
+    if (entries.length > 0 && !models.some((m) => m.id === entries[0].model)) {
+      models.push({ id: entries[0].model, source: `${tier} tier` });
+    }
+  }
+
+  return models;
+}
+
+interface SettingsConfig {
+  defaultModel: string;
+  tierModels: { sonnet?: string; opus?: string; haiku?: string };
+}
+
+async function configureClaudeCodeSettings(
+  routing: Record<string, RoutingTier[]>,
+  providers: ConfiguredProvider[],
+  server: { port: number; host: string },
+): Promise<SettingsConfig | null> {
+  const availableModels = collectAvailableModels(routing);
+  if (availableModels.length === 0) return null;
+
+  console.log();
+
+  // Step A: Ask to configure
+  const { configure } = await prompts(
+    {
+      type: 'confirm',
+      name: 'configure',
+      message: 'Configure Claude Code to use ModelWeaver automatically?',
+      initial: true,
+    },
+    CANCEL,
+  );
+
+  if (!configure) return null;
+
+  // Step B: Select default model
+  const { defaultModel } = await prompts(
+    {
+      type: 'select',
+      name: 'defaultModel',
+      message: 'Select default model for Claude Code:',
+      choices: availableModels.map((m) => ({
+        title: m.id,
+        description: m.source,
+        value: m.id,
+      })),
+    },
+    CANCEL,
+  );
+
+  // Step C: Ask about tier alias mapping
+  console.log();
+  const { mapAliases } = await prompts(
+    {
+      type: 'confirm',
+      name: 'mapAliases',
+      message: 'Map tier aliases? (e.g., when Claude Code uses /sonnet, send a specific model)',
+      initial: false,
+    },
+    CANCEL,
+  );
+
+  const tierModels: { sonnet?: string; opus?: string; haiku?: string } = {};
+
+  if (mapAliases) {
+    const tiers = ['sonnet', 'opus', 'haiku'] as const;
+    for (const tier of tiers) {
+      const { tierModel } = await prompts(
+        {
+          type: 'select',
+          name: 'tierModel',
+          message: `[${tier}] When Claude Code uses ${tier}, send model:`,
+          choices: availableModels.map((m) => ({
+            title: m.id,
+            description: m.source,
+            value: m.id,
+          })),
+        },
+        CANCEL,
+      );
+      tierModels[tier] = tierModel as string;
+    }
+  }
+
+  return { defaultModel: defaultModel as string, tierModels };
+}
+
 function buildYamlConfig(
   providers: ConfiguredProvider[],
   routing: Record<string, RoutingTier[]>,
@@ -261,6 +357,7 @@ export async function runInit(): Promise<void> {
   let routing: Record<string, RoutingTier[]>;
   let server: { port: number; host: string };
   let yaml: string;
+  let settingsConfig: SettingsConfig | null = null;
 
   while (true) {
     // Step 1 — Welcome
@@ -330,11 +427,51 @@ export async function runInit(): Promise<void> {
   writeFileSync(configPath, yaml);
   writeEnvFile(configured);
 
+  // Step 8 — Configure Claude Code settings.json
+  settingsConfig = await configureClaudeCodeSettings(routing, configured, server);
+
+  if (settingsConfig) {
+    // Use the primary provider's API key for the auth token
+    const primaryProvider = configured[0];
+    const baseUrl = server.host === 'localhost'
+      ? `http://localhost:${server.port}`
+      : `http://${server.host}:${server.port}`;
+
+    const didBackup = backupSettings();
+    if (didBackup) {
+      console.log(`  Backed up existing settings to settings.json.bak`);
+    }
+
+    const existing = readSettings();
+    const merged = mergeSettings(existing, {
+      baseUrl,
+      authToken: primaryProvider.apiKey,
+      defaultModel: settingsConfig.defaultModel,
+      tierModels: settingsConfig.tierModels,
+    });
+    writeSettings(merged);
+
+    check(`Claude Code settings updated at ${getSettingsPath()}`);
+    console.log(`    Proxy endpoint: ${baseUrl}`);
+    console.log(`    Default model:  ${settingsConfig.defaultModel}`);
+    if (Object.keys(settingsConfig.tierModels).length > 0) {
+      for (const [tier, model] of Object.entries(settingsConfig.tierModels)) {
+        console.log(`    ${tier.padEnd(8)} \u2192 ${model}`);
+      }
+    }
+    console.log();
+    console.log(`  ${GREEN}Restart Claude Code to apply changes.${RESET}`);
+  }
+
   console.log(`
 \x1B[1m\x1B[36m\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
 \u2551  ModelWeaver is configured!                   \u2551
 \u2551                                                \u2551
-\u2551  To use with Claude Code:                      \u2551
+${settingsConfig
+  ? `\u2551  Claude Code settings have been updated.       \u2551
+\u2551                                                \u2551
+\u2551  Just restart Claude Code to get started.     \u2551`
+  : `\u2551  To use with Claude Code:                      \u2551
 \u2551                                                \u2551
 \u2551  Terminal 1:                                   \u2551
 \u2551    modelweaver                                 \u2551
@@ -342,7 +479,8 @@ export async function runInit(): Promise<void> {
 \u2551  Terminal 2:                                   \u2551
 \u2551    export ANTHROPIC_BASE_URL=\\                 \u2551
 \u2551      http://localhost:${String(server.port).padEnd(20)}\u2551
-\u2551    claude                                      \u2551
+\u2551    claude                                      \u2551`
+}
 \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D\x1B[0m
 `);
 }
