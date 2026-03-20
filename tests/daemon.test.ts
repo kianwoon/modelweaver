@@ -1,6 +1,16 @@
 // tests/daemon.test.ts
-import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import {
+import { describe, it, expect, beforeEach, afterEach, afterAll, vi } from "vitest";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+
+// Override HOME before importing daemon module (MODELWEAVER_DIR is evaluated at import time)
+const ORIG_HOME = process.env.HOME;
+const TEST_HOME = join(tmpdir(), `mw-daemon-test-${Date.now()}`);
+process.env.HOME = TEST_HOME;
+
+// Now import — the module will use TEST_HOME
+const {
   getPidPath,
   getLogPath,
   ensureDir,
@@ -16,21 +26,29 @@ import {
   isProcessAlive,
   statusDaemon,
   createDebouncedReload,
-} from "../src/daemon.js";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
+} = await import("../src/daemon.js");
 
-const HOME = process.env.HOME || process.env.USERPROFILE || "";
+// Create the temp directory
+mkdirSync(join(TEST_HOME, ".modelweaver"), { recursive: true });
+
+// Restore HOME after all tests and clean up
+afterAll(() => {
+  process.env.HOME = ORIG_HOME;
+  try {
+    rmSync(TEST_HOME, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
+});
 
 describe("daemon", () => {
   describe("paths", () => {
     it("getPidPath returns correct path", () => {
-      expect(getPidPath()).toBe(join(HOME, ".modelweaver", "modelweaver.pid"));
+      expect(getPidPath()).toBe(join(TEST_HOME, ".modelweaver", "modelweaver.pid"));
     });
 
     it("getLogPath returns correct path", () => {
-      expect(getLogPath()).toBe(join(HOME, ".modelweaver", "modelweaver.log"));
+      expect(getLogPath()).toBe(join(TEST_HOME, ".modelweaver", "modelweaver.log"));
     });
   });
 
@@ -194,8 +212,7 @@ describe("daemon", () => {
     });
 
     it("getWorkerPidPath returns correct path", () => {
-      const HOME = process.env.HOME || process.env.USERPROFILE || "";
-      expect(getWorkerPidPath()).toBe(join(HOME, ".modelweaver", "modelweaver.worker.pid"));
+      expect(getWorkerPidPath()).toBe(join(TEST_HOME, ".modelweaver", "modelweaver.worker.pid"));
     });
   });
 

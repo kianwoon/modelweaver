@@ -65,7 +65,7 @@ describe("buildRoutingChain", () => {
 
 describe("resolveRequest", () => {
   const baseConfig: AppConfig = {
-    server: { port: 0, host: "localhost" },
+    server: { port: 13000, host: "localhost" },
     providers: new Map(),
     routing: new Map([
       ["sonnet", [{ provider: "anthro" }]],

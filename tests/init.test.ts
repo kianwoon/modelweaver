@@ -151,7 +151,7 @@ describe('wizard-generated YAML passes loadConfig validation', () => {
 
   const sampleConfig = `
 server:
-  port: 0
+  port: 13000
   host: localhost
 providers:
   test-provider:
@@ -183,7 +183,7 @@ tierPatterns:
 
     const { config } = loadConfig(configPath);
 
-    expect(config.server.port).toBe(0);
+    expect(config.server.port).toBe(13000);
     expect(config.server.host).toBe('localhost');
     expect(config.providers.has('test-provider')).toBe(true);
     expect(config.routing.has('sonnet')).toBe(true);
