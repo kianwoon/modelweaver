@@ -1,16 +1,12 @@
-<div align="center">
+<p align="center">
   <img src="gui/icons/icon.png" alt="ModelWeaver" width="96" />
-  <h1>ModelWeaver</h1>
-  <p><strong>Multi-provider model orchestration proxy for Claude Code.</strong></p>
-  <p>Route different agent roles (planning, coding, research, review) to different model providers with automatic fallback, exact model routing, config hot-reload, and crash recovery.</p>
-  <p>
-    [![CI](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml)
-    [![CodeQL](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml)
-    [![Release](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml)
-    [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-    [![GitHub stars](https://img.shields.io/github/stars/kianwoon/modelweaver?style=social)](https://github.com/kianwoon/modelweaver/stargazers)
-  </p>
-</div>
+</p>
+
+# ModelWeaver
+
+Multi-provider model orchestration proxy for Claude Code. Route different agent roles to different model providers with automatic fallback, exact model routing, config hot-reload, and crash recovery.
+
+[![CI](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml) [![CodeQL](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml) [![Release](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![GitHub stars](https://img.shields.io/github/stars/kianwoon/modelweaver?style=social)](https://github.com/kianwoon/modelweaver/stargazers)
 
 
 <img width="358" height="479" alt="Screenshot 2026-03-20 at 5 11 55 AM" src="https://github.com/user-attachments/assets/a973a707-0cd7-4701-8d19-f6cd028f6c56" />
