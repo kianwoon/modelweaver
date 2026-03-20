@@ -1,6 +1,6 @@
 {
   "name": "modelweaver",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Multi-provider model orchestration proxy for Claude Code",
   "type": "module",
   "main": "dist/index.js",
