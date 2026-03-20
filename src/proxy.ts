@@ -19,33 +19,6 @@ export function isRetriable(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-/** Keywords that indicate a context/token-length error in provider error responses */
-const CONTEXT_ERROR_KEYWORDS = [
-  "context",
-  "token",
-  "too large",
-  "too long",
-  "max tokens",
-  "context_length",
-  "input_too_long",
-  "maximum context",
-];
-
-/**
- * Check whether an error response body indicates a context-size / token-limit error.
- * Matches against both `error.message` (Anthropic) and `error` (string) shapes.
- */
-function isContextSizeError(body: Record<string, unknown>): boolean {
-  const msg =
-    (body.error as Record<string, unknown>)?.message as string | undefined
-    ?? (body.error as string | undefined)
-    ?? (body.message as string | undefined)
-    ?? "";
-  const lower = msg.toLowerCase();
-  return CONTEXT_ERROR_KEYWORDS.some((kw) => lower.includes(kw));
-}
-
-
 export function buildOutboundUrl(baseUrl: string, incomingPath: string): string {
   const base = new URL(baseUrl);
   // new URL("/v1/messages", base) replaces base's path entirely (URL spec).
@@ -354,22 +327,8 @@ export async function forwardWithFallback(
       return response;
     }
 
-    // Non-retriable error — fail immediately, UNLESS it's a 400 context-size
-    // error and there are more providers to try in the fallback chain.
+    // Non-retriable error — fail immediately
     if (!isRetriable(response.status)) {
-      if (
-        response.status === 400 &&
-        i < chain.length - 1 &&
-        response.headers.get("content-type")?.includes("application/json")
-      ) {
-        const clone = response.clone();
-        const errBody = await clone.json().catch(() => null);
-        await clone.body?.cancel();
-        if (errBody && isContextSizeError(errBody)) {
-          await response.body?.cancel();
-          continue;
-        }
-      }
       return response;
     }
 
