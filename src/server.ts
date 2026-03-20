@@ -159,7 +159,7 @@ function extractTokensAsync(
       function recordMetrics(inputTokens: number, outputTokens: number): void {
         const latencyMs = Date.now() - ctx.startTime;
         const latencySec = latencyMs / 1000;
-        const tokensPerSec = latencySec > 0 ? (inputTokens + outputTokens) / latencySec : 0;
+        const tokensPerSec = latencySec > 0 ? outputTokens / latencySec : 0;
 
         metricsStore.recordRequest({
           requestId: ctx.requestId,

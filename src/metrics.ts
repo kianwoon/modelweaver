@@ -78,7 +78,7 @@ export class MetricsStore {
       totalRequests: requests.length,
       totalInputTokens,
       totalOutputTokens,
-      avgTokensPerSec: requests.length > 0 ? Math.round((totalTokensPerSec / requests.length) * 100) / 100 : 0,
+      avgTokensPerSec: requests.length > 0 ? Math.round((totalTokensPerSec / requests.length) * 10) / 10 : 0,
       activeModels,
       providerDistribution,
       recentRequests: requests,
