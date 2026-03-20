@@ -12,7 +12,7 @@ describe("connection pool", () => {
     mkdirSync(tmpDir, { recursive: true });
     writeFileSync(configPath, `
 server:
-  port: 3456
+  port: 0
   host: localhost
 providers:
   test-provider:
@@ -37,7 +37,7 @@ providers:
   it("defaults pool size to 10 when not configured", () => {
     writeFileSync(configPath, `
 server:
-  port: 3456
+  port: 0
   host: localhost
 providers:
   default-pool:

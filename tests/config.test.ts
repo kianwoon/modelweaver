@@ -23,7 +23,7 @@ function writeTestConfig(content: string, filename = "modelweaver.yaml") {
 
 describe("findConfigFile", () => {
   it("returns the path of an existing project-local config", () => {
-    const path = writeTestConfig("server:\n  port: 3456");
+    const path = writeTestConfig("server:\n  port: 0");
     const result = findConfigFile(TEST_DIR);
     expect(result).toBe(path);
   });
