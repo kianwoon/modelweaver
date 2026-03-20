@@ -105,32 +105,55 @@ function extractTokensAsync(
         if (inputTokens === 0 && outputTokens === 0) return;
         recordMetrics(inputTokens, outputTokens);
       } else {
-        // Non-streaming JSON: small buffer parse (these are typically < 100KB)
-        const MAX_BUFFER_SIZE = 10 * 1024 * 1024; // 10MB safety limit
-        let jsonBuf = first.value;
+        // Non-streaming JSON: streaming regex scan with bounded sliding window.
+        // Only keeps ~4KB in memory -- no O(n^2) buffer accumulation.
+        const WINDOW_SIZE = 4096;
+        let inputTokens = 0;
+        let cacheReadTokens = 0;
+        let cacheCreationTokens = 0;
+        let outputTokens = 0;
+        let windowBuf = decoder.decode(first.value, { stream: true });
+        scanWindow(windowBuf);
+
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          jsonBuf = concatUint8Arrays(jsonBuf, value);
-          if (jsonBuf.length > MAX_BUFFER_SIZE) {
-            reader.cancel();
-            return;
+          windowBuf += decoder.decode(value, { stream: true });
+          if (windowBuf.length > WINDOW_SIZE) {
+            windowBuf = windowBuf.slice(-WINDOW_SIZE);
+          }
+          scanWindow(windowBuf);
+        }
+        // Final scan to catch any pattern at the tail end
+        scanWindow(windowBuf);
+
+        function scanWindow(text: string): void {
+          const inputMatches = [...text.matchAll(/"(?:input_tokens|prompt_tokens)"\s*:\s*(\d+)/g)];
+          const cacheReadMatches = [...text.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g)];
+          const cacheCreationMatches = [...text.matchAll(/"cache_creation_input_tokens"\s*:\s*(\d+)/g)];
+          const outputMatches = [...text.matchAll(/"(?:output_tokens|completion_tokens)"\s*:\s*(\d+)/g)];
+
+          if (inputMatches.length > 0) {
+            const val = parseInt(inputMatches[inputMatches.length - 1][1], 10);
+            if (val > inputTokens) inputTokens = val;
+          }
+          if (cacheReadMatches.length > 0) {
+            const val = parseInt(cacheReadMatches[cacheReadMatches.length - 1][1], 10);
+            if (val > cacheReadTokens) cacheReadTokens = val;
+          }
+          if (cacheCreationMatches.length > 0) {
+            const val = parseInt(cacheCreationMatches[cacheCreationMatches.length - 1][1], 10);
+            if (val > cacheCreationTokens) cacheCreationTokens = val;
+          }
+          if (outputMatches.length > 0) {
+            const val = parseInt(outputMatches[outputMatches.length - 1][1], 10);
+            if (val > outputTokens) outputTokens = val;
           }
         }
-        const text = decoder.decode(jsonBuf);
 
-        const inputMatches = [...text.matchAll(/"(?:input_tokens|prompt_tokens)"\s*:\s*(\d+)/g)];
-        const cacheReadMatches = [...text.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g)];
-        const cacheCreationMatches = [...text.matchAll(/"cache_creation_input_tokens"\s*:\s*(\d+)/g)];
-        const outputMatches = [...text.matchAll(/"(?:output_tokens|completion_tokens)"\s*:\s*(\d+)/g)];
-
-        const inputTokens = (inputMatches.length > 0 ? parseInt(inputMatches[inputMatches.length - 1][1], 10) : 0)
-          + (cacheReadMatches.length > 0 ? parseInt(cacheReadMatches[cacheReadMatches.length - 1][1], 10) : 0)
-          + (cacheCreationMatches.length > 0 ? parseInt(cacheCreationMatches[cacheCreationMatches.length - 1][1], 10) : 0);
-        const outputTokens = outputMatches.length > 0 ? parseInt(outputMatches[outputMatches.length - 1][1], 10) : 0;
-
-        if (inputTokens === 0 && outputTokens === 0) return;
-        recordMetrics(inputTokens, outputTokens);
+        const totalInput = inputTokens + cacheReadTokens + cacheCreationTokens;
+        if (totalInput === 0 && outputTokens === 0) return;
+        recordMetrics(totalInput, outputTokens);
       }
 
       function recordMetrics(inputTokens: number, outputTokens: number): void {
@@ -157,14 +180,6 @@ function extractTokensAsync(
       // Metrics extraction errors must not affect the response stream
     }
   })();
-}
-
-/** Efficiently concatenate two Uint8Arrays without intermediate allocation. */
-function concatUint8Arrays(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const result = new Uint8Array(a.length + b.length);
-  result.set(a, 0);
-  result.set(b, a.length);
-  return result;
 }
 
 export interface AppHandle {
