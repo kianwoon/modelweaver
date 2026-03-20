@@ -14,7 +14,7 @@ const LOG_DIR = join(homedir(), ".modelweaver", "logs");
 function getPlistContent(): string {
   // Resolve the entry script path relative to this source file
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  const nodePath = join(__dirname, "dist", "index.js");
+  const nodePath = join(__dirname, "index.js");
   const workDir = process.cwd();
 
   return `<?xml version="1.0" encoding="UTF-8"?>
