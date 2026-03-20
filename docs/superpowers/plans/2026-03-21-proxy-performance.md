@@ -22,6 +22,16 @@ Run: `cd /Users/kianwoonwong/Downloads/modelweaver && npm install undici`
 
 Expected: undici added to package.json dependencies
 
+- [ ] **Step 1b: Update engines field to require Node 20+**
+
+In `package.json`, update the `engines` field:
+
+```json
+"engines": { "node": ">=20" }
+```
+
+Or run: `node -e "const p = require('./package.json'); p.engines = { node: '>=20' }; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n')"`
+
 - [ ] **Step 2: Commit**
 
 ```bash
@@ -43,7 +53,6 @@ In `src/types.ts`, add to `ProviderConfig` interface after `_cachedHost`:
 _cachedBaseUrl?: string;
 _cachedHost?: string;
 _agent?: import("undici").Agent;
-poolSize?: number;
 ```
 
 - [ ] **Step 2: Verify TypeScript compiles**
@@ -56,7 +65,7 @@ Expected: No errors
 
 ```bash
 git add src/types.ts
-git commit -m "feat(types): add _agent and poolSize fields to ProviderConfig"
+git commit -m "feat(types): add _agent field to ProviderConfig"
 ```
 
 ### Task 3: Create Agents in config.ts
@@ -113,23 +122,18 @@ git commit -m "feat(config): create per-provider undici Agent for connection poo
 **Files:**
 - Modify: `src/proxy.ts`
 
-- [ ] **Step 1: Pass dispatcher to fetch in forwardRequest**
+- [ ] **Step 1: Import undici request and use it in forwardRequest**
 
-In `src/proxy.ts`, in the `forwardRequest` function (around line 257), change:
+At the top of `src/proxy.ts`, add import after existing imports:
 
 ```typescript
-    const response = await fetch(url, {
-      method: "POST",
-      headers,
-      body,
-      signal: controller.signal,
-    });
+import { request as undiciRequest } from "undici";
 ```
 
-to:
+In the `forwardRequest` function (around line 257), replace the `fetch` call with `undiciRequest`:
 
 ```typescript
-    const response = await fetch(url, {
+    const response = await undiciRequest(url, {
       method: "POST",
       headers,
       body,
@@ -137,6 +141,8 @@ to:
       dispatcher: provider._agent,
     });
 ```
+
+Note: `undici.request()` returns an `undici.Response` which is compatible with the standard `Response` — the `.status`, `.headers`, and `.body` properties work identically. No downstream changes needed.
 
 - [ ] **Step 2: Verify TypeScript compiles**
 
@@ -148,7 +154,45 @@ Expected: No errors
 
 ```bash
 git add src/proxy.ts
-git commit -m "feat(proxy): use per-provider Agent dispatcher in fetch"
+git commit -m "feat(proxy): use undici.request with per-provider Agent dispatcher"
+```
+
+### Task 4b: Add Agent cleanup on config reload
+
+**Files:**
+- Modify: `src/server.ts`
+
+- [ ] **Step 1: Add cleanup to setConfig**
+
+In `src/server.ts`, modify the `setConfig` closure (around line 325) to close old agents before replacing config:
+
+```typescript
+  return {
+    app,
+    getConfig: () => config,
+    setConfig: (newConfig: AppConfig) => {
+      // Close old connection pool agents to prevent leaks
+      for (const provider of config.providers.values()) {
+        if (provider._agent) {
+          provider._agent.close();
+        }
+      }
+      config = newConfig;
+    },
+  };
+```
+
+- [ ] **Step 2: Verify TypeScript compiles**
+
+Run: `cd /Users/kianwoonwong/Downloads/modelweaver && npx tsc --noEmit`
+
+Expected: No errors
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/server.ts
+git commit -m "feat(server): close old agents on config reload to prevent connection leaks"
 ```
 
 ### Task 5: Test connection pooling
@@ -160,7 +204,7 @@ git commit -m "feat(proxy): use per-provider Agent dispatcher in fetch"
 
 ```typescript
 // tests/pool.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { loadConfig } from "../src/config.js";
 import { join } from "node:path";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
@@ -325,11 +369,6 @@ export class CircuitBreaker {
         ? this.failureTimestamps[this.failureTimestamps.length - 1]
         : null,
     };
-  }
-
-  /** For testing: manually override the clock for cooldown checks */
-  protected getNow(): number {
-    return Date.now();
   }
 
   private pruneOldFailures(now: number): void {
@@ -538,7 +577,6 @@ And inside the ProviderConfig interface:
 
 ```typescript
 _agent?: import("undici").Agent;
-poolSize?: number;
 _circuitBreaker?: CircuitBreaker;
 ```
 
@@ -613,12 +651,16 @@ In `src/server.ts`, before the `return { app, ... }` statement, add:
 ```typescript
   // Circuit breaker status endpoint
   app.get("/api/circuit-breaker", (c) => {
-    const status: Record<string, { state: string; failures: number; lastFailure: number | null }> = {};
+    const status: Record<string, { state: string; failures: number; lastFailure: string | null }> = {};
     for (const [name, provider] of config.providers) {
       const breaker = provider._circuitBreaker;
       if (breaker) {
         const s = breaker.getStatus();
-        status[name] = { state: s.state, failures: s.failures, lastFailure: s.lastFailure };
+        status[name] = {
+          state: s.state,
+          failures: s.failures,
+          lastFailure: s.lastFailure ? new Date(s.lastFailure).toISOString() : null,
+        };
       }
     }
     return c.json(status);
@@ -652,6 +694,53 @@ git commit -m "feat: integrate circuit breaker into proxy fallback chain and add
 
 **Files:**
 - Modify: `src/proxy.ts`
+
+- [ ] **Step 0: Add optional externalSignal parameter to forwardRequest**
+
+In `src/proxy.ts`, modify the `forwardRequest` function signature to accept an optional external abort signal that is combined with the per-request timeout signal:
+
+```typescript
+export async function forwardRequest(
+  provider: ProviderConfig,
+  entry: RoutingEntry,
+  ctx: RequestContext,
+  incomingRequest: Request,
+  externalSignal?: AbortSignal
+): Promise<Response> {
+```
+
+Replace the AbortController creation (around line 253) with:
+
+```typescript
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), provider.timeout);
+
+  // Combine external signal (from race cancellation) with per-request timeout
+  const signals = [controller.signal];
+  if (externalSignal) signals.push(externalSignal);
+  const combinedSignal = signals.length === 1
+    ? controller.signal
+    : AbortSignal.any(signals);
+
+  // Listen for external abort to clean up timeout
+  if (externalSignal) {
+    externalSignal.addEventListener("abort", () => {
+      clearTimeout(timeout);
+    }, { once: true });
+  }
+```
+
+And use `combinedSignal` in the request call (instead of `controller.signal`):
+
+```typescript
+    const response = await undiciRequest(url, {
+      method: "POST",
+      headers,
+      body,
+      signal: combinedSignal,
+      dispatcher: provider._agent,
+    });
+```
 
 - [ ] **Step 1: Add race logic to forwardWithFallback**
 
@@ -724,7 +813,7 @@ async function raceProviders(
     onAttempt?.(entry.provider, index);
 
     try {
-      const response = await forwardRequest(provider, entry, ctx, incomingRequest);
+      const response = await forwardRequest(provider, entry, ctx, incomingRequest, sharedController.signal);
       // Record for circuit breaker
       if (provider._circuitBreaker) {
         provider._circuitBreaker.recordResult(response.status);
@@ -823,9 +912,6 @@ git commit -m "feat(proxy): add adaptive fallback — race remaining providers o
 Add these tests at the end of the existing `tests/proxy.test.ts` file:
 
 ```typescript
-import { forwardWithFallback } from "../src/proxy.js";
-import { createMockProvider } from "./helpers/mock-provider.js";
-
 describe("forwardWithFallback race mode", () => {
   it("races remaining providers when first returns 429", async () => {
     const mock1 = createMockProvider();
@@ -960,7 +1046,6 @@ In `src/types.ts`, add to `RequestMetrics` interface:
 
 ```typescript
   fallbackMode?: "sequential" | "race";
-  circuitBreakerSkipped?: string[];
 ```
 
 - [ ] **Step 2: Populate fields in server.ts request handler**
@@ -971,7 +1056,6 @@ After `let successfulProvider = "unknown";`, add:
 
 ```typescript
     let fallbackMode: "sequential" | "race" = "sequential";
-    const circuitBreakerSkipped: string[] = [];
 ```
 
 Pass `onAttempt` callback that detects race mode. The race mode is detected inside `forwardWithFallback` — for now, these fields are set by the proxy and read back from context. A simpler approach: add them to `RequestContext` as optional fields that `forwardWithFallback` populates.
