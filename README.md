@@ -39,6 +39,10 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 - **Per-provider timeouts** — configurable timeout with AbortController
 - **Structured logging** — JSON logs with request IDs for tracing
 - **Env var substitution** — config references like `${API_KEY}` resolved from environment
+- **Circuit breaker** — per-provider circuit breaker with closed/open/half-open states, prevents hammering unhealthy providers
+- **Adaptive fallback** — on 429 rate limits, automatically races remaining providers simultaneously instead of sequential fallback
+- **Connection pooling** — per-provider undici Agent dispatcher with configurable pool size, closes old agents on config reload
+- **Health endpoint** — `/api/status` returns circuit breaker state and uptime
 - **Desktop GUI** — native app with one-command launch (`modelweaver gui`), auto-downloads from GitHub Releases
 
 ## Quick Start
@@ -158,6 +162,7 @@ providers:
     baseUrl: https://api.anthropic.com
     apiKey: ${ANTHROPIC_API_KEY}  # Env var substitution
     timeout: 30000                # Request timeout in ms  (default: 30000)
+    poolSize: 10                  # Connection pool size (default: varies by provider)
     authType: anthropic           # "anthropic" | "bearer"  (default: anthropic)
   openrouter:
     baseUrl: https://openrouter.ai/api
@@ -204,6 +209,8 @@ modelRouting:
 
 - **First provider is primary**, rest are fallbacks
 - **Fallback triggers** on: 429 (rate limit), 5xx (server error), network timeout
+- **Adaptive race mode** — when a 429 is received, remaining providers are raced simultaneously (not sequentially) for faster recovery
+- **Circuit breaker** — providers that repeatedly fail are temporarily skipped (auto-recovers after cooldown)
 - **No fallback on**: 4xx (bad request, auth failure, forbidden) — returned immediately
 - **Model rewriting**: each provider entry can override the `model` field in the request body
 
@@ -230,6 +237,16 @@ kill -SIGUSR1 $(cat ~/.modelweaver/modelweaver.pid)
 
 Or just re-run `npx modelweaver init` — it automatically signals the running daemon to reload.
 
+## API
+
+### Health check
+
+```bash
+curl http://localhost:3456/api/status
+```
+
+Returns circuit breaker state for all providers and server uptime.
+
 ## How Claude Code Uses Model Tiers
 
 Claude Code sends different model names for different agent roles:
@@ -247,7 +264,7 @@ ModelWeaver uses the model name to determine which agent tier is calling, then r
 
 ```bash
 npm install          # Install dependencies
-npm test             # Run tests (113 tests)
+npm test             # Run tests (174 tests)
 npm run build        # Build for production (tsup)
 npm run dev          # Run in dev mode (tsx)
 ```
