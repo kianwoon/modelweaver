@@ -63,6 +63,7 @@ Commands:
   stop                    Stop background daemon
   status                  Show daemon status
   remove                  Stop daemon and remove PID + log files
+  reload                  Reload daemon worker (load fresh code after build)
   install                 Install launchd service (auto-start at login)
   uninstall               Uninstall launchd service
   gui                     Launch the GUI (downloads if needed)
@@ -134,12 +135,17 @@ async function main() {
     const { statusDaemon } = await import('./daemon.js');
     const result = await statusDaemon();
     console.log(`  ${result.message}`);
-    const { isInstalled, getPlistPath, getLabel } = await import('./launchd.js');
-    if (isInstalled()) {
-      console.log(`  launchd: installed (${getLabel()})`);
-      console.log(`  plist: ${getPlistPath()}`);
-    } else {
-      console.log(`  launchd: not installed (run "modelweaver install" to enable auto-start)`);
+    try {
+      const { getService } = await import('./service.js');
+      const svc = await getService();
+      const installed = svc.isInstalled();
+      if (installed) {
+        console.log(`  Service: installed`);
+      } else {
+        console.log(`  Service: not installed (run "modelweaver install" to enable auto-start)`);
+      }
+    } catch (err) {
+      console.log(`  Service: ${err instanceof Error ? err.message : String(err)}`);
     }
     process.exit(0);
   }
@@ -152,17 +158,29 @@ async function main() {
     process.exit(result.success ? 0 : 1);
   }
 
-  // Handle 'install' subcommand — install launchd service
+  // Handle 'install' subcommand — install platform service
   if (process.argv[2] === 'install') {
-    const { install: installLaunchd } = await import('./launchd.js');
-    installLaunchd();
+    try {
+      const { getService } = await import('./service.js');
+      const svc = await getService();
+      svc.install();
+    } catch (err) {
+      console.error(`  Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
     process.exit(0);
   }
 
-  // Handle 'uninstall' subcommand — uninstall launchd service
+  // Handle 'uninstall' subcommand — uninstall platform service
   if (process.argv[2] === 'uninstall') {
-    const { uninstall: uninstallLaunchd } = await import('./launchd.js');
-    uninstallLaunchd();
+    try {
+      const { getService } = await import('./service.js');
+      const svc = await getService();
+      svc.uninstall();
+    } catch (err) {
+      console.error(`  Error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
     process.exit(0);
   }
 
@@ -170,6 +188,13 @@ async function main() {
   if (process.argv[2] === 'gui') {
     const { launchGui } = await import('./gui-launcher.js');
     await launchGui();
+    process.exit(0);
+  }
+
+  // Handle 'reload' subcommand
+  if (process.argv[2] === 'reload') {
+    const { reloadDaemon } = await import('./daemon.js');
+    await reloadDaemon(args.port);
     process.exit(0);
   }
 
@@ -313,6 +338,17 @@ async function main() {
       await removePidFile();
       await removeWorkerPidFile();
       process.exit(0);
+    });
+
+    // SIGUSR2 from `reload` → gracefully kill current worker so monitor restarts it
+    process.on("SIGUSR2", () => {
+      console.log("[monitor] Received reload signal, restarting worker...");
+      if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+      if (child) {
+        try { child.kill("SIGTERM"); } catch { /* already dead */ }
+      }
+      // Reset restart count — this is an intentional restart, not a crash
+      restartCount = 0;
     });
 
     spawnDaemon();

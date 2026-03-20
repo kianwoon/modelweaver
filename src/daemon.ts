@@ -409,6 +409,44 @@ export async function removeDaemon(): Promise<DaemonStopResult> {
 }
 
 // ---------------------------------------------------------------------------
+// Daemon reload (SIGUSR2 to monitor → restart worker with fresh code)
+// ---------------------------------------------------------------------------
+
+export async function reloadDaemon(portOverride?: number): Promise<void> {
+  const pid = await readPidFile();
+  if (pid === null) {
+    // PID file missing — try to find the process by configured port
+    const port = portOverride ?? await getConfigPort();
+    if (port !== null) {
+      const portPids = await findPidsOnPort(port);
+      const livePids = portPids.filter((p) => isProcessAlive(p));
+      if (livePids.length > 0) {
+        for (const p of livePids) {
+          try { process.kill(p, "SIGUSR2"); } catch { /* ignore */ }
+        }
+        console.log(`  Sent reload signal to ${livePids.length} process(es) on port ${port}.`);
+        return;
+      }
+    }
+    console.log("  Daemon is not running.");
+    return;
+  }
+
+  if (!isProcessAlive(pid)) {
+    await removePidFile();
+    console.log("  Daemon is not running (stale PID file cleaned up).");
+    return;
+  }
+
+  try {
+    process.kill(pid, "SIGUSR2");
+    console.log(`  Sent reload signal to daemon (PID ${pid}).`);
+  } catch {
+    console.log("  Failed to send reload signal — daemon may not be running.");
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Debounced watcher
 // ---------------------------------------------------------------------------
 
