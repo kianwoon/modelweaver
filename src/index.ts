@@ -251,6 +251,7 @@ async function main() {
     let stableTimer: ReturnType<typeof setTimeout> | null = null;
     let restartTimer: ReturnType<typeof setTimeout> | null = null;
     let shuttingDown = false;
+    let reloading = false;
     let child: ReturnType<typeof spawn> | null = null;
 
     function spawnDaemon(): void {
@@ -286,11 +287,12 @@ async function main() {
         }
 
         await removeWorkerPidFile();
-        if (code === 0) {
+        if (code === 0 && !reloading) {
           // Clean shutdown — monitor exits too
           await removePidFile();
           process.exit(0);
         }
+        reloading = false;
 
         // Don't restart if we're shutting down
         if (shuttingDown) {
@@ -340,9 +342,10 @@ async function main() {
       process.exit(0);
     });
 
-    // SIGUSR2 from `reload` → gracefully kill current worker so monitor restarts it
-    process.on("SIGUSR2", () => {
+    // SIGHUP from `reload` → gracefully kill current worker so monitor restarts it
+    process.on("SIGHUP", () => {
       console.log("[monitor] Received reload signal, restarting worker...");
+      reloading = true;
       if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
       if (child) {
         try { child.kill("SIGTERM"); } catch { /* already dead */ }

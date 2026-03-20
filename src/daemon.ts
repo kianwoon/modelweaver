@@ -409,7 +409,7 @@ export async function removeDaemon(): Promise<DaemonStopResult> {
 }
 
 // ---------------------------------------------------------------------------
-// Daemon reload (SIGUSR2 to monitor → restart worker with fresh code)
+// Daemon reload (SIGHUP to monitor → restart worker with fresh code)
 // ---------------------------------------------------------------------------
 
 export async function reloadDaemon(portOverride?: number): Promise<void> {
@@ -422,7 +422,7 @@ export async function reloadDaemon(portOverride?: number): Promise<void> {
       const livePids = portPids.filter((p) => isProcessAlive(p));
       if (livePids.length > 0) {
         for (const p of livePids) {
-          try { process.kill(p, "SIGUSR2"); } catch { /* ignore */ }
+          try { process.kill(p, "SIGHUP"); } catch { /* ignore */ }
         }
         console.log(`  Sent reload signal to ${livePids.length} process(es) on port ${port}.`);
         return;
@@ -439,7 +439,7 @@ export async function reloadDaemon(portOverride?: number): Promise<void> {
   }
 
   try {
-    process.kill(pid, "SIGUSR2");
+    process.kill(pid, "SIGHUP");
     console.log(`  Sent reload signal to daemon (PID ${pid}).`);
   } catch {
     console.log("  Failed to send reload signal — daemon may not be running.");
