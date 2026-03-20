@@ -19,19 +19,6 @@ export function isRetriable(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
-const CHARS_PER_TOKEN_ESTIMATE = 2; // LLM tokenizers are more efficient than 4 chars/token
-const SAFETY_MARGIN_TOKENS = 2000;  // Reserve for tool schemas, overhead, etc.
-
-/**
- * Estimate token count using character-based heuristic.
- * When charCount is provided, uses it directly (avoids re-serializing).
- * Otherwise falls back to stringifying the object.
- */
-function estimateTokens(value: string | Record<string, unknown>, charCount?: number): number {
-  const jsonBody = typeof value === "string" ? value : JSON.stringify(value);
-  const chars = charCount ?? jsonBody.length;
-  return Math.ceil(chars / CHARS_PER_TOKEN_ESTIMATE);
-}
 
 export function buildOutboundUrl(baseUrl: string, incomingPath: string): string {
   const base = new URL(baseUrl);
@@ -208,38 +195,12 @@ export async function forwardRequest(
       // Clean orphaned tool references from cross-provider conversation history
       cleanOrphanedToolMessages(parsed);
 
-      // Context window guard — check limits and clamp max_tokens
+      // Clamp max_tokens to provider's advertised output limit (let upstream handle input context checks)
       if (provider.modelLimits) {
-        // Use rawBody char count when available to avoid re-serializing for estimation
-        const estimatedInput = estimateTokens(parsed, ctx.rawBody.length);
-        const { maxInputTokens, maxOutputTokens } = provider.modelLimits;
-
+        const { maxOutputTokens } = provider.modelLimits;
         const requestedMaxTokens = typeof parsed.max_tokens === "number" ? parsed.max_tokens : maxOutputTokens;
-        const effectiveOutput = Math.min(requestedMaxTokens, maxOutputTokens);
-        const safeInputLimit = Math.max(0, maxInputTokens - effectiveOutput - SAFETY_MARGIN_TOKENS);
-
-        if (estimatedInput > safeInputLimit) {
-          return new Response(
-            JSON.stringify({
-              type: "error",
-              error: {
-                type: "context_window_exceeded",
-                message: `Estimated input (~${estimatedInput} tokens) exceeds safe limit (${safeInputLimit} tokens) for provider "${provider.name}" after reserving ${effectiveOutput} output tokens. Consider using /compact or /clear in Claude Code to reduce context.`,
-              },
-            }),
-            {
-              status: 400,
-              headers: {
-                "content-type": "application/json",
-                "x-request-id": ctx.requestId,
-              },
-            }
-          );
-        }
-
-        // Always set max_tokens to ensure output reservation matches our safety calculation
         if (parsed.max_tokens === undefined || requestedMaxTokens > maxOutputTokens) {
-          parsed.max_tokens = effectiveOutput;
+          parsed.max_tokens = Math.min(requestedMaxTokens, maxOutputTokens);
         }
       }
 

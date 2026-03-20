@@ -36,9 +36,9 @@ const rawConfigSchema = z.object({
     })
     .default({}),
   providers: z.record(z.string(), providerSchema),
-  routing: z.record(z.string(), z.array(routingEntrySchema)),
-  tierPatterns: z.record(z.string(), z.array(z.string())),
-  modelRouting: z.record(z.string(), z.array(routingEntrySchema)).optional(),
+  routing: z.record(z.string(), z.array(routingEntrySchema)).default({}),
+  tierPatterns: z.record(z.string(), z.array(z.string())).default({}),
+  modelRouting: z.record(z.string(), z.array(routingEntrySchema)).default({}),
 });
 
 // --- Env var resolution ---

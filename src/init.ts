@@ -483,7 +483,9 @@ function buildYamlConfig(
   routing: Record<string, RoutingTier[]>,
   server: { port: number; host: string },
 ): string {
-  // Build modelRouting from routing entries
+  // Build modelRouting from routing entries — this is the primary routing mechanism.
+  // modelRouting is checked first (Priority 1), so routing + tierPatterns are only
+  // needed as fallback for models NOT covered by modelRouting.
   const modelRouting: Record<string, { provider: string; model: string }[]> = {};
   for (const [tier, entries] of Object.entries(routing)) {
     if (entries.length > 0) {
@@ -494,17 +496,37 @@ function buildYamlConfig(
     }
   }
 
-  const configObj = {
+  // Collect all model names covered by modelRouting — these don't need tier fallback
+  const modelRoutingKeys = new Set(Object.keys(modelRouting));
+
+  // Only include tier routing for tiers whose primary model is NOT in modelRouting
+  // (i.e. models that might be requested by name substrings like "sonnet", "opus", "haiku")
+  const filteredRouting: Record<string, RoutingTier[]> = {};
+  const needsTierPatterns = { sonnet: false, opus: false, haiku: false } as Record<string, boolean>;
+
+  for (const [tier, entries] of Object.entries(routing)) {
+    if (entries.length > 0 && !modelRoutingKeys.has(entries[0].model)) {
+      filteredRouting[tier] = entries;
+      needsTierPatterns[tier] = true;
+    }
+  }
+
+  const configObj: Record<string, unknown> = {
     server,
     providers: {} as Record<string, Record<string, unknown>>,
-    routing,
-    tierPatterns: {
-      sonnet: ['sonnet'],
-      opus: ['opus'],
-      haiku: ['haiku'],
-    },
     modelRouting,
   };
+
+  // Only add routing + tierPatterns if there are tiers not covered by modelRouting
+  if (Object.keys(filteredRouting).length > 0) {
+    configObj.routing = filteredRouting;
+    configObj.tierPatterns = {};
+    for (const tier of ['sonnet', 'opus', 'haiku'] as const) {
+      if (needsTierPatterns[tier]) {
+        configObj.tierPatterns[tier] = [tier];
+      }
+    }
+  }
 
   for (const p of providers) {
     const providerConfig: Record<string, unknown> = {

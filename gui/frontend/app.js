@@ -87,7 +87,7 @@ function updateSummary(data) {
 
       const name = document.createElement('span');
       name.className = 'model-name';
-      const displayModel = m.actualModel || m.model || 'unknown';
+      const displayModel = m.model || 'unknown';
       name.title = displayModel;
       name.textContent = shortModel(displayModel);
 
@@ -154,13 +154,13 @@ function updateSummary(data) {
 
       const model = document.createElement('span');
       model.className = 'recent-model';
-      const displayModel = r.actualModel || r.model || 'unknown';
+      const displayModel = r.model || 'unknown';
       model.title = displayModel;
       model.textContent = shortModel(displayModel);
 
       const provider = document.createElement('span');
       provider.className = 'recent-provider';
-      provider.textContent = r.provider || '';
+      provider.textContent = r.targetProvider || r.provider || '';
 
       const tokens = document.createElement('span');
       tokens.className = 'recent-tokens';

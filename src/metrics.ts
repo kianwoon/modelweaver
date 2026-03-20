@@ -51,23 +51,23 @@ export class MetricsStore {
       totalOutputTokens += r.outputTokens ?? 0;
       totalTokensPerSec += r.tokensPerSec ?? 0;
 
-      // Model grouping — group by actualModel (what was actually used) to avoid duplicates
-      const groupKey = r.actualModel || r.model;
+      // Model grouping — group by requested model so fallbacks don't hide the original
+      const groupKey = r.model;
       const existing = modelMap.get(groupKey);
       if (existing) {
         existing.count++;
         if (r.timestamp > existing.lastSeen) existing.lastSeen = r.timestamp;
       } else {
-        modelMap.set(groupKey, { actualModel: undefined, count: 1, lastSeen: r.timestamp });
+        modelMap.set(groupKey, { actualModel: r.actualModel, count: 1, lastSeen: r.timestamp });
       }
 
-      // Provider grouping — use the provider that actually handled the request
-      const p = r.provider ?? r.targetProvider;
+      // Provider grouping — use target provider so fallbacks don't hide the original
+      const p = r.targetProvider ?? r.provider;
       providerMap.set(p, (providerMap.get(p) ?? 0) + 1);
     }
 
     const activeModels = [...modelMap.entries()]
-      .map(([model, { count, lastSeen }]) => ({ model, actualModel: undefined, count, lastSeen }))
+      .map(([model, { actualModel, count, lastSeen }]) => ({ model, actualModel, count, lastSeen }))
       .sort((a, b) => b.count - a.count);
 
     const providerDistribution = [...providerMap.entries()]
