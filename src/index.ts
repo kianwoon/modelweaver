@@ -63,6 +63,8 @@ Commands:
   stop                    Stop background daemon
   status                  Show daemon status
   remove                  Stop daemon and remove PID + log files
+  install                 Install launchd service (auto-start at login)
+  uninstall               Uninstall launchd service
   gui                     Launch the GUI (downloads if needed)
 
 Options:
@@ -132,6 +134,13 @@ async function main() {
     const { statusDaemon } = await import('./daemon.js');
     const result = await statusDaemon();
     console.log(`  ${result.message}`);
+    const { isInstalled, getPlistPath, getLabel } = await import('./launchd.js');
+    if (isInstalled()) {
+      console.log(`  launchd: installed (${getLabel()})`);
+      console.log(`  plist: ${getPlistPath()}`);
+    } else {
+      console.log(`  launchd: not installed (run "modelweaver install" to enable auto-start)`);
+    }
     process.exit(0);
   }
 
@@ -141,6 +150,20 @@ async function main() {
     const result = await removeDaemon();
     console.log(`  ${result.message}`);
     process.exit(result.success ? 0 : 1);
+  }
+
+  // Handle 'install' subcommand — install launchd service
+  if (process.argv[2] === 'install') {
+    const { install: installLaunchd } = await import('./launchd.js');
+    installLaunchd();
+    process.exit(0);
+  }
+
+  // Handle 'uninstall' subcommand — uninstall launchd service
+  if (process.argv[2] === 'uninstall') {
+    const { uninstall: uninstallLaunchd } = await import('./launchd.js');
+    uninstallLaunchd();
+    process.exit(0);
   }
 
   // Handle 'gui' subcommand
@@ -195,10 +218,14 @@ async function main() {
       console.error(`[monitor] Unhandled rejection: ${reason}`);
     });
 
-    const MAX_RESTARTS = 10;
-    const RATE_WINDOW_MS = 120_000;
-    const RESTART_DELAY_MS = 2_000;
-    let restartTimestamps: number[] = [];
+    const MAX_RESTART_ATTEMPTS = 10;
+    const INITIAL_BACKOFF_MS = 1000;
+    const MAX_BACKOFF_MS = 30000;
+    const STABLE_RUN_MS = 60000;
+    let restartCount = 0;
+    let stableTimer: ReturnType<typeof setTimeout> | null = null;
+    let restartTimer: ReturnType<typeof setTimeout> | null = null;
+    let shuttingDown = false;
     let child: ReturnType<typeof spawn> | null = null;
 
     function spawnDaemon(): void {
@@ -214,28 +241,60 @@ async function main() {
       });
       // NOTE: do NOT child.unref() here — the monitor must stay alive to watch the child
 
+      // Start stability timer — if worker lives this long, reset restart counter
+      if (stableTimer) clearTimeout(stableTimer);
+      stableTimer = setTimeout(() => {
+        if (restartCount > 0) {
+          console.error(`[monitor] Worker stable for ${STABLE_RUN_MS}ms, resetting restart counter`);
+        }
+        restartCount = 0;
+        stableTimer = null;
+      }, STABLE_RUN_MS);
+
       child.on("exit", async (code) => {
+        child = null;
+
+        // Clear stability timer — worker died before becoming stable
+        if (stableTimer) {
+          clearTimeout(stableTimer);
+          stableTimer = null;
+        }
+
         await removeWorkerPidFile();
         if (code === 0) {
           // Clean shutdown — monitor exits too
           await removePidFile();
           process.exit(0);
         }
-        // Crash — check rate limit before restarting
-        const now = Date.now();
-        restartTimestamps = restartTimestamps.filter((t) => now - t < RATE_WINDOW_MS);
-        if (restartTimestamps.length >= MAX_RESTARTS) {
-          // Too many restarts — give up
+
+        // Don't restart if we're shutting down
+        if (shuttingDown) {
+          console.error("[monitor] Worker exited during shutdown, monitor exiting");
+          await removePidFile();
+          process.exit(0);
+        }
+
+        // Crash — apply exponential backoff restart
+        const attempt = restartCount;
+        if (attempt >= MAX_RESTART_ATTEMPTS) {
+          console.error(`[monitor] Max restart attempts exhausted (${MAX_RESTART_ATTEMPTS}), monitor exiting`);
           await removePidFile();
           process.exit(1);
         }
-        restartTimestamps.push(now);
-        setTimeout(spawnDaemon, RESTART_DELAY_MS);
+
+        const backoff = Math.min(INITIAL_BACKOFF_MS * 2 ** attempt, MAX_BACKOFF_MS);
+        restartCount++;
+        console.error(`[monitor] Worker died (code ${code}), restarting in ${backoff}ms (attempt ${restartCount}/${MAX_RESTART_ATTEMPTS})`);
+
+        restartTimer = setTimeout(spawnDaemon, backoff);
       });
     }
 
-    // SIGTERM from `stop` → kill child, then exit
+    // SIGTERM from `stop` → kill child, then exit cleanly
     process.on("SIGTERM", async () => {
+      shuttingDown = true;
+      if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+      if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
       if (child) {
         try { child.kill("SIGTERM"); } catch { /* already dead */ }
       }
@@ -245,6 +304,9 @@ async function main() {
     });
 
     process.on("SIGINT", async () => {
+      shuttingDown = true;
+      if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+      if (stableTimer) { clearTimeout(stableTimer); stableTimer = null; }
       if (child) {
         try { child.kill("SIGTERM"); } catch { /* already dead */ }
       }
