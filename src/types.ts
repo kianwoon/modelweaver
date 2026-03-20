@@ -14,6 +14,7 @@ export interface ProviderConfig {
   /** Runtime-only cached fields — not serialized to config */
   _cachedBaseUrl?: string;
   _cachedHost?: string;
+  _agent?: import("undici").Agent;
 }
 
 export interface RoutingEntry {
