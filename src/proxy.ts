@@ -255,18 +255,27 @@ export async function forwardRequest(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), provider.timeout);
 
-  // Combine external signal (from race cancellation) with per-request timeout
-  const signals = [controller.signal];
-  if (externalSignal) signals.push(externalSignal);
-  const combinedSignal = signals.length === 1
-    ? controller.signal
-    : AbortSignal.any(signals);
-
-  // Listen for external abort to clean up timeout
+  // Listen for external abort (from race cancellation) to abort this request
   if (externalSignal) {
-    externalSignal.addEventListener("abort", () => {
+    if (externalSignal.aborted) {
+      // Already aborted — don't even start the request
       clearTimeout(timeout);
-    }, { once: true });
+      const body = JSON.stringify({
+          type: "error",
+          error: { type: "overloaded_error", message: `Provider "${provider.name}" cancelled by race winner` },
+        });
+      return new Response(body, {
+        status: 502,
+        headers: {
+          "content-type": "application/json",
+          "content-length": textEncoder.encode(body).byteLength.toString(),
+        },
+      });
+    }
+    const onExternalAbort = () => {
+      clearTimeout(timeout);
+    };
+    externalSignal.addEventListener("abort", onExternalAbort, { once: true });
   }
 
   try {
@@ -274,7 +283,7 @@ export async function forwardRequest(
       method: "POST",
       headers,
       body,
-      signal: combinedSignal,
+      signal: controller.signal,
       dispatcher: provider._agent,
     });
 
@@ -382,26 +391,47 @@ async function raceProviders(
     }
   });
 
+  // Track completed promises to avoid double-processing
+  const completed = new Set<Promise<{ response: Response; index: number }>>();
+  const failures: { response: Response; index: number }[] = [];
+
   try {
-    // Wait for first successful response
-    for await (const { response, index } of raceInOrder(races)) {
-      if (response.status >= 200 && response.status < 300) {
+    while (completed.size < races.length) {
+      const pending = races.filter(r => !completed.has(r));
+      if (pending.length === 0) break;
+
+      const winner = await Promise.race(pending);
+      completed.add(races[winner.index] ?? races[0]);
+
+      if (winner.response.status >= 200 && winner.response.status < 300) {
         sharedController.abort();
-        return response;
+        return winner.response;
       }
+
       // Non-retriable error — propagate immediately
-      if (!isRetriable(response.status)) {
+      if (!isRetriable(winner.response.status)) {
         sharedController.abort();
-        return response;
+        return winner.response;
       }
-      // Retriable but not success — continue waiting for others
+
+      // Retriable but not success — record and continue waiting
+      failures.push(winner);
     }
 
-    // All failed — return last error
-    const lastRace = await Promise.all(races);
-    const lastResult = lastRace[lastRace.length - 1];
+    // All providers returned retriable errors — return the first failure
     sharedController.abort();
-    return lastResult.response;
+    if (failures.length > 0) {
+      return failures[0].response;
+    }
+
+    const errBody = JSON.stringify({
+        type: "error",
+        error: { type: "overloaded_error", message: "All providers in race failed" },
+      });
+    return new Response(errBody, {
+      status: 502,
+      headers: { "content-type": "application/json" },
+    });
   } catch {
     sharedController.abort();
     const errBody = JSON.stringify({
@@ -412,24 +442,6 @@ async function raceProviders(
       status: 502,
       headers: { "content-type": "application/json" },
     });
-  }
-}
-
-/**
- * Yield race results as they complete, preserving order of first completion.
- */
-async function* raceInOrder<T>(
-  promises: Promise<T>[]
-): AsyncGenerator<T> {
-  const pending = new Set(promises);
-  while (pending.size > 0) {
-    const { promise, value } = await Promise.race(
-      [...pending].map((p) =>
-        p.then((v) => ({ promise: p, value: v }))
-      )
-    );
-    pending.delete(promise);
-    yield value;
   }
 }
 

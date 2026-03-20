@@ -1,7 +1,7 @@
 // tests/proxy.test.ts
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createMockProvider } from "./helpers/mock-provider.js";
-import { forwardRequest, isRetriable, buildOutboundUrl, buildOutboundHeaders } from "../src/proxy.js";
+import { forwardRequest, forwardWithFallback, isRetriable, buildOutboundUrl, buildOutboundHeaders } from "../src/proxy.js";
 import type { RoutingEntry, ProviderConfig, RequestContext } from "../src/types.js";
 
 describe("isRetriable", () => {
@@ -204,5 +204,107 @@ describe("forwardRequest (integration)", () => {
     }));
 
     expect(result.status).toBe(401);
+  });
+});
+
+describe("forwardWithFallback race mode", () => {
+  it("races remaining providers when first returns 429", async () => {
+    const mock1 = createMockProvider();
+    const mock2 = createMockProvider();
+    mock1.setBehavior("error-429");
+    // mock2 succeeds by default
+
+    const provider1: ProviderConfig = {
+      name: "provider-1",
+      baseUrl: mock1.url,
+      apiKey: "test",
+      timeout: 5000,
+    };
+    const provider2: ProviderConfig = {
+      name: "provider-2",
+      baseUrl: mock2.url,
+      apiKey: "test",
+      timeout: 5000,
+    };
+
+    const providers = new Map<string, ProviderConfig>();
+    providers.set("provider-1", provider1);
+    providers.set("provider-2", provider2);
+
+    const chain: RoutingEntry[] = [
+      { provider: "provider-1" },
+      { provider: "provider-2" },
+    ];
+
+    const ctx: RequestContext = {
+      requestId: "test-race",
+      model: "test-model",
+      tier: "test",
+      providerChain: chain,
+      startTime: Date.now(),
+      rawBody: JSON.stringify({ model: "test-model", messages: [] }),
+    };
+
+    const incoming = new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: ctx.rawBody,
+    });
+
+    const response = await forwardWithFallback(providers, chain, ctx, incoming);
+    expect(response.status).toBe(200);
+
+    await mock1.close();
+    await mock2.close();
+  });
+
+  it("falls back sequentially on 500 (no race)", async () => {
+    const mock1 = createMockProvider();
+    const mock2 = createMockProvider();
+    mock1.setBehavior("error-500");
+    // mock2 succeeds by default
+
+    const provider1: ProviderConfig = {
+      name: "provider-1",
+      baseUrl: mock1.url,
+      apiKey: "test",
+      timeout: 5000,
+    };
+    const provider2: ProviderConfig = {
+      name: "provider-2",
+      baseUrl: mock2.url,
+      apiKey: "test",
+      timeout: 5000,
+    };
+
+    const providers = new Map<string, ProviderConfig>();
+    providers.set("provider-1", provider1);
+    providers.set("provider-2", provider2);
+
+    const chain: RoutingEntry[] = [
+      { provider: "provider-1" },
+      { provider: "provider-2" },
+    ];
+
+    const ctx: RequestContext = {
+      requestId: "test-no-race",
+      model: "test-model",
+      tier: "test",
+      providerChain: chain,
+      startTime: Date.now(),
+      rawBody: JSON.stringify({ model: "test-model", messages: [] }),
+    };
+
+    const incoming = new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: ctx.rawBody,
+    });
+
+    const response = await forwardWithFallback(providers, chain, ctx, incoming);
+    expect(response.status).toBe(200);
+
+    await mock1.close();
+    await mock2.close();
   });
 });
