@@ -19,6 +19,14 @@ const MODELWEAVER_DIR = join(
   ".modelweaver"
 );
 
+/** Override for getConfigPort — used by tests to prevent port scanning */
+let _configPortOverride: number | null = null;
+
+/** Set a config port override (0 = skip port-based discovery). Used by tests. */
+export function _setConfigPortOverride(port: number | null): void {
+  _configPortOverride = port;
+}
+
 export function getPidPath(): string {
   return join(MODELWEAVER_DIR, "modelweaver.pid");
 }
@@ -159,10 +167,11 @@ export function findPidsOnPort(port: number): Promise<number[]> {
 }
 
 /** Attempt to load the configured port from the config file (dynamic import to avoid circular deps). */
-async function getConfigPort(): Promise<number | null> {
+export async function getConfigPort(configPath?: string | null): Promise<number | null> {
+  if (_configPortOverride !== null) return _configPortOverride;
   try {
     const { loadConfig } = await import("./config.js");
-    const { config } = loadConfig();
+    const { config } = loadConfig(configPath ?? undefined);
     return config.server.port;
   } catch {
     // Config file missing or invalid — fall back to default

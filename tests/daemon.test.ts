@@ -26,13 +26,18 @@ const {
   isProcessAlive,
   statusDaemon,
   createDebouncedReload,
+  _setConfigPortOverride,
 } = await import("../src/daemon.js");
+
+// Prevent daemon tests from scanning real config/port
+_setConfigPortOverride(0);
 
 // Create the temp directory
 mkdirSync(join(TEST_HOME, ".modelweaver"), { recursive: true });
 
 // Restore HOME after all tests and clean up
 afterAll(() => {
+  _setConfigPortOverride(null);
   process.env.HOME = ORIG_HOME;
   try {
     rmSync(TEST_HOME, { recursive: true, force: true });
