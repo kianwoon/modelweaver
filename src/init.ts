@@ -511,9 +511,15 @@ function buildYamlConfig(
     }
   }
 
-  const configObj: Record<string, unknown> = {
+  const configObj: {
+    server: { port: number; host: string };
+    providers: Record<string, Record<string, unknown>>;
+    modelRouting: Record<string, { provider: string; model: string }[]>;
+    routing?: Record<string, RoutingTier[]>;
+    tierPatterns?: Record<string, string[]>;
+  } = {
     server,
-    providers: {} as Record<string, Record<string, unknown>>,
+    providers: {},
     modelRouting,
   };
 
@@ -680,7 +686,7 @@ async function writeConfigAndSettings(
   // Signal daemon to reload config if it's running
   try {
     const { readPidFile, isProcessAlive } = await import('./daemon.js');
-    const pid = readPidFile();
+    const pid = await readPidFile();
     if (pid && isProcessAlive(pid)) {
       process.kill(pid, 'SIGUSR1');
       check('ModelWeaver daemon reloaded with new config');
