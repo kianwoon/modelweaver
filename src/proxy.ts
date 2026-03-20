@@ -190,7 +190,8 @@ export async function forwardRequest(
   provider: ProviderConfig,
   entry: RoutingEntry,
   ctx: RequestContext,
-  incomingRequest: Request
+  incomingRequest: Request,
+  externalSignal?: AbortSignal
 ): Promise<Response> {
   const outgoingPath = incomingRequest.url.replace(/^https?:\/\/[^/]+/, "");
 
@@ -254,12 +255,26 @@ export async function forwardRequest(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), provider.timeout);
 
+  // Combine external signal (from race cancellation) with per-request timeout
+  const signals = [controller.signal];
+  if (externalSignal) signals.push(externalSignal);
+  const combinedSignal = signals.length === 1
+    ? controller.signal
+    : AbortSignal.any(signals);
+
+  // Listen for external abort to clean up timeout
+  if (externalSignal) {
+    externalSignal.addEventListener("abort", () => {
+      clearTimeout(timeout);
+    }, { once: true });
+  }
+
   try {
     const undiciResponse = await undiciRequest(url, {
       method: "POST",
       headers,
       body,
-      signal: controller.signal,
+      signal: combinedSignal,
       dispatcher: provider._agent,
     });
 
@@ -292,6 +307,129 @@ export async function forwardRequest(
         "content-length": textEncoder.encode(body).byteLength.toString(),
       },
     });
+  }
+}
+
+/**
+ * Race multiple providers simultaneously. Returns the first successful response.
+ * Aborts all remaining requests once a winner is found.
+ */
+async function raceProviders(
+  chain: RoutingEntry[],
+  providers: Map<string, ProviderConfig>,
+  ctx: RequestContext,
+  incomingRequest: Request,
+  onAttempt?: (provider: string, index: number) => void,
+  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
+): Promise<Response> {
+  const sharedController = new AbortController();
+
+  const races = chain.map(async (entry, index): Promise<{ response: Response; index: number }> => {
+    const provider = providers.get(entry.provider);
+    if (!provider) {
+      const errBody = JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: `Unknown provider: ${entry.provider}` },
+        });
+      return {
+        response: new Response(errBody, {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        }),
+        index,
+      };
+    }
+
+    // Check circuit breaker
+    if (provider._circuitBreaker && !provider._circuitBreaker.canProceed()) {
+      const errBody = JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
+        });
+      return {
+        response: new Response(errBody, {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        }),
+        index,
+      };
+    }
+
+    onAttempt?.(entry.provider, index);
+
+    try {
+      const response = await forwardRequest(provider, entry, ctx, incomingRequest, sharedController.signal);
+      // Record for circuit breaker
+      if (provider._circuitBreaker) {
+        provider._circuitBreaker.recordResult(response.status);
+      }
+      return { response, index };
+    } catch {
+      if (provider._circuitBreaker) {
+        provider._circuitBreaker.recordResult(502);
+      }
+      const errBody = JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: `Provider "${entry.provider}" failed` },
+        });
+      return {
+        response: new Response(errBody, {
+          status: 502,
+          headers: { "content-type": "application/json" },
+        }),
+        index,
+      };
+    }
+  });
+
+  try {
+    // Wait for first successful response
+    for await (const { response, index } of raceInOrder(races)) {
+      if (response.status >= 200 && response.status < 300) {
+        sharedController.abort();
+        return response;
+      }
+      // Non-retriable error — propagate immediately
+      if (!isRetriable(response.status)) {
+        sharedController.abort();
+        return response;
+      }
+      // Retriable but not success — continue waiting for others
+    }
+
+    // All failed — return last error
+    const lastRace = await Promise.all(races);
+    const lastResult = lastRace[lastRace.length - 1];
+    sharedController.abort();
+    return lastResult.response;
+  } catch {
+    sharedController.abort();
+    const errBody = JSON.stringify({
+        type: "error",
+        error: { type: "overloaded_error", message: "All providers in race failed" },
+      });
+    return new Response(errBody, {
+      status: 502,
+      headers: { "content-type": "application/json" },
+    });
+  }
+}
+
+/**
+ * Yield race results as they complete, preserving order of first completion.
+ */
+async function* raceInOrder<T>(
+  promises: Promise<T>[]
+): AsyncGenerator<T> {
+  const pending = new Set(promises);
+  while (pending.size > 0) {
+    const { promise, value } = await Promise.race(
+      [...pending].map((p) =>
+        p.then((v) => ({ promise: p, value: v }))
+      )
+    );
+    pending.delete(promise);
+    yield value;
   }
 }
 
@@ -358,6 +496,12 @@ export async function forwardWithFallback(
     // Retriable error — if there are more providers, drain body and try next
     if (i < chain.length - 1) {
       await response.body?.cancel();
+
+      // On 429: race remaining providers simultaneously
+      if (response.status === 429 && i + 1 < chain.length) {
+        const remaining = chain.slice(i + 1);
+        return raceProviders(remaining, providers, ctx, incomingRequest, onAttempt, logger);
+      }
       continue;
     }
     // Last provider in chain — return the error as-is (body still readable)
