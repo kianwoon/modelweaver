@@ -49,7 +49,7 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
  */
 function extractTokensAsync(
   body: ReadableStream<Uint8Array>,
-  ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number },
+  ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race" },
   provider: string,
   targetProvider: string,
   metricsStore: MetricsStore,
@@ -174,6 +174,7 @@ function extractTokensAsync(
           latencyMs,
           tokensPerSec: Math.round(tokensPerSec * 10) / 10,
           timestamp: Date.now(),
+          fallbackMode: ctx.fallbackMode,
         });
       }
     } catch {

@@ -47,6 +47,7 @@ export interface RequestContext {
   providerChain: RoutingEntry[];
   startTime: number;
   rawBody: string;
+  fallbackMode?: "sequential" | "race";
 }
 
 export interface RequestMetrics {
@@ -62,6 +63,7 @@ export interface RequestMetrics {
   latencyMs: number;
   tokensPerSec: number;
   timestamp: number;
+  fallbackMode?: "sequential" | "race";
 }
 
 export interface MetricsSummary {

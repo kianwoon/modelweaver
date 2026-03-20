@@ -511,6 +511,7 @@ export async function forwardWithFallback(
 
       // On 429: race remaining providers simultaneously
       if (response.status === 429 && i + 1 < chain.length) {
+        ctx.fallbackMode = "race";
         const remaining = chain.slice(i + 1);
         return raceProviders(remaining, providers, ctx, incomingRequest, onAttempt, logger);
       }
