@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createMockProvider } from "./helpers/mock-provider.js";
 import { createApp } from "../src/server.js";
+import { MetricsStore } from "../src/metrics.js";
 import type { AppConfig } from "../src/types.js";
 
 function makeConfig(overrides: Partial<AppConfig> = {}): AppConfig {
@@ -231,5 +232,54 @@ describe("server", () => {
       })
     );
     expect(res.status).toBe(200);
+  });
+
+  it("returns error for malformed JSON body", async () => {
+    const config = makeConfig();
+    const { app } = createApp(config, "info");
+
+    const res = await app.fetch(
+      new Request("http://localhost/v1/messages", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{broken",
+      })
+    );
+
+    expect(res.status).toBe(502);
+    const json = await res.json();
+    expect(json.type).toBe("error");
+    expect(json.error.type).toBe("invalid_request_error");
+    expect(json.error.message).toContain("Invalid JSON");
+  });
+
+  it("returns metrics summary from /api/metrics/summary", async () => {
+    const metricsStore = new MetricsStore(100);
+    metricsStore.recordRequest({
+      requestId: "req-metrics-1",
+      model: "claude-sonnet-4",
+      tier: "sonnet",
+      provider: "mock",
+      targetProvider: "mock",
+      status: 200,
+      inputTokens: 50,
+      outputTokens: 25,
+      latencyMs: 300,
+      tokensPerSec: 250,
+      timestamp: Date.now(),
+    });
+
+    const config = makeConfig();
+    const { app } = createApp(config, "info", metricsStore);
+
+    const res = await app.fetch(new Request("http://localhost/api/metrics/summary"));
+
+    expect(res.status).toBe(200);
+    const json = await res.json();
+    expect(json.totalRequests).toBe(1);
+    expect(json.totalInputTokens).toBe(50);
+    expect(json.totalOutputTokens).toBe(25);
+    expect(json.recentRequests).toHaveLength(1);
+    expect(json.recentRequests[0].requestId).toBe("req-metrics-1");
   });
 });

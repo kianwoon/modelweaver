@@ -5,7 +5,10 @@ import { forwardWithFallback } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
 import type { AppConfig, RequestContext } from "./types.js";
 import { randomUUID } from "node:crypto";
-import { gzipSync } from "node:zlib";
+import { gzip } from "node:zlib";
+import { promisify } from "node:util";
+
+const gzipAsync = promisify(gzip);
 import type { MetricsStore } from "./metrics.js";
 
 function anthropicError(type: string, message: string, requestId: string): Response {
@@ -51,6 +54,7 @@ function extractTokensAsync(
   targetProvider: string,
   metricsStore: MetricsStore,
   status: number,
+  contentType: string,
 ): void {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -61,7 +65,8 @@ function extractTokensAsync(
       const first = await reader.read();
       if (first.done) return;
 
-      const isSSE = decoder.decode(first.value, { stream: true }).startsWith("event:");
+      const isSSE = contentType.includes("text/event-stream")
+        || decoder.decode(first.value, { stream: true }).startsWith("event:");
 
       if (isSSE) {
         // Streaming SSE: parse line-by-line, only track usage fields
@@ -101,11 +106,16 @@ function extractTokensAsync(
         recordMetrics(inputTokens, outputTokens);
       } else {
         // Non-streaming JSON: small buffer parse (these are typically < 100KB)
+        const MAX_BUFFER_SIZE = 10 * 1024 * 1024; // 10MB safety limit
         let jsonBuf = first.value;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           jsonBuf = concatUint8Arrays(jsonBuf, value);
+          if (jsonBuf.length > MAX_BUFFER_SIZE) {
+            reader.cancel();
+            return;
+          }
         }
         const text = decoder.decode(jsonBuf);
 
@@ -167,6 +177,15 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   let config: AppConfig = initConfig;
   const logger = createLogger(logLevel);
   const app = new Hono();
+
+  // Global error handler — returns Anthropic-compatible JSON error responses
+  app.onError((err, c) => {
+    console.error(`[server] Unhandled error: ${err.message}`);
+    return c.json(
+      { type: "error", error: { type: "api_error", message: "Internal proxy error" } },
+      { status: 500, headers: { "content-type": "application/json" } }
+    );
+  });
 
   // CORS for GUI (Tauri WebView has origin tauri://localhost)
   app.use("/api/*", async (c, next) => {
@@ -240,7 +259,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     if (response.body && response.status >= 200 && response.status < 300 && metricsStore) {
       const [clientBody, metricsBody] = response.body.tee();
       const targetProvider = ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider;
-      extractTokensAsync(metricsBody, ctx, successfulProvider, targetProvider, metricsStore, response.status);
+      extractTokensAsync(metricsBody, ctx, successfulProvider, targetProvider, metricsStore, response.status, response.headers.get("content-type") || "");
       responseBody = clientBody;
     }
 
@@ -267,14 +286,14 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
 
   // REST endpoint for metrics summary (used by GUI on connect)
   // Returns gzip-compressed JSON when client supports it
-  app.get("/api/metrics/summary", (c) => {
+  app.get("/api/metrics/summary", async (c) => {
     if (!metricsStore) return c.json({ error: "Metrics not enabled" }, 503);
     const data = metricsStore.getSummary();
     const json = JSON.stringify(data);
 
     const acceptEncoding = c.req.header("accept-encoding") || "";
     if (acceptEncoding.includes("gzip") && json.length >= 1024) {
-      const compressed = gzipSync(Buffer.from(json));
+      const compressed = await gzipAsync(Buffer.from(json));
       return new Response(compressed, {
         status: 200,
         headers: {

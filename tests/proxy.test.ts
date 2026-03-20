@@ -146,6 +146,38 @@ describe("forwardRequest (integration)", () => {
     expect(text).toContain("message_stop");
   });
 
+  it("returns 502 with timeout message when provider times out", async () => {
+    mock.setBehavior("timeout");
+    const provider: ProviderConfig = {
+      name: "mock",
+      baseUrl: mock.url,
+      apiKey: "sk-test",
+      timeout: 500,
+    };
+    const entry: RoutingEntry = { provider: "mock" };
+    const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
+    const ctx: RequestContext = {
+      requestId: "test-timeout",
+      model: "claude-sonnet-4",
+      tier: "sonnet",
+      providerChain: [entry],
+      startTime: Date.now(),
+      rawBody: body,
+    };
+
+    const result = await forwardRequest(provider, entry, ctx, new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    }));
+
+    expect(result.status).toBe(502);
+    const json = await result.json() as { type: string; error: { type: string; message: string } };
+    expect(json.type).toBe("error");
+    expect(json.error.message).toContain("timed out");
+    expect(json.error.message).toContain("500ms");
+  }, 10_000);
+
   it("returns error response for non-retriable status", async () => {
     mock.setBehavior("error-401");
     const provider: ProviderConfig = {

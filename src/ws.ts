@@ -60,6 +60,7 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
       }
       // Terminate if client missed too many pongs
       if (missedPongs >= MAX_MISSED_PONGS) {
+        cleanup();  // ensure timers and subscriber are cleaned up
         ws.terminate();
         return;
       }
@@ -71,7 +72,10 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
       missedPongs = 0; // reset on successful pong
     });
 
+    let cleanedUp = false;
     const cleanup = () => {
+      if (cleanedUp) return;
+      cleanedUp = true;
       clearInterval(pingTimer);
       if (pendingSummaryTimer) clearTimeout(pendingSummaryTimer);
       unsubscribe();

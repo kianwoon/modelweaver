@@ -4,7 +4,7 @@ import type { RequestMetrics, MetricsSummary } from "./types.js";
 type Subscriber = (metrics: RequestMetrics) => void;
 
 export class MetricsStore {
-  private buffer: RequestMetrics[];
+  private buffer: (RequestMetrics | null)[];
   private maxSize: number;
   private head = 0;
   private count = 0;
@@ -96,18 +96,20 @@ export class MetricsStore {
   private getRecentRequests(): RequestMetrics[] {
     if (this.count === 0) return [];
 
-    // Extract in chronological order from the ring buffer
+    // Extract in chronological order from the ring buffer, filtering out null slots
     const result: RequestMetrics[] = [];
     if (this.count < this.maxSize) {
       // Buffer not yet wrapped — items are in order from index 0
       for (let i = 0; i < this.count; i++) {
-        result.push(this.buffer[i]);
+        const entry = this.buffer[i];
+        if (entry !== null) result.push(entry);
       }
     } else {
       // Buffer has wrapped — oldest is at head % maxSize, read from there
       const start = this.head % this.maxSize;
       for (let i = 0; i < this.maxSize; i++) {
-        result.push(this.buffer[(start + i) % this.maxSize]);
+        const entry = this.buffer[(start + i) % this.maxSize];
+        if (entry !== null) result.push(entry);
       }
     }
     return result;

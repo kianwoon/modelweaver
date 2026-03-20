@@ -37,7 +37,15 @@ export async function ensureDir(): Promise<void> {
 
 export async function writePidFile(pid: number): Promise<void> {
   await ensureDir();
-  await writeFile(getPidPath(), `${pid}\n`);
+  try {
+    await writeFile(getPidPath(), `${pid}\n`, { flag: 'wx' });
+  } catch (err: unknown) {
+    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+      // PID file already exists — another instance is likely running
+      return;
+    }
+    throw err;
+  }
 }
 
 export async function readPidFile(): Promise<number | null> {
@@ -106,7 +114,9 @@ export function isProcessAlive(pid: number): boolean {
 // Port-based process discovery (fallback when PID file is missing)
 // ---------------------------------------------------------------------------
 
-/** Find PIDs of processes listening on the given TCP port via lsof (async). */
+/** Find PIDs of processes listening on the given TCP port via lsof (async).
+ *  NOTE: lsof is unavailable on Windows — port-based discovery silently skips on that platform.
+ */
 export function findPidsOnPort(port: number): Promise<number[]> {
   return new Promise((resolve) => {
     execFile("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], {
@@ -337,21 +347,7 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
     // Monitor is dead — check for orphaned worker and kill it
     const workerPid = await readWorkerPidFile();
     if (workerPid !== null && isProcessAlive(workerPid)) {
-      try {
-        process.kill(workerPid, "SIGTERM");
-      } catch {
-        // Already dead
-      }
-      const workerDeadline = Date.now() + 5000;
-      while (Date.now() < workerDeadline) {
-        if (!isProcessAlive(workerPid)) break;
-        await new Promise(r => setTimeout(r, 100));
-      }
-      try {
-        process.kill(workerPid, "SIGKILL");
-      } catch {
-        // Already dead
-      }
+      await killProcessTree([workerPid]);
       await removeWorkerPidFile();
     }
     await removePidFile();

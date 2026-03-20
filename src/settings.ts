@@ -1,5 +1,5 @@
 // src/settings.ts — Read/write/merge Claude Code settings.json
-import { readFileSync, writeFileSync, existsSync, copyFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, copyFileSync, mkdirSync, renameSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -39,7 +39,12 @@ export function getSettingsPath(): string {
 export function readSettings(): ClaudeSettings {
   if (!existsSync(SETTINGS_PATH)) return {};
   const raw = readFileSync(SETTINGS_PATH, "utf-8");
-  return JSON.parse(raw) as ClaudeSettings;
+  try {
+    return JSON.parse(raw) as ClaudeSettings;
+  } catch {
+    console.warn("[settings] Malformed settings.json, starting fresh");
+    return {};
+  }
 }
 
 /**
@@ -48,6 +53,7 @@ export function readSettings(): ClaudeSettings {
  */
 export function backupSettings(): boolean {
   if (!existsSync(SETTINGS_PATH)) return false;
+  console.log("[settings] Backing up existing settings to .bak");
   copyFileSync(SETTINGS_PATH, BACKUP_PATH);
   return true;
 }
@@ -107,5 +113,12 @@ export function mergeSettings(
  */
 export function writeSettings(settings: ClaudeSettings): void {
   mkdirSync(dirname(SETTINGS_PATH), { recursive: true });
-  writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+  const tmpPath = SETTINGS_PATH + ".tmp";
+  try {
+    writeFileSync(tmpPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
+    renameSync(tmpPath, SETTINGS_PATH);
+  } catch {
+    // Clean up temp file if rename failed
+    try { renameSync(tmpPath, SETTINGS_PATH); } catch { /* ignore */ }
+  }
 }

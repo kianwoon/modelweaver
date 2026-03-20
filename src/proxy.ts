@@ -19,6 +19,32 @@ export function isRetriable(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
+/** Keywords that indicate a context/token-length error in provider error responses */
+const CONTEXT_ERROR_KEYWORDS = [
+  "context",
+  "token",
+  "too large",
+  "too long",
+  "max tokens",
+  "context_length",
+  "input_too_long",
+  "maximum context",
+];
+
+/**
+ * Check whether an error response body indicates a context-size / token-limit error.
+ * Matches against both `error.message` (Anthropic) and `error` (string) shapes.
+ */
+function isContextSizeError(body: Record<string, unknown>): boolean {
+  const msg =
+    (body.error as Record<string, unknown>)?.message as string | undefined
+    ?? (body.error as string | undefined)
+    ?? (body.message as string | undefined)
+    ?? "";
+  const lower = msg.toLowerCase();
+  return CONTEXT_ERROR_KEYWORDS.some((kw) => lower.includes(kw));
+}
+
 
 export function buildOutboundUrl(baseUrl: string, incomingPath: string): string {
   const base = new URL(baseUrl);
@@ -63,7 +89,7 @@ export function buildOutboundHeaders(
   headers.set("x-request-id", requestId);
 
   // Set host to provider hostname (use cached components when available)
-  const cachedHost = (provider as ProviderConfig & { _cachedHost?: string })._cachedHost;
+  const cachedHost = provider._cachedHost;
   if (cachedHost) {
     headers.set("host", cachedHost);
   } else {
@@ -152,6 +178,32 @@ function cleanOrphanedToolMessages(body: Record<string, unknown>): void {
     }
     return msg;
   });
+
+  // Pass 3: Re-check user messages after assistant cleanup.
+  // After Pass 2 removed orphaned tool_use blocks from assistant messages, some
+  // user tool_result blocks may now reference tool_use IDs that no longer exist.
+  // Rebuild valid IDs from the cleaned messages and strip dangling user tool_results.
+  const validToolUseIds = new Set<string>();
+  for (const msg of body.messages as Record<string, unknown>[]) {
+    if (!Array.isArray(msg.content)) continue;
+    if (msg.role === "assistant") {
+      for (const block of msg.content as Record<string, unknown>[]) {
+        if (block.type === "tool_use" && block.id) validToolUseIds.add(String(block.id));
+      }
+    }
+  }
+
+  body.messages = (body.messages as Record<string, unknown>[]).map((msg) => {
+    if (msg.role === "user" && Array.isArray(msg.content)) {
+      const filtered = msg.content.filter(
+        (block: Record<string, unknown>) =>
+          !(block.type === "tool_result" && !validToolUseIds.has(String(block.tool_use_id)))
+      );
+      if (filtered.length === msg.content.length) return msg;
+      return { ...msg, content: filtered };
+    }
+    return msg;
+  });
 }
 
 /**
@@ -175,7 +227,7 @@ export async function forwardRequest(
   }
 
   // Use cached URL components when available (avoids per-request URL parsing)
-  const cachedBaseUrl = (provider as ProviderConfig & { _cachedBaseUrl?: string })._cachedBaseUrl;
+  const cachedBaseUrl = provider._cachedBaseUrl;
   const url = buildOutboundUrl(cachedBaseUrl ?? provider.baseUrl, outgoingPath);
 
   // Prepare body — prefer pre-parsed object to avoid double JSON.parse
@@ -187,24 +239,33 @@ export async function forwardRequest(
       const parsed = (ctx as RequestContext & { parsedBody?: Record<string, unknown> }).parsedBody
         ?? JSON.parse(ctx.rawBody);
 
+      // Deep clone so mutations from this attempt don't affect the next fallback attempt
+      const mutable = structuredClone(parsed);
+
       // Model override in the request body
       if (entry.model) {
-        parsed.model = entry.model;
+        const originalModel = mutable.model as string | undefined;
+        mutable.model = entry.model;
+        if (originalModel && originalModel !== entry.model) {
+          console.warn(
+            `Routing override: ${originalModel} → ${entry.model} via ${provider.name}`
+          );
+        }
       }
 
       // Clean orphaned tool references from cross-provider conversation history
-      cleanOrphanedToolMessages(parsed);
+      cleanOrphanedToolMessages(mutable);
 
       // Clamp max_tokens to provider's advertised output limit (let upstream handle input context checks)
       if (provider.modelLimits) {
         const { maxOutputTokens } = provider.modelLimits;
-        const requestedMaxTokens = typeof parsed.max_tokens === "number" ? parsed.max_tokens : maxOutputTokens;
-        if (parsed.max_tokens === undefined || requestedMaxTokens > maxOutputTokens) {
-          parsed.max_tokens = Math.min(requestedMaxTokens, maxOutputTokens);
+        const requestedMaxTokens = typeof mutable.max_tokens === "number" ? mutable.max_tokens : maxOutputTokens;
+        if (mutable.max_tokens === undefined || requestedMaxTokens > maxOutputTokens) {
+          mutable.max_tokens = Math.min(requestedMaxTokens, maxOutputTokens);
         }
       }
 
-      body = JSON.stringify(parsed);
+      body = JSON.stringify(mutable);
     } catch {
       // If body can't be parsed, send it as-is without model override
       body = ctx.rawBody;
@@ -236,13 +297,17 @@ export async function forwardRequest(
       ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
       : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
 
-    return new Response(
-      JSON.stringify({
+    const body = JSON.stringify({
         type: "error",
         error: { type: "overloaded_error", message },
-      }),
-      { status: 502, headers: { "content-type": "application/json" } }
-    );
+      });
+    return new Response(body, {
+      status: 502,
+      headers: {
+        "content-type": "application/json",
+        "content-length": textEncoder.encode(body).byteLength.toString(),
+      },
+    });
   }
 }
 
@@ -264,13 +329,17 @@ export async function forwardWithFallback(
     const provider = providers.get(entry.provider);
 
     if (!provider) {
-      lastResponse = new Response(
-        JSON.stringify({
+      const errBody = JSON.stringify({
           type: "error",
           error: { type: "api_error", message: `Unknown provider: ${entry.provider}` },
-        }),
-        { status: 502, headers: { "content-type": "application/json" } }
-      );
+        });
+      lastResponse = new Response(errBody, {
+        status: 502,
+        headers: {
+          "content-type": "application/json",
+          "content-length": textEncoder.encode(errBody).byteLength.toString(),
+        },
+      });
       continue;
     }
 
@@ -285,8 +354,22 @@ export async function forwardWithFallback(
       return response;
     }
 
-    // Non-retriable error — fail immediately
+    // Non-retriable error — fail immediately, UNLESS it's a 400 context-size
+    // error and there are more providers to try in the fallback chain.
     if (!isRetriable(response.status)) {
+      if (
+        response.status === 400 &&
+        i < chain.length - 1 &&
+        response.headers.get("content-type")?.includes("application/json")
+      ) {
+        const clone = response.clone();
+        const errBody = await clone.json().catch(() => null);
+        await clone.body?.cancel();
+        if (errBody && isContextSizeError(errBody)) {
+          await response.body?.cancel();
+          continue;
+        }
+      }
       return response;
     }
 
@@ -304,11 +387,15 @@ export async function forwardWithFallback(
     return lastResponse;
   }
 
-  return new Response(
-    JSON.stringify({
-      type: "error",
-      error: { type: "overloaded_error", message: "All providers exhausted" },
-    }),
-    { status: 502, headers: { "content-type": "application/json" } }
-  );
+  const fallbackBody = JSON.stringify({
+    type: "error",
+    error: { type: "overloaded_error", message: "All providers exhausted" },
+  });
+  return new Response(fallbackBody, {
+    status: 502,
+    headers: {
+      "content-type": "application/json",
+      "content-length": textEncoder.encode(fallbackBody).byteLength.toString(),
+    },
+  });
 }

@@ -113,7 +113,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
   }
 
   const raw = readFileSync(path, "utf-8");
-  const parsed = parseYaml(raw);
+  const parsed = parseYaml(raw, { customTags: [] });
 
   // Resolve ${VAR} references in all string values
   const resolved = resolveAllEnvStrings(parsed) as z.infer<typeof rawConfigSchema>;
@@ -140,14 +140,12 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
   }
 
   // Cross-validate modelRouting provider references
-  if (validated.modelRouting) {
-    for (const [modelName, entries] of Object.entries(validated.modelRouting)) {
-      for (const entry of entries) {
-        if (!providerNames.has(entry.provider)) {
-          throw new Error(
-            `modelRouting for model "${modelName}" references unknown provider "${entry.provider}". Available: ${[...providerNames].join(", ")}`
-          );
-        }
+  for (const [modelName, entries] of Object.entries(validated.modelRouting)) {
+    for (const entry of entries) {
+      if (!providerNames.has(entry.provider)) {
+        throw new Error(
+          `modelRouting for model "${modelName}" references unknown provider "${entry.provider}". Available: ${[...providerNames].join(", ")}`
+        );
       }
     }
   }
@@ -155,7 +153,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
   // Build typed config — cache parsed URL components per provider (avoids per-request URL parsing)
   const providers = new Map<string, ProviderConfig>();
   for (const [name, p] of Object.entries(validated.providers)) {
-    const providerConfig: ProviderConfig & { _cachedBaseUrl?: string; _cachedHost?: string } = {
+    const providerConfig: ProviderConfig = {
       name,
       baseUrl: p.baseUrl,
       apiKey: p.apiKey,

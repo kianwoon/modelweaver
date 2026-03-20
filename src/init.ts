@@ -244,6 +244,20 @@ async function configureProvider(
       CANCEL,
     );
 
+    // Validate the base URL format
+    try {
+      new URL(baseUrl as string);
+    } catch {
+      console.log("  Invalid URL format. Please try again.");
+      if (attempt < MAX_RETRIES - 1) continue;
+      const { retry } = await prompts(
+        { type: 'confirm', name: 'retry', message: `Retry with a valid URL? (${attempt + 1}/${MAX_RETRIES - 1} retries used)`, initial: true },
+        CANCEL,
+      );
+      if (!retry) break;
+      continue;
+    }
+
     const { apiKey } = await prompts(
       { type: 'password', name: 'apiKey', message: `${stepLabel}[${preset.name}] API key:` },
       CANCEL,
@@ -567,7 +581,9 @@ function writeEnvFile(entries: ConfiguredProvider[]): void {
     // Escape regex metacharacters in env key name
     const escapedKey = entry.envKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const regex = new RegExp(`^${escapedKey}=.*$`, 'm');
-    const quotedValue = entry.apiKey.includes('"') ? `'${entry.apiKey}'` : `"${entry.apiKey}"`;
+    const quotedValue = entry.apiKey.includes('"')
+      ? (entry.apiKey.includes("'") ? `'${entry.apiKey.replace(/'/g, "'\\''")}'` : `'${entry.apiKey}'`)
+      : `"${entry.apiKey}"`;
     if (regex.test(existing)) {
       existing = existing.replace(regex, `${entry.envKey}=${quotedValue}`);
     } else {

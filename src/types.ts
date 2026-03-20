@@ -10,6 +10,10 @@ export interface ProviderConfig {
   timeout: number;
   authType?: "anthropic" | "bearer";
   modelLimits?: ModelLimits;
+
+  /** Runtime-only cached fields — not serialized to config */
+  _cachedBaseUrl?: string;
+  _cachedHost?: string;
 }
 
 export interface RoutingEntry {
