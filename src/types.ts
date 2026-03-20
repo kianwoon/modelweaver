@@ -15,6 +15,7 @@ export interface ProviderConfig {
   _cachedBaseUrl?: string;
   _cachedHost?: string;
   _agent?: import("undici").Agent;
+  poolSize?: number;
 }
 
 export interface RoutingEntry {

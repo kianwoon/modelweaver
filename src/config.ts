@@ -3,6 +3,7 @@ import { readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { Agent } from "undici";
 import type { AppConfig, ProviderConfig, RoutingEntry, ServerConfig } from "./types.js";
 
 // --- Zod schemas for raw (pre-resolution) config ---
@@ -21,6 +22,7 @@ const providerSchema = z.object({
   timeout: z.number().default(30000),
   authType: z.enum(["anthropic", "bearer"]).default("anthropic"),
   modelLimits: modelLimitsSchema,
+  poolSize: z.number().int().min(1).max(100).optional(),
 });
 
 const routingEntrySchema = z.object({
@@ -169,6 +171,14 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
     } catch {
       // If baseUrl is invalid, skip caching — buildOutboundHeaders will fall back gracefully
     }
+    // Create per-provider connection pool for HTTP keep-alive reuse
+    const poolSize = (p as Record<string, unknown>).poolSize as number | undefined;
+    providerConfig._agent = new Agent({
+      keepAliveTimeout: 30000,
+      keepAliveMaxTimeout: 60000,
+      connections: poolSize ?? 10,
+    });
+    providerConfig.poolSize = poolSize ?? 10;
     providers.set(name, providerConfig);
   }
 
