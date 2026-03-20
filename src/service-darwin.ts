@@ -2,6 +2,7 @@
 export const platform = "darwin";
 import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 
@@ -12,7 +13,7 @@ const LOG_DIR = join(homedir(), ".modelweaver", "logs");
 
 function getPlistContent(): string {
   // Resolve the entry script path relative to this source file
-  const __dirname = dirname(new URL(import.meta.url).pathname);
+  const __dirname = dirname(fileURLToPath(import.meta.url));
   const nodePath = join(__dirname, "dist", "index.js");
   const workDir = process.cwd();
 

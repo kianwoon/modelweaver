@@ -6,6 +6,10 @@ import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:net";
 
+function isWindows(): boolean {
+  return process.platform === "win32";
+}
+
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
@@ -119,6 +123,26 @@ export function isProcessAlive(pid: number): boolean {
  */
 export function findPidsOnPort(port: number): Promise<number[]> {
   return new Promise((resolve) => {
+    if (isWindows()) {
+      try {
+        execFile("netstat", ["-ano"], { encoding: "utf-8", timeout: 3000 }, (err, out) => {
+          if (err) { resolve([]); return; }
+          const pids: number[] = [];
+          for (const line of (out || "").split("\n")) {
+            if (line.includes("LISTENING") && line.includes(`:${port}`)) {
+              const parts = line.trim().split(/\s+/);
+              const pid = parseInt(parts[parts.length - 1], 10);
+              if (!isNaN(pid) && pid > 0) pids.push(pid);
+            }
+          }
+          resolve(pids);
+        });
+      } catch {
+        resolve([]);
+        return;
+      }
+      return;
+    }
     execFile("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], {
       encoding: "utf-8",
       timeout: 3000,
@@ -161,7 +185,7 @@ async function killProcessTree(pids: number[], timeoutMs: number = 5000): Promis
   }
   // Force kill anything still alive
   for (const pid of pids) {
-    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+    try { process.kill(pid, isWindows() ? "SIGTERM" : "SIGKILL"); } catch { /* already dead */ }
   }
   return true;
 }
@@ -372,7 +396,7 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
 
   // Force kill if still running
   try {
-    process.kill(pid, "SIGKILL");
+    process.kill(pid, isWindows() ? "SIGTERM" : "SIGKILL");
   } catch {
     // Already dead
   }
@@ -422,7 +446,14 @@ export async function reloadDaemon(portOverride?: number): Promise<void> {
       const livePids = portPids.filter((p) => isProcessAlive(p));
       if (livePids.length > 0) {
         for (const p of livePids) {
-          try { process.kill(p, "SIGHUP"); } catch { /* ignore */ }
+          try {
+            if (isWindows()) {
+              // SIGHUP not available on Windows — just inform user
+              console.log(`  Windows detected — reload signal not supported for PID ${p}. Use 'modelweaver stop && modelweaver start' instead.`);
+            } else {
+              process.kill(p, "SIGHUP");
+            }
+          } catch { /* ignore */ }
         }
         console.log(`  Sent reload signal to ${livePids.length} process(es) on port ${port}.`);
         return;
@@ -439,8 +470,19 @@ export async function reloadDaemon(portOverride?: number): Promise<void> {
   }
 
   try {
-    process.kill(pid, "SIGHUP");
-    console.log(`  Sent reload signal to daemon (PID ${pid}).`);
+    if (isWindows()) {
+      // Windows has no SIGHUP — kill the worker directly so monitor restarts it
+      const workerPid = await readWorkerPidFile();
+      if (workerPid !== null) {
+        process.kill(workerPid, "SIGTERM");
+        console.log(`  Killed worker (PID ${workerPid}) on Windows — monitor will restart it.`);
+      } else {
+        console.log("  No worker PID file found — cannot reload.");
+      }
+    } else {
+      process.kill(pid, "SIGHUP");
+      console.log(`  Sent reload signal to daemon (PID ${pid}).`);
+    }
   } catch {
     console.log("  Failed to send reload signal — daemon may not be running.");
   }

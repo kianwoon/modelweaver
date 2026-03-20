@@ -1,6 +1,7 @@
 // src/service-linux.ts — Linux systemd user service management
 import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 
@@ -10,7 +11,7 @@ const SERVICE_DIR = join(homedir(), ".config", "systemd", "user");
 const SERVICE_PATH = join(SERVICE_DIR, "modelweaver.service");
 
 function getServiceContent(): string {
-  const __dirname = dirname(new URL(import.meta.url).pathname);
+  const __dirname = dirname(fileURLToPath(import.meta.url));
   const entryScript = join(__dirname, "..", "dist", "index.js");
   const workDir = process.cwd();
 
@@ -18,7 +19,7 @@ function getServiceContent(): string {
 Description=modelweaver daemon
 
 [Service]
-ExecStart=${process.execPath} ${entryScript} start
+ExecStart=${process.execPath} ${entryScript} --monitor
 WorkingDirectory=${workDir}
 Restart=on-failure
 RestartSec=5

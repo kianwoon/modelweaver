@@ -343,6 +343,7 @@ async function main() {
     });
 
     // SIGHUP from `reload` → gracefully kill current worker so monitor restarts it
+    // Note: SIGHUP is POSIX-only; this handler is a no-op on Windows.
     process.on("SIGHUP", () => {
       console.log("[monitor] Received reload signal, restarting worker...");
       reloading = true;
@@ -415,7 +416,8 @@ async function main() {
       }
     }
 
-    // SIGUSR1 for manual reload signal
+    // SIGUSR1 triggers config hot-reload
+    // Note: SIGUSR1 is POSIX-only; this handler is a no-op on Windows.
     process.on('SIGUSR1', () => {
       try {
         const newConfig = reloadConfig(configPath!);

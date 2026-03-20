@@ -1,6 +1,7 @@
 // src/service-win32.ts — Windows startup folder service management
 import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 export const platform = "win32";
 
@@ -15,7 +16,7 @@ const STARTUP_FOLDER = join(
 const VBS_PATH = join(STARTUP_FOLDER, "modelweaver.vbs");
 
 function getVbsContent(): string {
-  const __dirname = dirname(new URL(import.meta.url).pathname);
+  const __dirname = dirname(fileURLToPath(import.meta.url));
   const entryScript = join(__dirname, "..", "dist", "index.js");
   const workDir = process.cwd();
 
@@ -28,7 +29,7 @@ export function isInstalled(): boolean {
   return existsSync(VBS_PATH);
 }
 
-export function install(): void {
+export async function install(): Promise<void> {
   // Create startup folder if needed
   if (!existsSync(STARTUP_FOLDER)) {
     mkdirSync(STARTUP_FOLDER, { recursive: true });
@@ -39,6 +40,16 @@ export function install(): void {
 
   console.log(`  Windows startup entry installed: ${VBS_PATH}`);
   console.log(`  Auto-starts on login (startup folder)`);
+
+  // Start daemon immediately (don't wait for next login)
+  try {
+    const { spawn } = await import("node:child_process");
+    const child = spawn(process.execPath, [entryScript, "start"], { detached: true, stdio: "ignore" });
+    child.unref();
+    console.log("  Daemon started immediately.");
+  } catch {
+    console.log("  Warning: could not start daemon automatically.");
+  }
 }
 
 export function uninstall(): void {

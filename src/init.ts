@@ -704,7 +704,11 @@ async function writeConfigAndSettings(
     const { readPidFile, isProcessAlive } = await import('./daemon.js');
     const pid = await readPidFile();
     if (pid && isProcessAlive(pid)) {
-      process.kill(pid, 'SIGUSR1');
+      if (process.platform !== "win32") {
+        try { process.kill(pid, 'SIGUSR1'); } catch { /* process may not exist */ }
+      } else {
+        console.log("  Windows does not support SIGUSR1 — run 'modelweaver reload' to pick up new config.");
+      }
       check('ModelWeaver daemon reloaded with new config');
     }
   } catch {

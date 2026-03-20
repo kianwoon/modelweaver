@@ -117,6 +117,9 @@ fi
 # ── Test 2: Worker crash → auto-restart ──
 echo ""
 echo "Test 2: Worker crash triggers auto-restart"
+if [ "$IS_WINDOWS" = true ]; then
+  log_skip "Process signals unreliable in Git Bash (PID translation)"
+else
 OLD_WORKER=$WORKER_PID
 if is_pid_alive "$OLD_WORKER"; then
   kill -9 "$OLD_WORKER" 2>/dev/null
@@ -129,12 +132,13 @@ else
   log_fail "Worker did not restart after crash within 10s"
 fi
 WORKER_PID=$NEW_WORKER
+fi
 
 # ── Test 3: SIGHUP reload ──
 echo ""
 echo "Test 3: SIGHUP reload (hot-reload)"
 if [ "$IS_WINDOWS" = true ]; then
-  log_skip "SIGHUP not available on Windows"
+  log_skip "Process signals unreliable in Git Bash (PID translation)"
 else
   BEFORE_WORKER=$WORKER_PID
   if is_pid_alive "$MONITOR_PID"; then
@@ -153,6 +157,9 @@ fi
 # ── Test 4: Multiple rapid crashes (backoff) ──
 echo ""
 echo "Test 4: Multiple rapid crashes (backoff timing)"
+if [ "$IS_WINDOWS" = true ]; then
+  log_skip "Process signals unreliable in Git Bash (PID translation)"
+else
 CRASH_COUNT=0
 for i in 1 2 3; do
   WPID=$(get_worker_pid)
@@ -171,6 +178,7 @@ else
   log_fail "Worker did not recover after $CRASH_COUNT rapid crashes within 30s"
 fi
 WORKER_PID=$NEW_WORKER
+fi
 
 # ── Test 5: Status command ──
 echo ""
