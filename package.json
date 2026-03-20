@@ -11,6 +11,10 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsup",
+    "start": "node dist/index.js start",
+    "stop": "node dist/index.js stop",
+    "status": "node dist/index.js status",
+    "remove": "node dist/index.js remove",
     "test": "vitest run",
     "test:watch": "vitest"
   },

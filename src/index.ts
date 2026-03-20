@@ -126,7 +126,7 @@ async function main() {
   // Handle 'status' subcommand
   if (process.argv[2] === 'status') {
     const { statusDaemon } = await import('./daemon.js');
-    const result = statusDaemon();
+    const result = await statusDaemon();
     console.log(`  ${result.message}`);
     process.exit(0);
   }

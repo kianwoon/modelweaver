@@ -16,6 +16,7 @@ import {
   isProcessAlive,
   statusDaemon,
   createDebouncedReload,
+  findPidsOnPort,
 } from "../src/daemon.js";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -87,23 +88,24 @@ describe("daemon", () => {
       removePidFile();
     });
 
-    it("returns not running when no PID file", () => {
-      const status = statusDaemon();
+    it("returns not running when no PID file and nothing on port", async () => {
+      // Pass port=0 to skip port-based fallback detection in tests
+      const status = await statusDaemon(0);
       expect(status.running).toBe(false);
       expect(status.message).toContain("not running");
     });
 
-    it("returns running with current PID", () => {
+    it("returns running with current PID", async () => {
       writePidFile(process.pid);
-      const status = statusDaemon();
+      const status = await statusDaemon();
       expect(status.running).toBe(true);
       expect(status.pid).toBe(process.pid);
       expect(status.message).toContain("running");
     });
 
-    it("cleans up stale PID file", () => {
+    it("cleans up stale PID file", async () => {
       writePidFile(999999999); // impossible PID
-      const status = statusDaemon();
+      const status = await statusDaemon();
       expect(status.running).toBe(false);
       expect(status.message).toContain("stale");
       // PID file should have been removed
@@ -234,14 +236,18 @@ describe("daemon", () => {
       removeWorkerPidFile();
     });
 
-    it("reports not running and cleans up log file when daemon not running", async () => {
+    it("reports not running or cleaned up and removes log file", async () => {
       ensureDir();
       writeFileSync(getLogPath(), "old log\n");
       writeWorkerPidFile(12345);
 
       const result = await removeDaemon();
       expect(result.success).toBe(true);
-      expect(result.message).toContain("not running");
+      // Message may say "not running" (normal case) or "stopped" (if port-based
+      // fallback found a process on the configured port during the test)
+      expect(
+        result.message.includes("not running") || result.message.includes("stopped")
+      ).toBe(true);
       expect(existsSync(getLogPath())).toBe(false);
       expect(existsSync(getWorkerPidPath())).toBe(false);
     });

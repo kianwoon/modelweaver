@@ -1,5 +1,5 @@
 // src/daemon.ts — Daemon lifecycle management for background mode
-import { fork, spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -106,6 +106,57 @@ export function isProcessAlive(pid: number): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Port-based process discovery (fallback when PID file is missing)
+// ---------------------------------------------------------------------------
+
+/** Find PIDs of processes listening on the given TCP port via lsof. */
+export function findPidsOnPort(port: number): number[] {
+  try {
+    // execFileSync avoids shell injection; port is always a number
+    const out = execFileSync("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], {
+      encoding: "utf-8",
+      timeout: 3000,
+    }).trim();
+    return out ? out.split("\n").map(Number).filter((n) => !isNaN(n)) : [];
+  } catch {
+    // lsof returns non-zero when nothing is listening on the port
+    return [];
+  }
+}
+
+/** Attempt to load the configured port from the config file (dynamic import to avoid circular deps). */
+async function getConfigPort(): Promise<number | null> {
+  try {
+    const { loadConfig } = await import("./config.js");
+    const { config } = loadConfig();
+    return config.server.port;
+  } catch {
+    // Config file missing or invalid — fall back to default
+    return 3456;
+  }
+}
+
+/**
+ * Kill a process tree: send SIGTERM, wait up to `timeoutMs`, then SIGKILL.
+ * Handles the process and any known child (worker PID file).
+ */
+async function killProcessTree(pids: number[], timeoutMs: number = 5000): Promise<boolean> {
+  for (const pid of pids) {
+    try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
+  }
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pids.every((p) => !isProcessAlive(p))) return true;
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  // Force kill anything still alive
+  for (const pid of pids) {
+    try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // Daemon status
 // ---------------------------------------------------------------------------
 
@@ -115,9 +166,24 @@ export interface DaemonStatus {
   message: string;
 }
 
-export function statusDaemon(): DaemonStatus {
+export async function statusDaemon(portOverride?: number): Promise<DaemonStatus> {
   const pid = readPidFile();
   if (pid === null) {
+    // PID file missing — try to find the process by configured port
+    const port = portOverride ?? await getConfigPort();
+    if (port !== null && port > 0) {
+      const portPids = findPidsOnPort(port);
+      if (portPids.length > 0) {
+        const livePids = portPids.filter((p) => isProcessAlive(p));
+        if (livePids.length > 0) {
+          return {
+            running: true,
+            pid: livePids[0],
+            message: `ModelWeaver is running (PID ${livePids[0]}, detected on port ${port}; PID file missing)`,
+          };
+        }
+      }
+    }
     return { running: false, message: "ModelWeaver is not running (no PID file found)" };
   }
   if (isProcessAlive(pid)) {
@@ -161,8 +227,8 @@ export async function startDaemon(
   port?: number,
   verbose?: boolean,
 ): Promise<DaemonStartResult> {
-  // Check if already running
-  const currentStatus = statusDaemon();
+  // Check if already running (now uses port-based fallback too)
+  const currentStatus = await statusDaemon(port);
   if (currentStatus.running) {
     return {
       success: false,
@@ -172,11 +238,12 @@ export async function startDaemon(
     };
   }
 
-  // Check if port is already in use (only when port is explicitly provided)
-  if (port && await isPortInUse(port)) {
+  // Check if port is already in use
+  const effectivePort = port ?? await getConfigPort() ?? 3456;
+  if (await isPortInUse(effectivePort)) {
     return {
       success: false,
-      message: `Port ${port} is already in use. Is ModelWeaver or another process running on it?`,
+      message: `Port ${effectivePort} is already in use. Is ModelWeaver or another process running on it?`,
       logPath: getLogPath(),
     };
   }
@@ -240,9 +307,29 @@ export interface DaemonStopResult {
   message: string;
 }
 
-export async function stopDaemon(): Promise<DaemonStopResult> {
+export async function stopDaemon(portOverride?: number): Promise<DaemonStopResult> {
   const pid = readPidFile();
   if (pid === null) {
+    // PID file missing — try to find the process by configured port
+    const port = portOverride ?? await getConfigPort();
+    if (port !== null) {
+      const portPids = findPidsOnPort(port);
+      const livePids = portPids.filter((p) => isProcessAlive(p));
+      if (livePids.length > 0) {
+        // Also include the worker PID file if present
+        const workerPid = readWorkerPidFile();
+        const pidsToKill = [...livePids];
+        if (workerPid !== null && isProcessAlive(workerPid) && !pidsToKill.includes(workerPid)) {
+          pidsToKill.push(workerPid);
+        }
+        await killProcessTree(pidsToKill);
+        removeWorkerPidFile();
+        return {
+          success: true,
+          message: `ModelWeaver stopped (found on port ${port}, PIDs ${livePids.join(", ")}; PID file was missing)`,
+        };
+      }
+    }
     return { success: false, message: "ModelWeaver is not running (no PID file found)" };
   }
 
