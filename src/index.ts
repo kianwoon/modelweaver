@@ -54,7 +54,7 @@ ModelWeaver — Multi-provider model orchestration proxy for Claude Code
 Usage: modelweaver [command] [options]
 
 Commands:
-  init                    Run interactive setup wizard
+  init [--quick]          Run interactive setup wizard (--quick for express mode)
   start                   Start as background daemon
   stop                    Stop background daemon
   status                  Show daemon status
@@ -100,8 +100,9 @@ async function main() {
 
   // Handle 'init' subcommand — dynamic import to avoid loading prompts for normal startup
   if (process.argv[2] === 'init') {
+    const quick = process.argv.includes('--quick') || process.argv.includes('-q');
     const { runInit } = await import('./init.js');
-    await runInit();
+    await runInit({ quick });
     process.exit(0);
   }
 

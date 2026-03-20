@@ -82,7 +82,7 @@ function updateSummary(summary) {
     modelsEl.textContent = '';
     for (const m of summary.activeModels) {
       const pct = maxCount > 0 ? (m.count / maxCount * 100) : 0;
-      const cls = m.model.toLowerCase();
+      const cls = (m.actualModel || m.model).toLowerCase();
       let barClass = '';
       if (cls.includes('sonnet')) barClass = 'sonnet';
       else if (cls.includes('haiku')) barClass = 'haiku';
@@ -93,8 +93,9 @@ function updateSummary(summary) {
 
       const name = document.createElement('span');
       name.className = 'model-name';
-      name.title = m.model;
-      name.textContent = shortModel(m.model);
+      const displayModel = m.actualModel || m.model;
+      name.title = displayModel;
+      name.textContent = shortModel(displayModel);
 
       const track = document.createElement('div');
       track.className = 'model-bar-track';
@@ -157,8 +158,9 @@ function updateSummary(summary) {
 
       const model = document.createElement('span');
       model.className = 'recent-model';
-      model.title = r.model;
-      model.textContent = shortModel(r.model);
+      const displayModel = r.actualModel || r.model;
+      model.title = displayModel;
+      model.textContent = shortModel(displayModel);
 
       const provider = document.createElement('span');
       provider.className = 'recent-provider';

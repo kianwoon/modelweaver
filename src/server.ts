@@ -27,7 +27,7 @@ function anthropicError(type: string, message: string, requestId: string): Respo
  */
 function extractTokensAsync(
   body: ReadableStream<Uint8Array>,
-  ctx: { requestId: string; model: string; tier: string; startTime: number },
+  ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number },
   provider: string,
   targetProvider: string,
   metricsStore: MetricsStore,
@@ -109,6 +109,7 @@ function extractTokensAsync(
       metricsStore.recordRequest({
         requestId: ctx.requestId,
         model: ctx.model,
+        actualModel: ctx.actualModel || ctx.model,
         tier: ctx.tier,
         provider,
         targetProvider,

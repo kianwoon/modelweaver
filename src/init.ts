@@ -33,13 +33,23 @@ const CANCEL = { onCancel: () => { console.log('\n  Setup cancelled. No files we
 
 const GREEN = '\x1B[32m';
 const RED = '\x1B[31m';
+const CYAN = '\x1B[36m';
+const BOLD = '\x1B[1m';
 const RESET = '\x1B[0m';
 
 function check(msg: string) { console.log(`  ${GREEN}\u2713${RESET} ${msg}`); }
 function fail(msg: string) { console.log(`  ${RED}\u2717${RESET} ${msg}`); }
 
 // ---------------------------------------------------------------------------
-// API key test
+// [Improvement 6] clearScreen — separator instead of full clear
+// ---------------------------------------------------------------------------
+
+function clearScreen(): void {
+  console.log(`\n${'\u2500'.repeat(56)}\n`);
+}
+
+// ---------------------------------------------------------------------------
+// API key test (unchanged)
 // ---------------------------------------------------------------------------
 
 export async function testApiKey(
@@ -75,11 +85,111 @@ export async function testApiKey(
 }
 
 // ---------------------------------------------------------------------------
+// [Improvement 1] detectEnvApiKey — auto-detect existing keys
+// ---------------------------------------------------------------------------
+
+function detectEnvApiKey(preset: ProviderPreset): { found: boolean; key: string; source: string } {
+  // dotenv.config() already loads ~/.modelweaver/.env into process.env in index.ts
+  // before runInit() is called, so a single check suffices.
+  const envVal = process.env[preset.envKey];
+  if (envVal && envVal.trim()) {
+    return { found: true, key: envVal.trim(), source: 'environment' };
+  }
+  return { found: false, key: '', source: '' };
+}
+
+// ---------------------------------------------------------------------------
+// [Improvement 4] calculateTotalSteps — step counter
+// ---------------------------------------------------------------------------
+
+function calculateTotalSteps(selectedProviderCount: number, quick: boolean): number {
+  if (quick) {
+    // Provider select + API key (may be skipped) + confirm + claude settings
+    return 4;
+  }
+  // Normal mode:
+  // 1 (select providers) + N (configure each) + routing tiers + server + confirm + claude settings
+  let steps = 1 + selectedProviderCount + 1 + 1 + 1 + 1; // select + configure each + server + confirm + claude settings + settings prompt
+  if (selectedProviderCount > 1) {
+    steps += 3; // 3 routing tiers (only for multi-provider)
+  }
+  return steps;
+}
+
+// ---------------------------------------------------------------------------
+// [Improvement 5] autoRoutingForSingleProvider — skip routing for single
+// ---------------------------------------------------------------------------
+
+function autoRoutingForSingleProvider(provider: ConfiguredProvider): Record<string, RoutingTier[]> {
+  const tiers = ['sonnet', 'opus', 'haiku'] as const;
+  const routing: Record<string, RoutingTier[]> = {};
+  for (const tier of tiers) {
+    routing[tier] = [{ provider: provider.id, model: provider.models[tier] }];
+  }
+  return routing;
+}
+
+// ---------------------------------------------------------------------------
+// [Improvement 7] buildSummaryTable — formatted summary
+// ---------------------------------------------------------------------------
+
+function buildSummaryTable(
+  providers: ConfiguredProvider[],
+  routing: Record<string, RoutingTier[]>,
+  server: { port: number; host: string },
+): string {
+  const lines: string[] = [];
+  const W = 56;
+
+  lines.push(`${CYAN}\u250c${'\u2500'.repeat(W)}\u2510${RESET}`);
+  lines.push(`${CYAN}\u2502${RESET}${BOLD}  ModelWeaver Configuration Summary${''.padEnd(W - 33)}${CYAN}\u2502${RESET}`);
+  lines.push(`${CYAN}\u251c${'\u2500'.repeat(W)}\u2524${RESET}`);
+  lines.push(`${CYAN}\u2502${RESET}  ${BOLD}Server:${RESET} ${server.host}:${server.port}${''.padEnd(W - 8 - `${server.host}:${server.port}`.length)}${CYAN}\u2502${RESET}`);
+  lines.push(`${CYAN}\u251c${'\u2500'.repeat(W)}\u2524${RESET}`);
+
+  const tiers = ['sonnet', 'opus', 'haiku'] as const;
+  for (const tier of tiers) {
+    const entries = routing[tier];
+    if (!entries || entries.length === 0) continue;
+    const primary = providers.find(p => p.id === entries[0].provider);
+    const pName = primary ? primary.name : entries[0].provider;
+    const label = `${BOLD}${tier.charAt(0).toUpperCase() + tier.slice(1)}:${RESET}`;
+    const primaryInfo = `${pName} \u2192 ${entries[0].model}`;
+    lines.push(`${CYAN}\u2502${RESET}  ${label} ${primaryInfo}${''.padEnd(W - 10 - primaryInfo.length)}${CYAN}\u2502${RESET}`);
+
+    for (let i = 1; i < entries.length; i++) {
+      const fb = providers.find(p => p.id === entries[i].provider);
+      const fbName = fb ? fb.name : entries[i].provider;
+      const fbInfo = `  fallback: ${fbName} \u2192 ${entries[i].model}`;
+      lines.push(`${CYAN}\u2502${RESET}${fbInfo}${''.padEnd(W - fbInfo.length - 2)}${CYAN}\u2502${RESET}`);
+    }
+  }
+
+  lines.push(`${CYAN}\u2514${'\u2500'.repeat(W)}\u2518${RESET}`);
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // Wizard steps
 // ---------------------------------------------------------------------------
 
-async function selectProviders(): Promise<string[]> {
+// [Modified] selectProviders — supports singleSelect for --quick mode
+async function selectProviders(options?: { singleSelect?: boolean }): Promise<string[]> {
   const allPresets = getPresets();
+
+  if (options?.singleSelect) {
+    const { providerId } = await prompts(
+      {
+        type: 'select',
+        name: 'providerId',
+        message: 'Select a provider:',
+        choices: allPresets.map((p) => ({ title: p.name, value: p.id, description: p.baseUrl })),
+      },
+      CANCEL,
+    );
+    return [providerId as string];
+  }
+
   const { providerIds } = await prompts(
     {
       type: 'multiselect',
@@ -93,30 +203,56 @@ async function selectProviders(): Promise<string[]> {
   return providerIds as string[];
 }
 
-async function configureProvider(id: string): Promise<ConfiguredProvider | null> {
+// [Modified] configureProvider — auto-detect env keys + step counter
+async function configureProvider(
+  id: string,
+  stepInfo?: { current: number; total: number },
+): Promise<ConfiguredProvider | null> {
   const preset = getPreset(id);
   if (!preset) {
     console.error(`  Error: Unknown provider "${id}". Skipping.`);
     return null;
   }
 
+  // [Improvement 1] Auto-detect existing env key
+  const detected = detectEnvApiKey(preset);
+  if (detected.found) {
+    process.stdout.write(`  Testing API key for ${preset.name} (from ${detected.source})...`);
+    const result = await testApiKey(preset.baseUrl, detected.key, preset);
+    process.stdout.write('\r' + ' '.repeat(60) + '\r');
+
+    if (result.ok) {
+      check(`${preset.name}: using existing ${preset.envKey} (${detected.source})`);
+      return {
+        id, name: preset.name, baseUrl: preset.baseUrl,
+        envKey: preset.envKey, apiKey: detected.key,
+        authType: preset.authType, models: preset.models,
+      };
+    }
+
+    // Key found but invalid — fall through to prompt
+    console.log(`  ${RED}\u26A0${RESET} Existing ${preset.envKey} (${detected.source}) is invalid, please provide a new key.`);
+  }
+
+  const stepLabel = stepInfo ? `[Step ${stepInfo.current} of ${stepInfo.total}] ` : '';
+
   const MAX_RETRIES = 3;
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const { baseUrl } = await prompts(
-      { type: 'text', name: 'baseUrl', message: `[${preset.name}] Base URL:`, initial: preset.baseUrl },
+      { type: 'text', name: 'baseUrl', message: `${stepLabel}[${preset.name}] Base URL:`, initial: preset.baseUrl },
       CANCEL,
     );
 
     const { apiKey } = await prompts(
-      { type: 'password', name: 'apiKey', message: `[${preset.name}] API key:` },
+      { type: 'password', name: 'apiKey', message: `${stepLabel}[${preset.name}] API key:` },
       CANCEL,
     );
 
     // Spinner-style test
     process.stdout.write(`  Testing API key for ${preset.name}...`);
     const result = await testApiKey(baseUrl as string, apiKey as string, preset);
-    process.stdout.write('\r' + ' '.repeat(50) + '\r');
+    process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
     if (result.ok) {
       check(`${preset.name} API key accepted`);
@@ -134,25 +270,40 @@ async function configureProvider(id: string): Promise<ConfiguredProvider | null>
     }
   }
 
-  console.log(`  ${RED}Warning:${RESET} ${preset.name} will be skipped — max retries (${MAX_RETRIES}) exceeded.`);
+  console.log(`  ${RED}Warning:${RESET} ${preset.name} will be skipped \u2014 max retries (${MAX_RETRIES}) exceeded.`);
   return null;
 }
 
-async function configureRouting(providers: ConfiguredProvider[]): Promise<Record<string, RoutingTier[]>> {
+// [Modified] configureRouting — skip for single provider + fallback defaults + step counter
+async function configureRouting(
+  providers: ConfiguredProvider[],
+  options?: { stepOffset?: number; totalSteps?: number },
+): Promise<Record<string, RoutingTier[]>> {
+  // [Improvement 2] Skip routing for single provider
+  if (providers.length === 1) {
+    check(`All tiers \u2192 ${providers[0].name} (preset defaults)`);
+    return autoRoutingForSingleProvider(providers[0]);
+  }
+
   const tiers = ['sonnet', 'opus', 'haiku'] as const;
   const routing: Record<string, RoutingTier[]> = {};
+  const stepOffset = options?.stepOffset ?? 0;
+  const totalSteps = options?.totalSteps ?? 99;
 
-  for (const tier of tiers) {
+  for (let t = 0; t < tiers.length; t++) {
+    const tier = tiers[t];
+    const stepCurrent = stepOffset + t + 1;
+    const stepLabel = `[Step ${stepCurrent} of ${totalSteps}] `;
     const choices = providers.map((p) => ({ title: p.name, value: p.id }));
 
     const { primaryId } = await prompts(
-      { type: 'select', name: 'primaryId', message: `[${tier}] Primary provider:`, choices },
+      { type: 'select', name: 'primaryId', message: `${stepLabel}[${tier}] Primary provider:`, choices },
       CANCEL,
     );
 
     const primary = providers.find((p) => p.id === (primaryId as string))!;
     const { modelName } = await prompts(
-      { type: 'text', name: 'modelName', message: `[${tier}] Model name:`, initial: primary.models[tier] },
+      { type: 'text', name: 'modelName', message: `${stepLabel}[${tier}] Model name:`, initial: primary.models[tier] },
       CANCEL,
     );
 
@@ -173,13 +324,33 @@ async function configureRouting(providers: ConfiguredProvider[]): Promise<Record
         CANCEL,
       );
 
-      for (const fid of fallbackIds as string[]) {
-        const fp = providers.find((p) => p.id === fid)!;
-        const { fallbackModel } = await prompts(
-          { type: 'text', name: 'fallbackModel', message: `[${tier}] Model name for ${fp.name}:`, initial: fp.models[tier] },
+      // [Improvement 5] Conditional fallback defaults
+      if ((fallbackIds as string[]).length > 1) {
+        const { useDefaults } = await prompts(
+          { type: 'confirm', name: 'useDefaults', message: 'Use preset model defaults for all fallbacks?', initial: true },
           CANCEL,
         );
-        entries.push({ provider: fid, model: fallbackModel as string });
+
+        if (useDefaults) {
+          for (const fid of fallbackIds as string[]) {
+            const fp = providers.find((p) => p.id === fid)!;
+            entries.push({ provider: fid, model: fp.models[tier] });
+          }
+        } else {
+          for (const fid of fallbackIds as string[]) {
+            const fp = providers.find((p) => p.id === fid)!;
+            const { fallbackModel } = await prompts(
+              { type: 'text', name: 'fallbackModel', message: `[${tier}] Model name for ${fp.name}:`, initial: fp.models[tier] },
+              CANCEL,
+            );
+            entries.push({ provider: fid, model: fallbackModel as string });
+          }
+        }
+      } else {
+        // Single fallback — just use preset default
+        const fid = (fallbackIds as string[])[0];
+        const fp = providers.find((p) => p.id === fid)!;
+        entries.push({ provider: fid, model: fp.models[tier] });
       }
     }
 
@@ -189,13 +360,22 @@ async function configureRouting(providers: ConfiguredProvider[]): Promise<Record
   return routing;
 }
 
-async function configureServer(): Promise<{ port: number; host: string }> {
+// [Modified] configureServer — supports useDefaults for --quick mode
+async function configureServer(
+  options?: { useDefaults?: boolean; stepInfo?: { current: number; total: number } },
+): Promise<{ port: number; host: string }> {
+  if (options?.useDefaults) {
+    return { port: 3456, host: 'localhost' };
+  }
+
+  const stepLabel = options?.stepInfo ? `[Step ${options.stepInfo.current} of ${options.stepInfo.total}] ` : '';
+
   const { port } = await prompts(
-    { type: 'number', name: 'port', message: 'Server port:', initial: 3456 },
+    { type: 'number', name: 'port', message: `${stepLabel}Server port:`, initial: 3456 },
     CANCEL,
   );
   const { host } = await prompts(
-    { type: 'text', name: 'host', message: 'Server host:', initial: 'localhost' },
+    { type: 'text', name: 'host', message: `${stepLabel}Server host:`, initial: 'localhost' },
     CANCEL,
   );
   return { port: port as number, host: host as string };
@@ -225,18 +405,20 @@ async function configureClaudeCodeSettings(
   routing: Record<string, RoutingTier[]>,
   providers: ConfiguredProvider[],
   server: { port: number; host: string },
+  stepInfo?: { current: number; total: number },
 ): Promise<SettingsConfig | null> {
   const availableModels = collectAvailableModels(routing);
   if (availableModels.length === 0) return null;
 
   console.log();
+  const stepLabel = stepInfo ? `[Step ${stepInfo.current} of ${stepInfo.total}] ` : '';
 
   // Step A: Ask to configure
   const { configure } = await prompts(
     {
       type: 'confirm',
       name: 'configure',
-      message: 'Configure Claude Code to use ModelWeaver automatically?',
+      message: `${stepLabel}Configure Claude Code to use ModelWeaver automatically?`,
       initial: true,
     },
     CANCEL,
@@ -371,42 +553,42 @@ function writeEnvFile(entries: ConfiguredProvider[]): void {
 }
 
 // ---------------------------------------------------------------------------
-// Main wizard
+// [Improvement 3] runQuickInit — --quick / -q express mode
 // ---------------------------------------------------------------------------
 
-export async function runInit(): Promise<void> {
+async function runQuickInit(): Promise<void> {
   // Step 0 — TTY check
   if (!process.stdin.isTTY) {
-    console.error('Error: modelweaver init requires an interactive terminal.');
+    console.error('Error: modelweaver init --quick requires an interactive terminal.');
     process.exit(1);
   }
 
-  // Collect wizard output via loop (avoids unbounded recursion on restart)
   let configured: ConfiguredProvider[] = [];
   let routing: Record<string, RoutingTier[]>;
   let server: { port: number; host: string };
   let yaml: string;
   let settingsConfig: SettingsConfig | null = null;
 
+  const totalSteps = calculateTotalSteps(1, true);
+
   while (true) {
-    // Step 1 — Welcome
-    process.stdout.write('\x1B[2J\x1B[H');
+    // Welcome
+    clearScreen();
     console.log(`
-\x1B[1m\x1B[36m\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557\u2550
-\u2551       Welcome to ModelWeaver!        \u2551
-\u2551                                      \u2551
-\u2551  This wizard will help you configure \u2551
-\u2551  your multi-provider model proxy.    \u2551
-\u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D\x1B[0m
+${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\u2500
+\u2502       Welcome to ModelWeaver!        \u2501 Quick Setup \u2502
+\u2502                                      \u2502
+\u2501  ~${String(totalSteps).padEnd(3)} quick steps to get started    \u2501
+\u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518${RESET}
 `);
 
-    // Step 2 — Choose providers
-    const selectedIds = await selectProviders();
+    // Step 1: Select single provider
+    const selectedIds = await selectProviders({ singleSelect: true });
 
-    // Step 3 — Configure each provider
+    // Step 2: Configure provider (auto-detects env key)
     configured = [];
     for (const id of selectedIds) {
-      const provider = await configureProvider(id);
+      const provider = await configureProvider(id, { current: 2, total: totalSteps });
       if (provider) configured.push(provider);
     }
 
@@ -415,35 +597,52 @@ export async function runInit(): Promise<void> {
       process.exit(1);
     }
 
-    // Step 4 — Configure routing
-    console.log();
-    routing = await configureRouting(configured);
+    // Auto-assign routing (no prompts)
+    routing = autoRoutingForSingleProvider(configured[0]);
 
-    // Step 5 — Server config
-    console.log();
-    server = await configureServer();
+    // Server defaults (no prompts)
+    server = { port: 3456, host: 'localhost' };
 
-    // Step 6 — Review & confirm
+    // Step 3: Summary + Confirm
     yaml = buildYamlConfig(configured, routing, server);
-    console.log(`\n\x1B[1m  Generated configuration:\x1B[0m\n`);
+    console.log(`\n${BOLD}  Generated configuration:${RESET}\n`);
+    console.log(buildSummaryTable(configured, routing, server));
+    console.log();
     console.log(yaml.split('\n').map((l) => `  ${l}`).join('\n'));
 
     const { confirm } = await prompts(
-      { type: 'confirm', name: 'confirm', message: 'Write this configuration?', initial: true },
+      { type: 'confirm', name: 'confirm', message: `[Step 3 of ${totalSteps}] Write this configuration?`, initial: true },
       CANCEL,
     );
 
     if (confirm) break;
 
-    console.log('\n  Restarting wizard...\n');
+    if (confirm) break;
+
+    console.log('\n  Restarting quick setup...\n');
   }
 
-  // Step 7 — Write files
+  // Write files
+  await writeConfigAndSettings(configured, routing, server, yaml, settingsConfig, totalSteps);
+}
+
+// ---------------------------------------------------------------------------
+// Shared file-writing + settings logic
+// ---------------------------------------------------------------------------
+
+async function writeConfigAndSettings(
+  configured: ConfiguredProvider[],
+  routing: Record<string, RoutingTier[]>,
+  server: { port: number; host: string },
+  yaml: string,
+  settingsConfig: SettingsConfig | null,
+  totalSteps: number,
+): Promise<SettingsConfig | null> {
   const modelweaverDir = join(process.env.HOME || process.env.USERPROFILE || '', '.modelweaver');
   mkdirSync(modelweaverDir, { recursive: true });
   const configPath = join(modelweaverDir, 'config.yaml');
   if (existsSync(configPath)) {
-    console.log(`\n  ⚠  Warning: ${configPath} already exists and will be overwritten.\n`);
+    console.log(`\n  \u26A0  Warning: ${configPath} already exists and will be overwritten.\n`);
     const { overwrite } = await prompts({
       type: 'confirm',
       name: 'overwrite',
@@ -470,10 +669,10 @@ export async function runInit(): Promise<void> {
     // Daemon not running or daemon.js not available — silently ignore
   }
 
-  // Step 8 — Configure Claude Code settings.json
-  settingsConfig = await configureClaudeCodeSettings(routing, configured, server);
+  // Configure Claude Code settings.json
+  const result = await configureClaudeCodeSettings(routing, configured, server, { current: totalSteps, total: totalSteps });
 
-  if (settingsConfig) {
+  if (result) {
     const baseUrl = server.host === 'localhost'
       ? `http://localhost:${server.port}`
       : `http://${server.host}:${server.port}`;
@@ -486,16 +685,16 @@ export async function runInit(): Promise<void> {
     const existing = readSettings();
     const merged = mergeSettings(existing, {
       baseUrl,
-      defaultModel: settingsConfig.defaultModel,
-      tierModels: settingsConfig.tierModels,
+      defaultModel: result.defaultModel,
+      tierModels: result.tierModels,
     });
     writeSettings(merged);
 
     check(`Claude Code settings updated at ${getSettingsPath()}`);
     console.log(`    Proxy endpoint: ${baseUrl}`);
-    console.log(`    Default model:  ${settingsConfig.defaultModel}`);
-    if (Object.keys(settingsConfig.tierModels).length > 0) {
-      for (const [tier, model] of Object.entries(settingsConfig.tierModels)) {
+    console.log(`    Default model:  ${result.defaultModel}`);
+    if (Object.keys(result.tierModels).length > 0) {
+      for (const [tier, model] of Object.entries(result.tierModels)) {
         console.log(`    ${tier.padEnd(8)} \u2192 ${model}`);
       }
     }
@@ -503,8 +702,96 @@ export async function runInit(): Promise<void> {
     console.log(`  ${GREEN}Restart Claude Code to apply changes.${RESET}`);
   }
 
+  return result;
+}
+
+// ---------------------------------------------------------------------------
+// Main wizard (normal mode)
+// ---------------------------------------------------------------------------
+
+export async function runInit(options?: { quick?: boolean }): Promise<void> {
+  if (options?.quick) {
+    return runQuickInit();
+  }
+
+  // Step 0 — TTY check
+  if (!process.stdin.isTTY) {
+    console.error('Error: modelweaver init requires an interactive terminal.');
+    process.exit(1);
+  }
+
+  // Collect wizard output via loop (avoids unbounded recursion on restart)
+  let configured: ConfiguredProvider[] = [];
+  let routing: Record<string, RoutingTier[]>;
+  let server: { port: number; host: string };
+  let yaml: string;
+  let settingsConfig: SettingsConfig | null = null;
+
+  while (true) {
+    // Step 1 — Welcome (use clearScreen instead of full clear)
+    clearScreen();
+    console.log(`
+${BOLD}${CYAN}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557\u2500
+\u2551       Welcome to ModelWeaver!        \u2551
+\u2551                                      \u2551
+\u2551  This wizard will help you configure \u2551
+\u2551  your multi-provider model proxy.    \u2551
+\u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D${RESET}
+`);
+
+    // Step 2 — Choose providers
+    const selectedIds = await selectProviders();
+
+    // Calculate total steps for counter
+    const totalSteps = calculateTotalSteps(selectedIds.length, false);
+
+    // Step 3 — Configure each provider
+    configured = [];
+    for (let i = 0; i < selectedIds.length; i++) {
+      const provider = await configureProvider(selectedIds[i], { current: 2 + i, total: totalSteps });
+      if (provider) configured.push(provider);
+    }
+
+    if (configured.length === 0) {
+      console.log(`\n  ${RED}No providers configured. Exiting.${RESET}\n`);
+      process.exit(1);
+    }
+
+    // Step 4 — Configure routing (auto-skipped for single provider)
+    console.log();
+    const routingStepOffset = 2 + selectedIds.length;
+    routing = await configureRouting(configured, { stepOffset: routingStepOffset, totalSteps });
+
+    // Step N-2 — Server config
+    console.log();
+    const serverStep = routingStepOffset + (configured.length > 1 ? 3 : 0) + 1;
+    server = await configureServer({ stepInfo: { current: serverStep, total: totalSteps } });
+
+    // Step N-1 — Review & confirm
+    yaml = buildYamlConfig(configured, routing, server);
+    console.log(`\n${BOLD}  Generated configuration:${RESET}\n`);
+    console.log(buildSummaryTable(configured, routing, server));
+    console.log();
+    console.log(yaml.split('\n').map((l) => `  ${l}`).join('\n'));
+
+    const confirmStep = totalSteps - 1;
+    const { confirm } = await prompts(
+      { type: 'confirm', name: 'confirm', message: `[Step ${confirmStep} of ${totalSteps}] Write this configuration?`, initial: true },
+      CANCEL,
+    );
+
+    if (confirm) break;
+
+    console.log('\n  Restarting wizard...\n');
+  }
+
+  // Step 7 — Write files + settings
+  const finalTotalSteps = calculateTotalSteps(configured.length, false);
+  settingsConfig = await writeConfigAndSettings(configured, routing, server, yaml, settingsConfig, finalTotalSteps);
+
+  // Step 8 — Success banner
   console.log(`
-\x1B[1m\x1B[36m\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
+${BOLD}${CYAN}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
 \u2551  ModelWeaver is configured!                   \u2551
 \u2551                                                \u2551
 ${settingsConfig
@@ -521,6 +808,6 @@ ${settingsConfig
 \u2551      http://localhost:${String(server.port).padEnd(20)}\u2551
 \u2551    claude                                      \u2551`
 }
-\u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D\x1B[0m
+\u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D${RESET}
 `);
 }

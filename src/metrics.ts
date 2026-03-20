@@ -45,19 +45,21 @@ export class MetricsStore {
         ? requests.reduce((sum, r) => sum + (r.tokensPerSec ?? 0), 0) / requests.length
         : 0;
 
-    // Group by model
-    const modelMap = new Map<string, { count: number; lastSeen: number }>();
+    // Group by model, track actualModel when available
+    const modelMap = new Map<string, { actualModel?: string; count: number; lastSeen: number }>();
     for (const r of requests) {
       const existing = modelMap.get(r.model);
+      const actual = r.actualModel || undefined;
       if (existing) {
         existing.count++;
         if (r.timestamp > existing.lastSeen) existing.lastSeen = r.timestamp;
+        if (actual) existing.actualModel = actual;
       } else {
-        modelMap.set(r.model, { count: 1, lastSeen: r.timestamp });
+        modelMap.set(r.model, { actualModel: actual, count: 1, lastSeen: r.timestamp });
       }
     }
     const activeModels = [...modelMap.entries()]
-      .map(([model, { count, lastSeen }]) => ({ model, count, lastSeen }))
+      .map(([model, { actualModel, count, lastSeen }]) => ({ model, actualModel, count, lastSeen }))
       .sort((a, b) => b.count - a.count);
 
     // Group by target provider (the intended routing target, not fallback)

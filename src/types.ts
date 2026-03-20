@@ -33,6 +33,7 @@ export interface AppConfig {
 export interface RequestContext {
   requestId: string;
   model: string;
+  actualModel?: string;
   tier: string;
   providerChain: RoutingEntry[];
   startTime: number;
@@ -42,6 +43,7 @@ export interface RequestContext {
 export interface RequestMetrics {
   requestId: string;
   model: string;
+  actualModel?: string;
   tier: string;
   provider: string;
   targetProvider: string;
@@ -59,7 +61,7 @@ export interface MetricsSummary {
   totalInputTokens: number;
   totalOutputTokens: number;
   avgTokensPerSec: number;
-  activeModels: { model: string; count: number; lastSeen: number }[];
+  activeModels: { model: string; actualModel?: string; count: number; lastSeen: number }[];
   providerDistribution: { provider: string; count: number }[];
   recentRequests: RequestMetrics[];
 }

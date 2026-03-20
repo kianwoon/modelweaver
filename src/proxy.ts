@@ -183,6 +183,7 @@ export async function forwardRequest(
       // Model override
       if (entry.model) {
         parsed.model = entry.model;
+        ctx.actualModel = entry.model;
       }
 
       // Clean orphaned tool references from cross-provider conversation history
