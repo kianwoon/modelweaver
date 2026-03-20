@@ -266,7 +266,8 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       (provider, index) => {
         logger.info("Attempting provider", { requestId, provider, index, tier: ctx.tier });
         successfulProvider = provider;
-      }
+      },
+      logger
     );
 
     // Extract tokens via tee() for successful responses
@@ -320,6 +321,23 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     }
 
     return c.json(data);
+  });
+
+  // Circuit breaker status endpoint
+  app.get("/api/circuit-breaker", (c) => {
+    const status: Record<string, { state: string; failures: number; lastFailure: string | null }> = {};
+    for (const [name, provider] of config.providers) {
+      const breaker = provider._circuitBreaker;
+      if (breaker) {
+        const s = breaker.getStatus();
+        status[name] = {
+          state: s.state,
+          failures: s.failures,
+          lastFailure: s.lastFailure ? new Date(s.lastFailure).toISOString() : null,
+        };
+      }
+    }
+    return c.json(status);
   });
 
   return {

@@ -304,7 +304,8 @@ export async function forwardWithFallback(
   chain: RoutingEntry[],
   ctx: RequestContext,
   incomingRequest: Request,
-  onAttempt?: (provider: string, index: number) => void
+  onAttempt?: (provider: string, index: number) => void,
+  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
 ): Promise<Response> {
   let lastResponse: Response | null = null;
 
@@ -327,11 +328,22 @@ export async function forwardWithFallback(
       continue;
     }
 
+    // Check circuit breaker before attempting provider
+    if (provider._circuitBreaker && !provider._circuitBreaker.canProceed()) {
+      logger?.warn("Provider skipped by circuit breaker", { requestId: ctx.requestId, provider: entry.provider });
+      continue;
+    }
+
     onAttempt?.(entry.provider, i);
 
     // forwardRequest uses ctx.rawBody, so body can be re-read on each attempt
     const response = await forwardRequest(provider, entry, ctx, incomingRequest);
     lastResponse = response;
+
+    // Record result for circuit breaker
+    if (provider._circuitBreaker) {
+      provider._circuitBreaker.recordResult(response.status);
+    }
 
     // Success — return immediately
     if (response.status >= 200 && response.status < 300) {

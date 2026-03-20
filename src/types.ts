@@ -1,3 +1,5 @@
+import type { CircuitBreaker } from "./circuit-breaker.js";
+
 export interface ModelLimits {
   maxInputTokens: number;
   maxOutputTokens: number;
@@ -15,6 +17,7 @@ export interface ProviderConfig {
   _cachedBaseUrl?: string;
   _cachedHost?: string;
   _agent?: import("undici").Agent;
+  _circuitBreaker?: CircuitBreaker;
   poolSize?: number;
 }
 

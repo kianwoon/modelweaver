@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { Agent } from "undici";
+import { CircuitBreaker } from "./circuit-breaker.js";
 import type { AppConfig, ProviderConfig, RoutingEntry, ServerConfig } from "./types.js";
 
 // --- Zod schemas for raw (pre-resolution) config ---
@@ -23,6 +24,11 @@ const providerSchema = z.object({
   authType: z.enum(["anthropic", "bearer"]).default("anthropic"),
   modelLimits: modelLimitsSchema,
   poolSize: z.number().int().min(1).max(100).optional(),
+  circuitBreaker: z.object({
+    failureThreshold: z.number().int().min(1).optional(),
+    windowSeconds: z.number().int().min(1).optional(),
+    cooldownSeconds: z.number().int().min(1).optional(),
+  }).optional(),
 });
 
 const routingEntrySchema = z.object({
@@ -179,6 +185,13 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
       connections: poolSize ?? 10,
     });
     providerConfig.poolSize = poolSize ?? 10;
+    // Create per-provider circuit breaker
+    const cbConfig = (p as Record<string, unknown>).circuitBreaker as Record<string, number> | undefined;
+    providerConfig._circuitBreaker = new CircuitBreaker(cbConfig ? {
+      failureThreshold: cbConfig.failureThreshold,
+      windowSeconds: cbConfig.windowSeconds,
+      cooldownSeconds: cbConfig.cooldownSeconds,
+    } : undefined);
     providers.set(name, providerConfig);
   }
 
