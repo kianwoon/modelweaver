@@ -41,9 +41,21 @@ document.querySelectorAll('.titlebar-btn').forEach(btn => {
   btn.addEventListener('mousedown', e => e.stopPropagation());
 });
 
-function setStatus(connected) {
-  statusEl.className = `status ${connected ? 'connected' : 'disconnected'}`;
-  statusText.textContent = connected ? 'Connected' : 'ModelWeaver not running';
+function setStatus(mode) {
+  if (mode === 'live') {
+    statusEl.className = 'status connected';
+    statusText.textContent = 'Connected (live)';
+  } else if (mode === 'poll') {
+    statusEl.className = 'status connected';
+    statusText.textContent = 'Reconnecting...';
+  } else if (mode) {
+    // Bare truthy (e.g. true from fetchSummary) means HTTP-connected
+    statusEl.className = 'status connected';
+    statusText.textContent = 'Connected';
+  } else {
+    statusEl.className = 'status disconnected';
+    statusText.textContent = 'ModelWeaver not running';
+  }
 }
 
 function formatNumber(n) {
@@ -65,6 +77,10 @@ function updateSummary(data) {
   statRequests.textContent = data.totalRequests || 0;
   statInputTokens.textContent = formatNumber(data.totalInputTokens || 0);
   statOutputTokens.textContent = formatNumber(data.totalOutputTokens || 0);
+
+  // Uptime
+  const uptimeEl = document.getElementById('last-refresh');
+  if (uptimeEl) uptimeEl.textContent = formatUptime(data.uptimeSeconds || 0);
 
   // Active models
   const activeModels = data.activeModels || [];
@@ -181,21 +197,154 @@ function createEmptyEl(text) {
   return el;
 }
 
+function formatUptime(seconds) {
+  if (seconds < 60) return seconds + 's';
+  if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+  const h = Math.floor(seconds / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  return h + 'h ' + m + 'm';
+}
+
+function parseFormattedNumber(str) {
+  if (!str) return 0;
+  str = String(str).trim();
+  if (str.endsWith('M')) return parseFloat(str) * 1_000_000;
+  if (str.endsWith('K')) return parseFloat(str) * 1_000;
+  return parseInt(str, 10) || 0;
+}
+
+function appendRequestMetric(r) {
+  // Increment request count
+  const currentRequests = parseInt(statRequests.textContent, 10) || 0;
+  statRequests.textContent = currentRequests + 1;
+
+  // Accumulate input tokens
+  const currentInput = parseFormattedNumber(statInputTokens.textContent);
+  statInputTokens.textContent = formatNumber(currentInput + (r.inputTokens || 0));
+
+  // Accumulate output tokens
+  const currentOutput = parseFormattedNumber(statOutputTokens.textContent);
+  statOutputTokens.textContent = formatNumber(currentOutput + (r.outputTokens || 0));
+
+  // Running average speed
+  const oldAvg = parseFloat(statSpeed.textContent) || 0;
+  const newTotal = currentRequests + 1;
+  if (r.tokensPerSec != null) {
+    statSpeed.textContent = (oldAvg + (r.tokensPerSec - oldAvg) / newTotal).toFixed(1);
+  }
+
+  // Prepend to recent requests list (cap at 10 visible)
+  const emptyEl = recentEl.querySelector('.empty');
+  if (emptyEl) emptyEl.remove();
+
+  const latency = r.latencyMs >= 1000
+    ? (r.latencyMs / 1000).toFixed(1) + 's'
+    : r.latencyMs + 'ms';
+
+  const item = document.createElement('div');
+  item.className = 'recent-item';
+
+  const model = document.createElement('span');
+  model.className = 'recent-model';
+  const displayModel = r.model || 'unknown';
+  model.title = displayModel;
+  model.textContent = shortModel(displayModel);
+
+  const provider = document.createElement('span');
+  provider.className = 'recent-provider';
+  provider.textContent = r.targetProvider || r.provider || '';
+
+  const tokens = document.createElement('span');
+  tokens.className = 'recent-tokens';
+  tokens.textContent = formatNumber((r.inputTokens || 0) + (r.outputTokens || 0)) + ' ' + latency;
+
+  item.appendChild(model);
+  item.appendChild(provider);
+  item.appendChild(tokens);
+  recentEl.prepend(item);
+
+  // Cap visible items at 10
+  while (recentEl.children.length > 10) {
+    recentEl.removeChild(recentEl.lastChild);
+  }
+}
+
+function connectWebSocket(port) {
+  if (ws) return;
+
+  try {
+    ws = new WebSocket('ws://localhost:' + port + '/ws');
+  } catch (err) {
+    console.error('[WebSocket] create failed:', err);
+    return;
+  }
+
+  ws.addEventListener('open', () => {
+    console.log('[WebSocket] connected');
+    // Stop HTTP polling — WS is now the primary data source
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    wsBackoff = 1000;
+    setStatus('live');
+  });
+
+  ws.addEventListener('message', (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'summary') {
+        updateSummary(msg.data);
+      } else if (msg.type === 'request') {
+        appendRequestMetric(msg.data);
+      }
+    } catch (err) {
+      console.error('[WebSocket] parse error:', err);
+    }
+  });
+
+  ws.addEventListener('close', () => {
+    ws = null;
+    console.log('[WebSocket] closed');
+    // Restart HTTP polling as fallback
+    if (!pollTimer) {
+      pollTimer = setInterval(fetchSummary, POLL_INTERVAL);
+    }
+    // Schedule reconnection with exponential backoff
+    reconnectTimer = setTimeout(() => connectWebSocket(port), wsBackoff);
+    wsBackoff = Math.min(wsBackoff * 2, WS_MAX_BACKOFF);
+    // Show reconnecting state only if we previously had data
+    const hasData = (parseInt(statRequests.textContent, 10) || 0) > 0;
+    setStatus(hasData ? 'poll' : false);
+  });
+
+  ws.addEventListener('error', (err) => {
+    console.error('[WebSocket] error:', err);
+    // close event fires right after error, so no status change here
+  });
+}
+
 async function fetchSummary() {
   try {
     const data = await invoke('fetch_metrics', { port: DEFAULT_PORT });
     updateSummary(data);
     setStatus(true);
-    const refreshEl = document.getElementById('last-refresh');
-    if (refreshEl) refreshEl.textContent = new Date().toLocaleTimeString();
   } catch (err) {
     console.error('[fetchSummary] failed:', err);
     setStatus(false);
   }
 }
 
-// Poll via Tauri invoke — no direct fetch/WebSocket to localhost
-setInterval(fetchSummary, POLL_INTERVAL);
+// WebSocket state
+let ws = null;
+let pollTimer = null;
+let wsBackoff = 1000;
+let reconnectTimer = null;
+const WS_MAX_BACKOFF = 30000;
 
-// Start immediately
+// Initial HTTP fetch for instant data
 fetchSummary();
+// Start polling as fallback
+pollTimer = setInterval(fetchSummary, POLL_INTERVAL);
+// Attempt WebSocket connection
+connectWebSocket(DEFAULT_PORT);

@@ -3,6 +3,7 @@ use tauri::command;
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct MetricsResult {
+    uptime_seconds: Option<u64>,
     total_requests: Option<u64>,
     total_input_tokens: Option<u64>,
     total_output_tokens: Option<u64>,
@@ -36,6 +37,7 @@ async fn fetch_metrics(port: u16) -> Result<MetricsResult, String> {
         .map_err(|e| format!("Failed to parse JSON: {}", e))?;
 
     Ok(MetricsResult {
+        uptime_seconds: data["uptimeSeconds"].as_u64(),
         total_requests: data["totalRequests"].as_u64(),
         total_input_tokens: data["totalInputTokens"].as_u64(),
         total_output_tokens: data["totalOutputTokens"].as_u64(),
