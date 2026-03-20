@@ -42,7 +42,7 @@ const rawConfigSchema = z.object({
       port: z.number().int().min(1).max(65535).default(3456),
       host: z.string().default("localhost"),
     })
-    .default({}),
+    .default({ port: 3456, host: "localhost" }),
   providers: z.record(z.string(), providerSchema),
   routing: z.record(z.string(), z.array(routingEntrySchema)).default({}),
   tierPatterns: z.record(z.string(), z.array(z.string())).default({}),

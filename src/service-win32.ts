@@ -15,9 +15,13 @@ const STARTUP_FOLDER = join(
 );
 const VBS_PATH = join(STARTUP_FOLDER, "modelweaver.vbs");
 
-function getVbsContent(): string {
+function getEntryScript(): string {
   const __dirname = dirname(fileURLToPath(import.meta.url));
-  const entryScript = join(__dirname, "..", "dist", "index.js");
+  return join(__dirname, "..", "dist", "index.js");
+}
+
+function getVbsContent(): string {
+  const entryScript = getEntryScript();
   const workDir = process.cwd();
 
   return `Set WshShell = CreateObject("WScript.Shell")
@@ -44,7 +48,7 @@ export async function install(): Promise<void> {
   // Start daemon immediately (don't wait for next login)
   try {
     const { spawn } = await import("node:child_process");
-    const child = spawn(process.execPath, [entryScript, "start"], { detached: true, stdio: "ignore" });
+    const child = spawn(process.execPath, [getEntryScript(), "start"], { detached: true, stdio: "ignore" });
     child.unref();
     console.log("  Daemon started immediately.");
   } catch {
