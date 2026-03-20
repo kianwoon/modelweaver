@@ -322,5 +322,17 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     return c.json(data);
   });
 
-  return { app, getConfig: () => config, setConfig: (c) => { config = c; } };
+  return {
+    app,
+    getConfig: () => config,
+    setConfig: (newConfig: AppConfig) => {
+      // Close old connection pool agents to prevent leaks
+      for (const provider of config.providers.values()) {
+        if (provider._agent) {
+          provider._agent.close();
+        }
+      }
+      config = newConfig;
+    },
+  };
 }
