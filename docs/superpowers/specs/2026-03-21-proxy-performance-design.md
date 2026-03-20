@@ -16,6 +16,7 @@ Under heavy load (large conversation contexts + concurrent multi-agent sessions)
 - **No model interference** — the proxy must not change which model or provider the user gets
 - **Fallback chain order is sacred** — user's `modelweaver.yaml` routing config is the source of truth
 - **Backward compatible** — all changes are additive; existing config works without modification
+- **Node.js 20+ required** — undici.Agent requires Node 20+ for userland import
 
 ## Phase 1: Connection Pool Tuning
 
@@ -30,6 +31,8 @@ Create a shared `undici.Agent` per provider at config load time, pass to each `f
   - `keepAliveMaxTimeout: 60000`
   - `connections: 10` per provider (configurable)
 - Store on `ProviderConfig._agent` (runtime-only field, like `_cachedBaseUrl`)
+- Add `undici` as an explicit dependency in `package.json`
+- On config reload (`setConfig`): call `.close()` on old agents before replacing to prevent connection leaks
 - In `proxy.ts`: pass `dispatcher: provider._agent` to `fetch()`
 
 ### Config Addition
@@ -47,7 +50,7 @@ providers:
 - `src/config.ts` — create Agent per provider at load time
 - `src/proxy.ts` — pass dispatcher to fetch()
 - `src/types.ts` — add `_agent` to ProviderConfig
-- `tests/circuit-breaker.test.ts` — pool configuration tests
+- `tests/proxy.test.ts` — pool configuration tests
 
 ## Phase 2: Circuit Breaker
 
@@ -69,6 +72,15 @@ CLOSED ──(3 failures in 60s)──> OPEN ──(30s cooldown)──> HALF-OP
   - `canProceed(): boolean` — called before each forwardRequest
   - `recordResult(status: number): void` — called after each forwardRequest
   - `getState(): "closed" | "open" | "half-open"`
+- Thresholds are configurable via YAML (optional, with defaults):
+  ```yaml
+  providers:
+    anthropic:
+      circuitBreaker:
+        failureThreshold: 3
+        windowSeconds: 60
+        cooldownSeconds: 30
+  ```
 - Per-provider instance at config load, stored on `ProviderConfig._circuitBreaker`
 - `forwardWithFallback` calls `breaker.canProceed()` before each attempt:
   - CLOSED → proceed normally
@@ -91,6 +103,10 @@ CLOSED ──(3 failures in 60s)──> OPEN ──(30s cooldown)──> HALF-OP
 ### Key Constraint
 
 The breaker never reorders the chain. It only skips a provider. If Anthropic is open and Bedrock is closed, the request goes straight to Bedrock — same provider the user configured, just faster.
+
+### Config Reload Behavior
+
+On config reload, circuit breaker state resets (new instances created). This is acceptable — provider outages are typically resolved within the 30s cooldown window, and a reload is a deliberate operator action. State persistence could be added later if needed.
 
 ### Files Changed
 
@@ -140,6 +156,10 @@ Changes to `forwardWithFallback` in `proxy.ts`:
 
 Each `forwardRequest` already does its own `structuredClone`, so parallel calls have independent body copies. No shared mutable state.
 
+### AbortController Interaction
+
+Each `forwardRequest` has its own per-request `AbortController` (provider timeout). The race mode adds a shared `AbortController` for cancellation. When the shared signal fires, losers' `fetch` calls abort via the shared signal, and their per-request timeouts are cleaned up via `clearTimeout` in the catch path. No double-abort issues — `AbortController.abort()` is idempotent.
+
 ### Files Changed
 
 - `src/proxy.ts` — modify `forwardWithFallback` to add race mode on 429
@@ -159,10 +179,13 @@ Each phase is independently shippable and testable.
 - **Integration tests** for adaptive fallback (mock providers, verify race cancellation)
 - **Manual verification** — observe connection reuse via `ss -tn` or provider logs
 - **Load test** — concurrent requests to verify pool behavior and circuit breaker thresholds
+- **SSE streaming under race** — verify losing providers' streams are cancelled, winning SSE stream is delivered intact, `tee()` metrics extraction works for race winners
+- **Single-provider chain + open breaker** — verify immediate failure with clear error message
 
 ## Metrics Integration
 
-All three phases feed into existing `MetricsStore`:
-- Connection pool: track reuse count via provider metadata
-- Circuit breaker: track skip events as skipped requests in metrics
-- Adaptive fallback: track which fallback mode was used per request
+All three phases feed into existing `MetricsStore`. The `RequestMetrics` interface in `types.ts` will gain new optional fields:
+- `fallbackMode?: "sequential" | "race"` — which fallback strategy was used
+- `circuitBreakerSkipped?: string[]` — providers skipped due to open breakers
+
+These are additive (optional fields) and backward compatible.
