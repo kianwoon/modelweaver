@@ -1,5 +1,6 @@
 // src/proxy.ts
 import type { ProviderConfig, RoutingEntry, RequestContext } from "./types.js";
+import { request as undiciRequest } from "undici";
 
 /** Headers forwarded as-is to upstream */
 const FORWARD_HEADERS = new Set([
@@ -254,12 +255,22 @@ export async function forwardRequest(
   const timeout = setTimeout(() => controller.abort(), provider.timeout);
 
   try {
-    const response = await fetch(url, {
+    const undiciResponse = await undiciRequest(url, {
       method: "POST",
       headers,
       body,
       signal: controller.signal,
+      dispatcher: provider._agent,
     });
+
+    // Wrap undici response as a standard Web Response for downstream compatibility
+    const response = new Response(
+      undiciResponse.body as unknown as BodyInit,
+      {
+        status: undiciResponse.statusCode,
+        headers: undiciResponse.headers as unknown as HeadersInit,
+      }
+    );
 
     clearTimeout(timeout);
     return response;
