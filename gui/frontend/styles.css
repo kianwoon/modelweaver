@@ -22,14 +22,26 @@ body {
   background: var(--bg);
   color: var(--text);
   font-size: 13px;
-  overflow-y: auto;
+  overflow: hidden;
+  height: 100vh;
+  position: relative;
   border-radius: 10px;
   border: 1px solid var(--border);
 }
 
 #app {
   padding: 0;
-  min-height: 100vh;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Fixed elements — never shrink */
+.titlebar,
+.status,
+.stats {
+  flex-shrink: 0;
 }
 
 /* Title Bar */
@@ -157,6 +169,10 @@ body {
 /* Sections */
 .section {
   padding: 8px 12px;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
 }
 
 .section-title {
@@ -173,6 +189,9 @@ body {
   border-radius: 6px;
   border: 1px solid var(--border);
   padding: 8px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 .empty {
@@ -250,9 +269,15 @@ body {
   color: var(--text-dim);
 }
 
+/* Cap model and provider lists to prevent them from consuming all space */
+#models,
+#providers {
+  max-height: 120px;
+  overflow-y: auto;
+}
+
 /* Recent requests */
 .recent-list {
-  max-height: 150px;
   overflow-y: auto;
 }
 
