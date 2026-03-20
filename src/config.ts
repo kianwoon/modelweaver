@@ -152,17 +152,26 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
     }
   }
 
-  // Build typed config
+  // Build typed config — cache parsed URL components per provider (avoids per-request URL parsing)
   const providers = new Map<string, ProviderConfig>();
   for (const [name, p] of Object.entries(validated.providers)) {
-    providers.set(name, {
+    const providerConfig: ProviderConfig & { _cachedBaseUrl?: string; _cachedHost?: string } = {
       name,
       baseUrl: p.baseUrl,
       apiKey: p.apiKey,
       timeout: p.timeout,
       authType: p.authType,
       modelLimits: p.modelLimits ? { maxInputTokens: p.modelLimits.maxInputTokens, maxOutputTokens: p.modelLimits.maxOutputTokens } : undefined,
-    });
+    };
+    try {
+      const parsedUrl = new URL(p.baseUrl);
+      // Build a normalized base URL string that buildOutboundUrl can use directly
+      providerConfig._cachedBaseUrl = `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname}`;
+      providerConfig._cachedHost = parsedUrl.host;
+    } catch {
+      // If baseUrl is invalid, skip caching — buildOutboundHeaders will fall back gracefully
+    }
+    providers.set(name, providerConfig);
   }
 
   const routing = new Map<string, RoutingEntry[]>();

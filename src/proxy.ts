@@ -9,6 +9,12 @@ const FORWARD_HEADERS = new Set([
   "accept",
 ]);
 
+/** Pre-compiled regex for normalizing duplicate slashes in URL paths */
+const MULTI_SLASH = /\/+/g;
+
+/** Module-level TextEncoder — avoids per-request allocation */
+const textEncoder = new TextEncoder();
+
 export function isRetriable(status: number): boolean {
   return status === 429 || status >= 500;
 }
@@ -17,12 +23,14 @@ const CHARS_PER_TOKEN_ESTIMATE = 2; // LLM tokenizers are more efficient than 4 
 const SAFETY_MARGIN_TOKENS = 2000;  // Reserve for tool schemas, overhead, etc.
 
 /**
- * Estimate token count from a JSON string using character-based heuristic.
- * Conservative: assumes ~4 chars per token (worst case for mixed content with code).
+ * Estimate token count using character-based heuristic.
+ * When charCount is provided, uses it directly (avoids re-serializing).
+ * Otherwise falls back to stringifying the object.
  */
-function estimateTokens(value: string | Record<string, unknown>): number {
+function estimateTokens(value: string | Record<string, unknown>, charCount?: number): number {
   const jsonBody = typeof value === "string" ? value : JSON.stringify(value);
-  return Math.ceil(jsonBody.length / CHARS_PER_TOKEN_ESTIMATE);
+  const chars = charCount ?? jsonBody.length;
+  return Math.ceil(chars / CHARS_PER_TOKEN_ESTIMATE);
 }
 
 export function buildOutboundUrl(baseUrl: string, incomingPath: string): string {
@@ -40,7 +48,7 @@ export function buildOutboundUrl(baseUrl: string, incomingPath: string): string 
     ? basePath + pathOnly.slice(3)
     : basePath + pathOnly;
 
-  const resolvedPath = dedupedPath.replace(/\/+/g, "/");
+  const resolvedPath = dedupedPath.replace(MULTI_SLASH, "/");
   base.pathname = resolvedPath;
   if (queryString) base.search = "?" + queryString;
   return base.toString();
@@ -67,12 +75,17 @@ export function buildOutboundHeaders(
   }
   headers.set("x-request-id", requestId);
 
-  // Set host to provider hostname
-  try {
-    const url = new URL(provider.baseUrl);
-    headers.set("host", url.host);
-  } catch {
-    // If baseUrl is not a valid URL, skip host rewrite
+  // Set host to provider hostname (use cached components when available)
+  const cachedHost = (provider as ProviderConfig & { _cachedHost?: string })._cachedHost;
+  if (cachedHost) {
+    headers.set("host", cachedHost);
+  } else {
+    try {
+      const url = new URL(provider.baseUrl);
+      headers.set("host", url.host);
+    } catch {
+      // If baseUrl is not a valid URL, skip host rewrite
+    }
   }
 
   return headers;
@@ -92,67 +105,63 @@ function cleanOrphanedToolMessages(body: Record<string, unknown>): void {
   const messages = body.messages;
   if (!Array.isArray(messages)) return;
 
-  // Collect all tool_use IDs from assistant messages
+  // Pass 1: Collect tool_use IDs and tool_result IDs in a single pass,
+  // and record which message indices have orphaned blocks
   const toolUseIds = new Set<string>();
-  for (const msg of messages) {
-    if (msg.role === "assistant" && Array.isArray(msg.content)) {
+  const toolResultIds = new Set<string>();
+  const needsFiltering = new Map<number, "user" | "assistant">();
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!Array.isArray(msg.content)) continue;
+
+    if (msg.role === "assistant") {
+      let hasOrphan = false;
       for (const block of msg.content) {
         if (block.type === "tool_use" && block.id) {
           toolUseIds.add(String(block.id));
+          if (!toolResultIds.has(String(block.id))) hasOrphan = true;
         }
       }
-    }
-  }
-
-  // Collect all tool_result IDs from user messages
-  const toolResultIds = new Set<string>();
-  for (const msg of messages) {
-    if (msg.role === "user" && Array.isArray(msg.content)) {
+      // Note: toolResultIds may not be fully populated yet, so we defer judgment
+      // on assistant orphans to after the full pass.
+    } else if (msg.role === "user") {
+      let hasOrphan = false;
       for (const block of msg.content) {
         if (block.type === "tool_result" && block.tool_use_id) {
           toolResultIds.add(String(block.tool_use_id));
+          if (!toolUseIds.has(String(block.tool_use_id))) hasOrphan = true;
         }
       }
+      if (hasOrphan) needsFiltering.set(i, "user");
     }
   }
 
-  // Find orphaned tool_results and their parent user messages (filter content arrays)
-  const orphanedUserIndices = new Set<number>();
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    if (msg.role === "user" && Array.isArray(msg.content)) {
-      const hasOrphan = msg.content.some(
-        (block: Record<string, unknown>) => block.type === "tool_result" && !toolUseIds.has(String(block.tool_use_id))
-      );
-      if (hasOrphan) orphanedUserIndices.add(i);
-    }
-  }
-
-  // Find orphaned tool_uses and their parent assistant messages
-  const orphanedAssistantIndices = new Set<number>();
+  // Check assistant messages for orphans now that toolResultIds is complete
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (msg.role === "assistant" && Array.isArray(msg.content)) {
       const hasOrphan = msg.content.some(
         (block: Record<string, unknown>) => block.type === "tool_use" && !toolResultIds.has(String(block.id))
       );
-      if (hasOrphan) orphanedAssistantIndices.add(i);
+      if (hasOrphan) needsFiltering.set(i, "assistant");
     }
   }
 
-  if (orphanedUserIndices.size === 0 && orphanedAssistantIndices.size === 0) return;
+  if (needsFiltering.size === 0) return;
 
-  // Filter out orphaned tool references from content arrays
+  // Pass 2: Filter out orphaned tool references from content arrays
   body.messages = messages.map((msg: Record<string, unknown>, i: number) => {
-    if (orphanedUserIndices.has(i) && Array.isArray(msg.content)) {
-      return { ...msg, content: msg.content.filter(
-        (block: Record<string, unknown>) => !(block.type === "tool_result" && !toolUseIds.has(String(block.tool_use_id)))
-      )};
-    }
-    if (orphanedAssistantIndices.has(i) && Array.isArray(msg.content)) {
-      return { ...msg, content: msg.content.filter(
-        (block: Record<string, unknown>) => !(block.type === "tool_use" && !toolResultIds.has(String(block.id)))
-      )};
+    const filterType = needsFiltering.get(i);
+    if (filterType && Array.isArray(msg.content)) {
+      const filtered = msg.content.filter((block: Record<string, unknown>) => {
+        if (filterType === "user") {
+          return !(block.type === "tool_result" && !toolUseIds.has(String(block.tool_use_id)));
+        }
+        return !(block.type === "tool_use" && !toolResultIds.has(String(block.id)));
+      });
+      if (filtered.length === msg.content.length) return msg; // nothing was actually filtered
+      return { ...msg, content: filtered };
     }
     return msg;
   });
@@ -160,7 +169,8 @@ function cleanOrphanedToolMessages(body: Record<string, unknown>): void {
 
 /**
  * Forward a request to a single provider.
- * Uses ctx.rawBody as the body source; incomingRequest is used for metadata only (url, headers).
+ * Uses ctx.parsedBody when available (avoids re-parsing); falls back to ctx.rawBody.
+ * incomingRequest is used for metadata only (url, headers).
  * Returns the Response object — caller decides fallback logic.
  */
 export async function forwardRequest(
@@ -170,20 +180,29 @@ export async function forwardRequest(
   incomingRequest: Request
 ): Promise<Response> {
   const outgoingPath = incomingRequest.url.replace(/^https?:\/\/[^/]+/, "");
-  const url = buildOutboundUrl(provider.baseUrl, outgoingPath);
 
-  // Prepare body from ctx.rawBody (with optional model override + context guard)
-  let body: string = ctx.rawBody;
+  // Set actualModel early so metrics always record the routed model,
+  // even if body parsing or the fetch itself fails
+  if (entry.model) {
+    ctx.actualModel = entry.model;
+  }
+
+  // Use cached URL components when available (avoids per-request URL parsing)
+  const cachedBaseUrl = (provider as ProviderConfig & { _cachedBaseUrl?: string })._cachedBaseUrl;
+  const url = buildOutboundUrl(cachedBaseUrl ?? provider.baseUrl, outgoingPath);
+
+  // Prepare body — prefer pre-parsed object to avoid double JSON.parse
+  let body: string;
   const contentType = incomingRequest.headers.get("content-type") || "";
 
   if (contentType.includes("application/json")) {
     try {
-      const parsed = JSON.parse(ctx.rawBody);
+      const parsed = (ctx as RequestContext & { parsedBody?: Record<string, unknown> }).parsedBody
+        ?? JSON.parse(ctx.rawBody);
 
-      // Model override
+      // Model override in the request body
       if (entry.model) {
         parsed.model = entry.model;
-        ctx.actualModel = entry.model;
       }
 
       // Clean orphaned tool references from cross-provider conversation history
@@ -191,7 +210,8 @@ export async function forwardRequest(
 
       // Context window guard — check limits and clamp max_tokens
       if (provider.modelLimits) {
-        const estimatedInput = estimateTokens(parsed);
+        // Use rawBody char count when available to avoid re-serializing for estimation
+        const estimatedInput = estimateTokens(parsed, ctx.rawBody.length);
         const { maxInputTokens, maxOutputTokens } = provider.modelLimits;
 
         const requestedMaxTokens = typeof parsed.max_tokens === "number" ? parsed.max_tokens : maxOutputTokens;
@@ -226,11 +246,14 @@ export async function forwardRequest(
       body = JSON.stringify(parsed);
     } catch {
       // If body can't be parsed, send it as-is without model override
+      body = ctx.rawBody;
     }
+  } else {
+    body = ctx.rawBody;
   }
 
   const headers = buildOutboundHeaders(incomingRequest.headers, provider, ctx.requestId);
-  headers.set("content-length", new TextEncoder().encode(body).byteLength.toString());
+  headers.set("content-length", textEncoder.encode(body).byteLength.toString());
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), provider.timeout);

@@ -617,8 +617,6 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
     if (confirm) break;
 
-    if (confirm) break;
-
     console.log('\n  Restarting quick setup...\n');
   }
 

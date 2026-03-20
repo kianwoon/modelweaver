@@ -1,13 +1,6 @@
 // src/daemon.ts — Daemon lifecycle management for background mode
-import { spawn, execFileSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  writeFileSync,
-  unlinkSync,
-  createWriteStream,
-} from "node:fs";
+import { spawn, execFile } from "node:child_process";
+import { access, readFile, writeFile, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,33 +27,36 @@ export function getLogPath(): string {
 // Directory & PID helpers
 // ---------------------------------------------------------------------------
 
-export function ensureDir(): void {
-  if (!existsSync(MODELWEAVER_DIR)) {
-    mkdirSync(MODELWEAVER_DIR, { recursive: true });
+export async function ensureDir(): Promise<void> {
+  try {
+    await access(MODELWEAVER_DIR);
+  } catch {
+    await mkdir(MODELWEAVER_DIR, { recursive: true });
   }
 }
 
-export function writePidFile(pid: number): void {
-  ensureDir();
-  writeFileSync(getPidPath(), `${pid}\n`);
+export async function writePidFile(pid: number): Promise<void> {
+  await ensureDir();
+  await writeFile(getPidPath(), `${pid}\n`);
 }
 
-export function readPidFile(): number | null {
+export async function readPidFile(): Promise<number | null> {
   const pidPath = getPidPath();
-  if (!existsSync(pidPath)) return null;
   try {
-    const content = readFileSync(pidPath, "utf-8").trim();
-    const pid = parseInt(content, 10);
+    const content = await readFile(pidPath, "utf-8");
+    const pid = parseInt(content.trim(), 10);
     return isNaN(pid) ? null : pid;
   } catch {
     return null;
   }
 }
 
-export function removePidFile(): void {
+export async function removePidFile(): Promise<void> {
   const pidPath = getPidPath();
-  if (existsSync(pidPath)) {
-    unlinkSync(pidPath);
+  try {
+    await unlink(pidPath);
+  } catch {
+    // File doesn't exist — nothing to do
   }
 }
 
@@ -72,27 +68,28 @@ export function getWorkerPidPath(): string {
   return join(MODELWEAVER_DIR, "modelweaver.worker.pid");
 }
 
-export function writeWorkerPidFile(pid: number): void {
-  ensureDir();
-  writeFileSync(getWorkerPidPath(), `${pid}\n`);
+export async function writeWorkerPidFile(pid: number): Promise<void> {
+  await ensureDir();
+  await writeFile(getWorkerPidPath(), `${pid}\n`);
 }
 
-export function readWorkerPidFile(): number | null {
+export async function readWorkerPidFile(): Promise<number | null> {
   const pidPath = getWorkerPidPath();
-  if (!existsSync(pidPath)) return null;
   try {
-    const content = readFileSync(pidPath, "utf-8").trim();
-    const pid = parseInt(content, 10);
+    const content = await readFile(pidPath, "utf-8");
+    const pid = parseInt(content.trim(), 10);
     return isNaN(pid) ? null : pid;
   } catch {
     return null;
   }
 }
 
-export function removeWorkerPidFile(): void {
+export async function removeWorkerPidFile(): Promise<void> {
   const pidPath = getWorkerPidPath();
-  if (existsSync(pidPath)) {
-    unlinkSync(pidPath);
+  try {
+    await unlink(pidPath);
+  } catch {
+    // File doesn't exist — nothing to do
   }
 }
 
@@ -109,19 +106,22 @@ export function isProcessAlive(pid: number): boolean {
 // Port-based process discovery (fallback when PID file is missing)
 // ---------------------------------------------------------------------------
 
-/** Find PIDs of processes listening on the given TCP port via lsof. */
-export function findPidsOnPort(port: number): number[] {
-  try {
-    // execFileSync avoids shell injection; port is always a number
-    const out = execFileSync("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], {
+/** Find PIDs of processes listening on the given TCP port via lsof (async). */
+export function findPidsOnPort(port: number): Promise<number[]> {
+  return new Promise((resolve) => {
+    execFile("lsof", ["-ti", `:${port}`, "-sTCP:LISTEN"], {
       encoding: "utf-8",
       timeout: 3000,
-    }).trim();
-    return out ? out.split("\n").map(Number).filter((n) => !isNaN(n)) : [];
-  } catch {
-    // lsof returns non-zero when nothing is listening on the port
-    return [];
-  }
+    }, (err, out) => {
+      if (err) {
+        // lsof returns non-zero when nothing is listening on the port
+        resolve([]);
+        return;
+      }
+      const trimmed = (out || "").trim();
+      resolve(trimmed ? trimmed.split("\n").map(Number).filter((n) => !isNaN(n)) : []);
+    });
+  });
 }
 
 /** Attempt to load the configured port from the config file (dynamic import to avoid circular deps). */
@@ -167,12 +167,12 @@ export interface DaemonStatus {
 }
 
 export async function statusDaemon(portOverride?: number): Promise<DaemonStatus> {
-  const pid = readPidFile();
+  const pid = await readPidFile();
   if (pid === null) {
     // PID file missing — try to find the process by configured port
     const port = portOverride ?? await getConfigPort();
     if (port !== null && port > 0) {
-      const portPids = findPidsOnPort(port);
+      const portPids = await findPidsOnPort(port);
       if (portPids.length > 0) {
         const livePids = portPids.filter((p) => isProcessAlive(p));
         if (livePids.length > 0) {
@@ -190,7 +190,7 @@ export async function statusDaemon(portOverride?: number): Promise<DaemonStatus>
     return { running: true, pid, message: `ModelWeaver is running (PID ${pid})` };
   }
   // Stale PID file — process is dead but file remains
-  removePidFile();
+  await removePidFile();
   return { running: false, message: `ModelWeaver is not running (stale PID file cleaned up)` };
 }
 
@@ -273,7 +273,7 @@ export async function startDaemon(
   // (child process writes PID file in its startup sequence)
   let pid: number | undefined;
   for (let i = 0; i < 20; i++) {
-    const checkPid = readPidFile();
+    const checkPid = await readPidFile();
     if (checkPid !== null) {
       pid = checkPid;
       break;
@@ -308,22 +308,22 @@ export interface DaemonStopResult {
 }
 
 export async function stopDaemon(portOverride?: number): Promise<DaemonStopResult> {
-  const pid = readPidFile();
+  const pid = await readPidFile();
   if (pid === null) {
     // PID file missing — try to find the process by configured port
     const port = portOverride ?? await getConfigPort();
     if (port !== null) {
-      const portPids = findPidsOnPort(port);
+      const portPids = await findPidsOnPort(port);
       const livePids = portPids.filter((p) => isProcessAlive(p));
       if (livePids.length > 0) {
         // Also include the worker PID file if present
-        const workerPid = readWorkerPidFile();
+        const workerPid = await readWorkerPidFile();
         const pidsToKill = [...livePids];
         if (workerPid !== null && isProcessAlive(workerPid) && !pidsToKill.includes(workerPid)) {
           pidsToKill.push(workerPid);
         }
         await killProcessTree(pidsToKill);
-        removeWorkerPidFile();
+        await removeWorkerPidFile();
         return {
           success: true,
           message: `ModelWeaver stopped (found on port ${port}, PIDs ${livePids.join(", ")}; PID file was missing)`,
@@ -335,7 +335,7 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
 
   if (!isProcessAlive(pid)) {
     // Monitor is dead — check for orphaned worker and kill it
-    const workerPid = readWorkerPidFile();
+    const workerPid = await readWorkerPidFile();
     if (workerPid !== null && isProcessAlive(workerPid)) {
       try {
         process.kill(workerPid, "SIGTERM");
@@ -352,9 +352,9 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
       } catch {
         // Already dead
       }
-      removeWorkerPidFile();
+      await removeWorkerPidFile();
     }
-    removePidFile();
+    await removePidFile();
     return { success: false, message: "ModelWeaver is not running (stale PID file cleaned up)" };
   }
 
@@ -368,7 +368,7 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
     if (!isProcessAlive(pid)) {
-      removePidFile();
+      await removePidFile();
       return { success: true, message: `ModelWeaver stopped (PID ${pid})` };
     }
     await new Promise(r => setTimeout(r, 100));
@@ -381,7 +381,7 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
     // Already dead
   }
 
-  removePidFile();
+  await removePidFile();
   return { success: true, message: `ModelWeaver force-stopped (PID ${pid})` };
 }
 
@@ -389,17 +389,19 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
 // Remove (stop + cleanup)
 // ---------------------------------------------------------------------------
 
-export function removeLogFile(): void {
+export async function removeLogFile(): Promise<void> {
   const logPath = getLogPath();
-  if (existsSync(logPath)) {
-    unlinkSync(logPath);
+  try {
+    await unlink(logPath);
+  } catch {
+    // File doesn't exist — nothing to do
   }
 }
 
 export async function removeDaemon(): Promise<DaemonStopResult> {
   const stopResult = await stopDaemon();
-  removeLogFile();
-  removeWorkerPidFile();
+  await removeLogFile();
+  await removeWorkerPidFile();
   return {
     success: stopResult.success || stopResult.message.includes("not running"),
     message: stopResult.success

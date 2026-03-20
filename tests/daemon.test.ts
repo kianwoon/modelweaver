@@ -16,7 +16,6 @@ import {
   isProcessAlive,
   statusDaemon,
   createDebouncedReload,
-  findPidsOnPort,
 } from "../src/daemon.js";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -36,36 +35,36 @@ describe("daemon", () => {
   });
 
   describe("PID file operations", () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       // Clean up any existing PID file
-      removePidFile();
+      await removePidFile();
     });
 
-    afterEach(() => {
-      removePidFile();
+    afterEach(async () => {
+      await removePidFile();
     });
 
-    it("writePidFile and readPidFile round-trip", () => {
-      writePidFile(12345);
-      expect(readPidFile()).toBe(12345);
+    it("writePidFile and readPidFile round-trip", async () => {
+      await writePidFile(12345);
+      expect(await readPidFile()).toBe(12345);
     });
 
-    it("readPidFile returns null when no file exists", () => {
-      expect(readPidFile()).toBeNull();
+    it("readPidFile returns null when no file exists", async () => {
+      expect(await readPidFile()).toBeNull();
     });
 
-    it("removePidFile removes the file", () => {
-      writePidFile(12345);
-      expect(readPidFile()).toBe(12345);
-      removePidFile();
-      expect(readPidFile()).toBeNull();
+    it("removePidFile removes the file", async () => {
+      await writePidFile(12345);
+      expect(await readPidFile()).toBe(12345);
+      await removePidFile();
+      expect(await readPidFile()).toBeNull();
     });
 
     it("readPidFile returns null for garbage content", async () => {
       const { writeFileSync } = await import("node:fs");
-      ensureDir();
+      await ensureDir();
       writeFileSync(getPidPath(), "not-a-number\n");
-      expect(readPidFile()).toBeNull();
+      expect(await readPidFile()).toBeNull();
     });
   });
 
@@ -80,12 +79,12 @@ describe("daemon", () => {
   });
 
   describe("statusDaemon", () => {
-    beforeEach(() => {
-      removePidFile();
+    beforeEach(async () => {
+      await removePidFile();
     });
 
-    afterEach(() => {
-      removePidFile();
+    afterEach(async () => {
+      await removePidFile();
     });
 
     it("returns not running when no PID file and nothing on port", async () => {
@@ -96,7 +95,7 @@ describe("daemon", () => {
     });
 
     it("returns running with current PID", async () => {
-      writePidFile(process.pid);
+      await writePidFile(process.pid);
       const status = await statusDaemon();
       expect(status.running).toBe(true);
       expect(status.pid).toBe(process.pid);
@@ -104,12 +103,12 @@ describe("daemon", () => {
     });
 
     it("cleans up stale PID file", async () => {
-      writePidFile(999999999); // impossible PID
+      await writePidFile(999999999); // impossible PID
       const status = await statusDaemon();
       expect(status.running).toBe(false);
       expect(status.message).toContain("stale");
       // PID file should have been removed
-      expect(readPidFile()).toBeNull();
+      expect(await readPidFile()).toBeNull();
     });
   });
 
@@ -170,28 +169,28 @@ describe("daemon", () => {
   });
 
   describe("worker PID file operations", () => {
-    beforeEach(() => {
-      removeWorkerPidFile();
+    beforeEach(async () => {
+      await removeWorkerPidFile();
     });
 
-    afterEach(() => {
-      removeWorkerPidFile();
+    afterEach(async () => {
+      await removeWorkerPidFile();
     });
 
-    it("writeWorkerPidFile and readWorkerPidFile round-trip", () => {
-      writeWorkerPidFile(54321);
-      expect(readWorkerPidFile()).toBe(54321);
+    it("writeWorkerPidFile and readWorkerPidFile round-trip", async () => {
+      await writeWorkerPidFile(54321);
+      expect(await readWorkerPidFile()).toBe(54321);
     });
 
-    it("readWorkerPidFile returns null when no file exists", () => {
-      expect(readWorkerPidFile()).toBeNull();
+    it("readWorkerPidFile returns null when no file exists", async () => {
+      expect(await readWorkerPidFile()).toBeNull();
     });
 
-    it("removeWorkerPidFile removes the file", () => {
-      writeWorkerPidFile(54321);
-      expect(readWorkerPidFile()).toBe(54321);
-      removeWorkerPidFile();
-      expect(readWorkerPidFile()).toBeNull();
+    it("removeWorkerPidFile removes the file", async () => {
+      await writeWorkerPidFile(54321);
+      expect(await readWorkerPidFile()).toBe(54321);
+      await removeWorkerPidFile();
+      expect(await readWorkerPidFile()).toBeNull();
     });
 
     it("getWorkerPidPath returns correct path", () => {
@@ -201,45 +200,45 @@ describe("daemon", () => {
   });
 
   describe("removeLogFile", () => {
-    beforeEach(() => {
+    beforeEach(async () => {
       // Clean up any existing log file
-      removeLogFile();
+      await removeLogFile();
     });
 
-    afterEach(() => {
-      removeLogFile();
+    afterEach(async () => {
+      await removeLogFile();
     });
 
-    it("removes log file if it exists", () => {
-      ensureDir();
+    it("removes log file if it exists", async () => {
+      await ensureDir();
       writeFileSync(getLogPath(), "test log content\n");
       expect(existsSync(getLogPath())).toBe(true);
-      removeLogFile();
+      await removeLogFile();
       expect(existsSync(getLogPath())).toBe(false);
     });
 
-    it("does nothing if log file does not exist", () => {
-      expect(() => removeLogFile()).not.toThrow();
+    it("does nothing if log file does not exist", async () => {
+      await expect(removeLogFile()).resolves.not.toThrow();
     });
   });
 
   describe("removeDaemon", () => {
-    beforeEach(() => {
-      removePidFile();
-      removeLogFile();
-      removeWorkerPidFile();
+    beforeEach(async () => {
+      await removePidFile();
+      await removeLogFile();
+      await removeWorkerPidFile();
     });
 
-    afterEach(() => {
-      removePidFile();
-      removeLogFile();
-      removeWorkerPidFile();
+    afterEach(async () => {
+      await removePidFile();
+      await removeLogFile();
+      await removeWorkerPidFile();
     });
 
     it("reports not running or cleaned up and removes log file", async () => {
-      ensureDir();
+      await ensureDir();
       writeFileSync(getLogPath(), "old log\n");
-      writeWorkerPidFile(12345);
+      await writeWorkerPidFile(12345);
 
       const result = await removeDaemon();
       expect(result.success).toBe(true);

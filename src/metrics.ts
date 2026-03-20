@@ -38,36 +38,38 @@ export class MetricsStore {
   getSummary(): MetricsSummary {
     const requests = this.getRecentRequests();
 
-    const totalInputTokens = requests.reduce((sum, r) => sum + (r.inputTokens ?? 0), 0);
-    const totalOutputTokens = requests.reduce((sum, r) => sum + (r.outputTokens ?? 0), 0);
-    const avgTokensPerSec =
-      requests.length > 0
-        ? requests.reduce((sum, r) => sum + (r.tokensPerSec ?? 0), 0) / requests.length
-        : 0;
-
-    // Group by model, track actualModel when available
+    // Single-pass aggregation: compute all metrics in one iteration
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    let totalTokensPerSec = 0;
     const modelMap = new Map<string, { actualModel?: string; count: number; lastSeen: number }>();
-    for (const r of requests) {
-      const existing = modelMap.get(r.model);
-      const actual = r.actualModel || undefined;
+    const providerMap = new Map<string, number>();
+
+    for (let i = 0; i < requests.length; i++) {
+      const r = requests[i];
+      totalInputTokens += r.inputTokens ?? 0;
+      totalOutputTokens += r.outputTokens ?? 0;
+      totalTokensPerSec += r.tokensPerSec ?? 0;
+
+      // Model grouping — group by actualModel (what was actually used) to avoid duplicates
+      const groupKey = r.actualModel || r.model;
+      const existing = modelMap.get(groupKey);
       if (existing) {
         existing.count++;
         if (r.timestamp > existing.lastSeen) existing.lastSeen = r.timestamp;
-        if (actual) existing.actualModel = actual;
       } else {
-        modelMap.set(r.model, { actualModel: actual, count: 1, lastSeen: r.timestamp });
+        modelMap.set(groupKey, { actualModel: undefined, count: 1, lastSeen: r.timestamp });
       }
-    }
-    const activeModels = [...modelMap.entries()]
-      .map(([model, { actualModel, count, lastSeen }]) => ({ model, actualModel, count, lastSeen }))
-      .sort((a, b) => b.count - a.count);
 
-    // Group by target provider (the intended routing target, not fallback)
-    const providerMap = new Map<string, number>();
-    for (const r of requests) {
-      const p = r.targetProvider ?? r.provider;
+      // Provider grouping — use the provider that actually handled the request
+      const p = r.provider ?? r.targetProvider;
       providerMap.set(p, (providerMap.get(p) ?? 0) + 1);
     }
+
+    const activeModels = [...modelMap.entries()]
+      .map(([model, { count, lastSeen }]) => ({ model, actualModel: undefined, count, lastSeen }))
+      .sort((a, b) => b.count - a.count);
+
     const providerDistribution = [...providerMap.entries()]
       .map(([provider, count]) => ({ provider, count }))
       .sort((a, b) => b.count - a.count);
@@ -76,7 +78,7 @@ export class MetricsStore {
       totalRequests: requests.length,
       totalInputTokens,
       totalOutputTokens,
-      avgTokensPerSec: Math.round(avgTokensPerSec * 100) / 100,
+      avgTokensPerSec: requests.length > 0 ? Math.round((totalTokensPerSec / requests.length) * 100) / 100 : 0,
       activeModels,
       providerDistribution,
       recentRequests: requests,

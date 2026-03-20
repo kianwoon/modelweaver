@@ -1,17 +1,13 @@
-// app.js — WebSocket client for ModelWeaver metrics
+// app.js — ModelWeaver GUI (Tauri) — uses invoke() for all HTTP calls
 const DEFAULT_PORT = 3456;
-const RECONNECT_DELAY = 3000;
+const POLL_INTERVAL = 5000;
 
-let ws = null;
-let reconnectTimer = null;
-
-// Tauri API — uses window.__TAURI__ (withGlobalTauri: true in tauri.conf.json)
-let appWindow = null;
-function getAppWindow() {
-  if (!appWindow && window.__TAURI__) {
-    appWindow = window.__TAURI__.window.getCurrentWindow();
+// Tauri invoke helper
+async function invoke(cmd, args) {
+  if (window.__TAURI__) {
+    return window.__TAURI__.core.invoke(cmd, args);
   }
-  return appWindow;
+  throw new Error('Tauri API not available');
 }
 
 // DOM references
@@ -27,23 +23,20 @@ const recentEl = document.getElementById('recent');
 
 // Title bar buttons
 document.getElementById('btn-close').addEventListener('click', () => {
-  const win = getAppWindow();
-  if (win) {
-    win.close();
+  if (window.__TAURI__) {
+    window.__TAURI__.window.getCurrentWindow().close();
   } else {
     window.close();
   }
 });
 
 document.getElementById('btn-minimize').addEventListener('click', () => {
-  const win = getAppWindow();
-  if (win) {
-    win.minimize();
+  if (window.__TAURI__) {
+    window.__TAURI__.window.getCurrentWindow().minimize();
   }
 });
 
-// Drag region — handled by data-tauri-drag-region attribute in HTML.
-// Stop propagation on buttons so clicks don't initiate a drag.
+// Drag region — stop propagation on buttons so clicks don't initiate a drag
 document.querySelectorAll('.titlebar-btn').forEach(btn => {
   btn.addEventListener('mousedown', e => e.stopPropagation());
 });
@@ -67,22 +60,23 @@ function shortModel(model) {
     .replace(/-latest$/, '');
 }
 
-function updateSummary(summary) {
-  statSpeed.textContent = summary.avgTokensPerSec.toFixed(1);
-  statRequests.textContent = summary.totalRequests;
-  statInputTokens.textContent = formatNumber(summary.totalInputTokens);
-  statOutputTokens.textContent = formatNumber(summary.totalOutputTokens);
+function updateSummary(data) {
+  statSpeed.textContent = (data.avgTokensPerSec || 0).toFixed(1);
+  statRequests.textContent = data.totalRequests || 0;
+  statInputTokens.textContent = formatNumber(data.totalInputTokens || 0);
+  statOutputTokens.textContent = formatNumber(data.totalOutputTokens || 0);
 
   // Active models
-  if (summary.activeModels.length === 0) {
+  const activeModels = data.activeModels || [];
+  if (activeModels.length === 0) {
     modelsEl.textContent = '';
     modelsEl.appendChild(createEmptyEl('No requests yet'));
   } else {
-    const maxCount = Math.max(...summary.activeModels.map(m => m.count));
+    const maxCount = Math.max(...activeModels.map(m => m.count));
     modelsEl.textContent = '';
-    for (const m of summary.activeModels) {
+    for (const m of activeModels) {
       const pct = maxCount > 0 ? (m.count / maxCount * 100) : 0;
-      const cls = (m.actualModel || m.model).toLowerCase();
+      const cls = (m.actualModel || m.model || '').toLowerCase();
       let barClass = '';
       if (cls.includes('sonnet')) barClass = 'sonnet';
       else if (cls.includes('haiku')) barClass = 'haiku';
@@ -93,7 +87,7 @@ function updateSummary(summary) {
 
       const name = document.createElement('span');
       name.className = 'model-name';
-      const displayModel = m.actualModel || m.model;
+      const displayModel = m.actualModel || m.model || 'unknown';
       name.title = displayModel;
       name.textContent = shortModel(displayModel);
 
@@ -117,13 +111,14 @@ function updateSummary(summary) {
   }
 
   // Providers
-  if (summary.providerDistribution.length === 0) {
+  const providers = data.providerDistribution || [];
+  if (providers.length === 0) {
     providersEl.textContent = '';
     providersEl.appendChild(createEmptyEl('No requests yet'));
   } else {
-    const total = summary.providerDistribution.reduce((s, p) => s + p.count, 0);
+    const total = providers.reduce((s, p) => s + p.count, 0);
     providersEl.textContent = '';
-    for (const p of summary.providerDistribution) {
+    for (const p of providers) {
       const pct = total > 0 ? Math.round(p.count / total * 100) : 0;
 
       const row = document.createElement('div');
@@ -144,12 +139,13 @@ function updateSummary(summary) {
   }
 
   // Recent requests
-  if (summary.recentRequests.length === 0) {
+  const recentRequests = data.recentRequests || [];
+  if (recentRequests.length === 0) {
     recentEl.textContent = '';
     recentEl.appendChild(createEmptyEl('No requests yet'));
   } else {
     recentEl.textContent = '';
-    const reversed = summary.recentRequests.slice(-10).reverse();
+    const reversed = recentRequests.slice(-10).reverse();
     for (const r of reversed) {
       const latency = r.latencyMs >= 1000 ? (r.latencyMs / 1000).toFixed(1) + 's' : r.latencyMs + 'ms';
 
@@ -158,17 +154,17 @@ function updateSummary(summary) {
 
       const model = document.createElement('span');
       model.className = 'recent-model';
-      const displayModel = r.actualModel || r.model;
+      const displayModel = r.actualModel || r.model || 'unknown';
       model.title = displayModel;
       model.textContent = shortModel(displayModel);
 
       const provider = document.createElement('span');
       provider.className = 'recent-provider';
-      provider.textContent = r.provider;
+      provider.textContent = r.provider || '';
 
       const tokens = document.createElement('span');
       tokens.className = 'recent-tokens';
-      tokens.textContent = formatNumber(r.inputTokens + r.outputTokens) + ' ' + latency;
+      tokens.textContent = formatNumber((r.inputTokens || 0) + (r.outputTokens || 0)) + ' ' + latency;
 
       item.appendChild(model);
       item.appendChild(provider);
@@ -185,87 +181,21 @@ function createEmptyEl(text) {
   return el;
 }
 
-function connect() {
-  if (ws) ws.close();  // Close existing connection before reconnecting
-  // Try to determine port — in Tauri, the GUI connects to the ModelWeaver process
-  const url = `ws://localhost:${DEFAULT_PORT}/ws`;
-
+async function fetchSummary() {
   try {
-    ws = new WebSocket(url);
-  } catch (err) {
-    console.error('WebSocket create failed:', err);
-    setStatus(false);
-    scheduleReconnect();
-    return;
-  }
-
-  ws.onopen = () => {
-    console.log('Connected to ModelWeaver');
+    const data = await invoke('fetch_metrics', { port: DEFAULT_PORT });
+    updateSummary(data);
     setStatus(true);
-    if (reconnectTimer) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
-  };
-
-  ws.onmessage = (event) => {
-    try {
-      const msg = JSON.parse(event.data);
-      if (msg.type === 'summary') {
-        updateSummary(msg.data);
-      } else if (msg.type === 'request') {
-        // Fetch fresh summary after a short delay so metrics are recorded
-        setTimeout(fetchSummary, 200);
-      }
-    } catch (err) {
-      console.error('Failed to parse message:', err);
-    }
-  };
-
-  ws.onclose = () => {
-    console.log('Disconnected from ModelWeaver');
+    const refreshEl = document.getElementById('last-refresh');
+    if (refreshEl) refreshEl.textContent = new Date().toLocaleTimeString();
+  } catch (err) {
+    console.error('[fetchSummary] failed:', err);
     setStatus(false);
-    scheduleReconnect();
-  };
-
-  ws.onerror = () => {
-    setStatus(false);
-  };
+  }
 }
 
-function fetchSummary() {
-  console.log('[fetchSummary] fetching metrics at', Date.now());
-  fetch(`http://localhost:${DEFAULT_PORT}/api/metrics/summary?t=${Date.now()}`)
-    .then(r => {
-      console.log('[fetchSummary] response status:', r.status);
-      return r.json();
-    })
-    .then(data => {
-      console.log('[fetchSummary] data:', JSON.stringify(data).substring(0, 100));
-      updateSummary(data);
-      setStatus(true); // REST success = backend is running
-      // Update last-refresh timestamp in status bar
-      const refreshEl = document.getElementById('last-refresh');
-      if (refreshEl) refreshEl.textContent = new Date().toLocaleTimeString();
-    })
-    .catch((err) => {
-      console.error('[fetchSummary] failed:', err);
-      setStatus(false); // REST failure = backend not reachable
-    });
-}
+// Poll via Tauri invoke — no direct fetch/WebSocket to localhost
+setInterval(fetchSummary, POLL_INTERVAL);
 
-function scheduleReconnect() {
-  if (reconnectTimer) return;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    connect();
-  }, RECONNECT_DELAY);
-}
-
-// Periodic refresh — always poll via REST; WebSocket is real-time bonus
-setInterval(() => {
-  fetchSummary();
-}, 5000);
-
-// Start
-connect();
+// Start immediately
+fetchSummary();

@@ -1,10 +1,14 @@
 // src/index.ts
 import { serve } from "@hono/node-server";
+import { readFileSync } from "node:fs";
 import { createApp } from "./server.js";
 import { loadConfig } from "./config.js";
 import type { LogLevel } from "./logger.js";
 import { MetricsStore } from "./metrics.js";
 import { attachWebSocket } from "./ws.js";
+
+// Read version from package.json at startup
+const VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")).version;
 
 function parseArgs(argv: string[]): { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean; gui: boolean } {
   const args: { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean; gui: boolean } = { verbose: false, help: false, daemon: false, monitor: false, gui: false };
@@ -179,12 +183,20 @@ async function main() {
     const { fileURLToPath } = await import('node:url');
 
     // Monitor writes its own PID to modelweaver.pid
-    writePidFile(process.pid);
+    await writePidFile(process.pid);
 
     const entryScript = process.argv[1] || pathJoin(dirname(fileURLToPath(import.meta.url)), "index.js");
 
-    const MAX_RESTARTS = 5;
-    const RATE_WINDOW_MS = 60_000;
+    // Prevent monitor from crashing on unexpected errors
+    process.on('uncaughtException', (err) => {
+      console.error(`[monitor] Uncaught exception: ${err.message}`);
+    });
+    process.on('unhandledRejection', (reason) => {
+      console.error(`[monitor] Unhandled rejection: ${reason}`);
+    });
+
+    const MAX_RESTARTS = 10;
+    const RATE_WINDOW_MS = 120_000;
     const RESTART_DELAY_MS = 2_000;
     let restartTimestamps: number[] = [];
     let child: ReturnType<typeof spawn> | null = null;
@@ -202,11 +214,11 @@ async function main() {
       });
       // NOTE: do NOT child.unref() here — the monitor must stay alive to watch the child
 
-      child.on("exit", (code) => {
-        removeWorkerPidFile();
+      child.on("exit", async (code) => {
+        await removeWorkerPidFile();
         if (code === 0) {
           // Clean shutdown — monitor exits too
-          removePidFile();
+          await removePidFile();
           process.exit(0);
         }
         // Crash — check rate limit before restarting
@@ -214,7 +226,7 @@ async function main() {
         restartTimestamps = restartTimestamps.filter((t) => now - t < RATE_WINDOW_MS);
         if (restartTimestamps.length >= MAX_RESTARTS) {
           // Too many restarts — give up
-          removePidFile();
+          await removePidFile();
           process.exit(1);
         }
         restartTimestamps.push(now);
@@ -223,21 +235,21 @@ async function main() {
     }
 
     // SIGTERM from `stop` → kill child, then exit
-    process.on("SIGTERM", () => {
+    process.on("SIGTERM", async () => {
       if (child) {
         try { child.kill("SIGTERM"); } catch { /* already dead */ }
       }
-      removePidFile();
-      removeWorkerPidFile();
+      await removePidFile();
+      await removeWorkerPidFile();
       process.exit(0);
     });
 
-    process.on("SIGINT", () => {
+    process.on("SIGINT", async () => {
       if (child) {
         try { child.kill("SIGTERM"); } catch { /* already dead */ }
       }
-      removePidFile();
-      removeWorkerPidFile();
+      await removePidFile();
+      await removeWorkerPidFile();
       process.exit(0);
     });
 
@@ -249,15 +261,24 @@ async function main() {
   if (args.daemon) {
     const { removeWorkerPidFile, writeWorkerPidFile, createDebouncedReload, getLogPath } = await import('./daemon.js');
     const { reloadConfig } = await import('./config.js');
-    const { createWriteStream } = await import('node:fs');
+    const { createWriteStream, watch } = await import('node:fs');
     const { createLogger } = await import('./logger.js');
     const logger = createLogger(logLevel);
 
+    // Prevent silent crashes from killing the daemon worker
+    process.on('uncaughtException', (err) => {
+      logger.error('Uncaught exception (daemon survived)', { error: err.message, stack: err.stack });
+    });
+    process.on('unhandledRejection', (reason) => {
+      logger.error('Unhandled rejection (daemon survived)', { reason: String(reason) });
+    });
+
     // Write worker PID file (monitor owns modelweaver.pid)
-    writeWorkerPidFile(process.pid);
+    await writeWorkerPidFile(process.pid);
 
     // Redirect stdout/stderr to log file
     const logStream = createWriteStream(getLogPath(), { flags: 'a' });
+    logStream.on('error', () => { /* ignore write errors to log file */ });
     process.stdout.write = logStream.write.bind(logStream) as typeof process.stdout.write;
     process.stderr.write = logStream.write.bind(logStream) as typeof process.stderr.write;
 
@@ -265,6 +286,7 @@ async function main() {
     const handle = createApp(config, logLevel, metricsStore);
 
     // Hot-reload: watch config file for changes
+    let configWatcher: ReturnType<typeof watch> | null = null;
     if (configPath) {
       const debounced = createDebouncedReload(() => {
         try {
@@ -277,12 +299,18 @@ async function main() {
       }, 300);
 
       try {
-        const { watchFile } = await import('node:fs');
-        watchFile(configPath, { interval: 500 }, () => {
+        configWatcher = watch(configPath, () => {
           debounced.reload();
         });
+        configWatcher.on('error', () => {
+          // fs.watch failed — silently disable hot-reload
+          if (configWatcher) {
+            configWatcher.close();
+            configWatcher = null;
+          }
+        });
       } catch {
-        // fs.watchFile not available — hot-reload disabled
+        // fs.watch not available — hot-reload disabled
       }
     }
 
@@ -302,8 +330,12 @@ async function main() {
     attachWebSocket(server as any, metricsStore);
 
     // Graceful shutdown
-    const shutdown = () => {
-      removeWorkerPidFile();
+    const shutdown = async () => {
+      if (configWatcher) {
+        configWatcher.close();
+        configWatcher = null;
+      }
+      await removeWorkerPidFile();
       logStream.end();
       process.exit(0);
     };
@@ -317,7 +349,7 @@ async function main() {
   const handle = createApp(config, logLevel, metricsStore);
 
   // Print startup info
-  console.log(`\n  ModelWeaver v0.1.0`);
+  console.log(`\n  ModelWeaver v${VERSION}`);
   console.log(`  Listening: http://${host}:${port}`);
   console.log(`  Config: ${configPath}\n`);
 

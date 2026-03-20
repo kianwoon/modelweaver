@@ -3,8 +3,9 @@ import { Hono } from "hono";
 import { resolveRequest } from "./router.js";
 import { forwardWithFallback } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
-import type { AppConfig } from "./types.js";
+import type { AppConfig, RequestContext } from "./types.js";
 import { randomUUID } from "node:crypto";
+import { gzipSync } from "node:zlib";
 import type { MetricsStore } from "./metrics.js";
 
 function anthropicError(type: string, message: string, requestId: string): Response {
@@ -21,9 +22,27 @@ function anthropicError(type: string, message: string, requestId: string): Respo
 }
 
 /**
+ * Parse token counts from an SSE data line's JSON payload.
+ * Supports both Anthropic (input_tokens/output_tokens) and OpenAI (prompt_tokens/completion_tokens) formats.
+ */
+function parseUsageFromData(data: Record<string, unknown>): { inputTokens: number; outputTokens: number } {
+  const usage = (data.message as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined
+    ?? data.usage as Record<string, unknown> | undefined;
+  if (!usage) return { inputTokens: 0, outputTokens: 0 };
+
+  const inp = (usage.input_tokens as number | undefined) ?? (usage.prompt_tokens as number | undefined) ?? 0;
+  const out = (usage.output_tokens as number | undefined) ?? (usage.completion_tokens as number | undefined) ?? 0;
+  const cacheRead = (usage.cache_read_input_tokens as number | undefined) ?? 0;
+  const cacheCreation = (usage.cache_creation_input_tokens as number | undefined) ?? 0;
+
+  return { inputTokens: inp + cacheRead + cacheCreation, outputTokens: out };
+}
+
+/**
  * Asynchronously read a response stream and extract token counts for metrics.
- * Reads the entire stream, then regex-matches for input_tokens and output_tokens.
- * Works for both streaming (SSE) and non-streaming (JSON) responses.
+ * Uses a streaming line-by-line SSE parser — does NOT buffer the entire response.
+ * For SSE responses, extracts token counts from usage events incrementally.
+ * For non-streaming JSON responses, accumulates a small buffer to parse at the end.
  */
 function extractTokensAsync(
   body: ReadableStream<Uint8Array>,
@@ -34,96 +53,108 @@ function extractTokensAsync(
   status: number,
 ): void {
   const reader = body.getReader();
-  const chunks: Uint8Array[] = [];
+  const decoder = new TextDecoder();
 
   (async () => {
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        chunks.push(value);
-      }
+      // Detect SSE vs JSON by checking the first chunk
+      const first = await reader.read();
+      if (first.done) return;
 
-      // Combine all chunks into a single string
-      const totalLength = chunks.reduce((sum, c) => sum + c.length, 0);
-      const combined = new Uint8Array(totalLength);
-      let offset = 0;
-      for (const chunk of chunks) {
-        combined.set(chunk, offset);
-        offset += chunk.length;
-      }
-      const text = new TextDecoder().decode(combined);
+      const isSSE = decoder.decode(first.value, { stream: true }).startsWith("event:");
 
-      // Extract tokens from SSE events only (message_start, message_delta)
-      // to avoid matching spurious values in tool_result content blocks
-      let inputTokens = 0;
-      let outputTokens = 0;
+      if (isSSE) {
+        // Streaming SSE: parse line-by-line, only track usage fields
+        let inputTokens = 0;
+        let outputTokens = 0;
+        // Prepend first chunk to the line buffer
+        let lineBuf = decoder.decode(first.value, { stream: true });
 
-      if (text.startsWith("event:")) {
-        // SSE streaming response — parse event types
-        const events = text.split("\n\n");
-        for (const event of events) {
-          const eventLines = event.split("\n");
-          const eventType = eventLines.find(l => l.startsWith("event:"));
-          const dataLine = eventLines.find(l => l.startsWith("data:"));
-
-          if (!dataLine) continue;
-
-          try {
-            const data = JSON.parse(dataLine.slice(5));
-            const usage = data.message?.usage ?? data.usage;
-            if (!usage) continue;
-
-            // Anthropic format: input_tokens / output_tokens
-            // OpenAI-compatible format: prompt_tokens / completion_tokens
-            const inp = usage.input_tokens ?? usage.prompt_tokens ?? 0;
-            const out = usage.output_tokens ?? usage.completion_tokens ?? 0;
-
-            if (inp > 0) inputTokens = inp;
-            if (out > 0) outputTokens = out;
-
-            // Anthropic cache tokens
-            inputTokens += (usage.cache_read_input_tokens ?? 0)
-              + (usage.cache_creation_input_tokens ?? 0);
-          } catch { /* skip malformed event data */ }
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) {
+            // Process any remaining buffer
+            if (lineBuf.trim()) processSSEChunk(lineBuf);
+            break;
+          }
+          lineBuf += decoder.decode(value, { stream: true });
+          // Process complete lines (split, keep incomplete last segment)
+          const lines = lineBuf.split("\n");
+          lineBuf = lines.pop()!;
+          processSSEChunk(lines.join("\n"));
         }
+
+        function processSSEChunk(chunk: string): void {
+          for (const event of chunk.split("\n\n")) {
+            const dataLine = event.split("\n").find(l => l.startsWith("data:"));
+            if (!dataLine) continue;
+            try {
+              const data = JSON.parse(dataLine.slice(5)) as Record<string, unknown>;
+              const usage = parseUsageFromData(data);
+              if (usage.inputTokens > inputTokens) inputTokens = usage.inputTokens;
+              if (usage.outputTokens > outputTokens) outputTokens = usage.outputTokens;
+            } catch { /* skip malformed */ }
+          }
+        }
+
+        if (inputTokens === 0 && outputTokens === 0) return;
+        recordMetrics(inputTokens, outputTokens);
       } else {
-        // Non-streaming JSON response — support both Anthropic and OpenAI token names
+        // Non-streaming JSON: small buffer parse (these are typically < 100KB)
+        let jsonBuf = first.value;
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          jsonBuf = concatUint8Arrays(jsonBuf, value);
+        }
+        const text = decoder.decode(jsonBuf);
+
         const inputMatches = [...text.matchAll(/"(?:input_tokens|prompt_tokens)"\s*:\s*(\d+)/g)];
         const cacheReadMatches = [...text.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g)];
         const cacheCreationMatches = [...text.matchAll(/"cache_creation_input_tokens"\s*:\s*(\d+)/g)];
         const outputMatches = [...text.matchAll(/"(?:output_tokens|completion_tokens)"\s*:\s*(\d+)/g)];
-        inputTokens = (inputMatches.length > 0 ? parseInt(inputMatches[inputMatches.length - 1][1], 10) : 0)
+
+        const inputTokens = (inputMatches.length > 0 ? parseInt(inputMatches[inputMatches.length - 1][1], 10) : 0)
           + (cacheReadMatches.length > 0 ? parseInt(cacheReadMatches[cacheReadMatches.length - 1][1], 10) : 0)
           + (cacheCreationMatches.length > 0 ? parseInt(cacheCreationMatches[cacheCreationMatches.length - 1][1], 10) : 0);
-        outputTokens = outputMatches.length > 0 ? parseInt(outputMatches[outputMatches.length - 1][1], 10) : 0;
+        const outputTokens = outputMatches.length > 0 ? parseInt(outputMatches[outputMatches.length - 1][1], 10) : 0;
+
+        if (inputTokens === 0 && outputTokens === 0) return;
+        recordMetrics(inputTokens, outputTokens);
       }
 
-      // Skip recording if no tokens found (error responses or edge cases)
-      if (inputTokens === 0 && outputTokens === 0) return;
+      function recordMetrics(inputTokens: number, outputTokens: number): void {
+        const latencyMs = Date.now() - ctx.startTime;
+        const latencySec = latencyMs / 1000;
+        const tokensPerSec = latencySec > 0 ? (inputTokens + outputTokens) / latencySec : 0;
 
-      const latencyMs = Date.now() - ctx.startTime;
-      const latencySec = latencyMs / 1000;
-      const tokensPerSec = latencySec > 0 ? (inputTokens + outputTokens) / latencySec : 0;
-
-      metricsStore.recordRequest({
-        requestId: ctx.requestId,
-        model: ctx.model,
-        actualModel: ctx.actualModel || ctx.model,
-        tier: ctx.tier,
-        provider,
-        targetProvider,
-        status,
-        inputTokens,
-        outputTokens,
-        latencyMs,
-        tokensPerSec: Math.round(tokensPerSec * 10) / 10,
-        timestamp: Date.now(),
-      });
+        metricsStore.recordRequest({
+          requestId: ctx.requestId,
+          model: ctx.model,
+          actualModel: ctx.actualModel || ctx.model,
+          tier: ctx.tier,
+          provider,
+          targetProvider,
+          status,
+          inputTokens,
+          outputTokens,
+          latencyMs,
+          tokensPerSec: Math.round(tokensPerSec * 10) / 10,
+          timestamp: Date.now(),
+        });
+      }
     } catch {
       // Metrics extraction errors must not affect the response stream
     }
   })();
+}
+
+/** Efficiently concatenate two Uint8Arrays without intermediate allocation. */
+function concatUint8Arrays(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const result = new Uint8Array(a.length + b.length);
+  result.set(a, 0);
+  result.set(b, a.length);
+  return result;
 }
 
 export interface AppHandle {
@@ -166,9 +197,12 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       return anthropicError("invalid_request_error", "Missing 'model' field in request body", requestId);
     }
 
-    // Resolve routing
+    // Resolve routing — rawBody is already serialized; attach parsed body to avoid double-parse in proxy
     const rawBody = JSON.stringify(body);
     const ctx = resolveRequest(model, requestId, config, rawBody);
+    if (ctx) {
+      (ctx as RequestContext & { parsedBody?: Record<string, unknown> }).parsedBody = body as Record<string, unknown>;
+    }
     if (!ctx) {
       logger.info("No tier match", { requestId, model });
       const configuredModels = config.modelRouting.size > 0
@@ -232,9 +266,26 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   });
 
   // REST endpoint for metrics summary (used by GUI on connect)
+  // Returns gzip-compressed JSON when client supports it
   app.get("/api/metrics/summary", (c) => {
     if (!metricsStore) return c.json({ error: "Metrics not enabled" }, 503);
-    return c.json(metricsStore.getSummary());
+    const data = metricsStore.getSummary();
+    const json = JSON.stringify(data);
+
+    const acceptEncoding = c.req.header("accept-encoding") || "";
+    if (acceptEncoding.includes("gzip") && json.length >= 1024) {
+      const compressed = gzipSync(Buffer.from(json));
+      return new Response(compressed, {
+        status: 200,
+        headers: {
+          "content-type": "application/json",
+          "content-encoding": "gzip",
+          "vary": "accept-encoding",
+        },
+      });
+    }
+
+    return c.json(data);
   });
 
   return { app, getConfig: () => config, setConfig: (c) => { config = c; } };

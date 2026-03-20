@@ -9,6 +9,11 @@ interface WsMessage {
   data: RequestMetrics | MetricsSummary;
 }
 
+const PING_INTERVAL_MS = 30_000; // 30 seconds
+const MAX_MISSED_PONGS = 2;
+const BACKPRESSURE_THRESHOLD = 64 * 1024; // 64KB
+const SUMMARY_DEBOUNCE_MS = 500;
+
 export function attachWebSocket(server: Server, metricsStore: MetricsStore): void {
   const wss = new WebSocketServer({ server, path: "/ws" });
 
@@ -18,20 +23,61 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
     const initialMsg: WsMessage = { type: "summary", data: summary };
     ws.send(JSON.stringify(initialMsg));
 
-    // Subscribe to new metrics
+    let pendingSummaryTimer: ReturnType<typeof setTimeout> | undefined;
+    let missedPongs = 0;
+    const alive = () => ws.readyState === ws.OPEN;
+
+    // Subscribe to new metrics with backpressure check and debounced summary
     const unsubscribe = metricsStore.onRecord((metrics: RequestMetrics) => {
-      if (ws.readyState === ws.OPEN) {
-        const msg: WsMessage = { type: "request", data: metrics };
-        ws.send(JSON.stringify(msg));
+      if (!alive()) return;
+
+      // Backpressure: skip send if outbound buffer is too large
+      if (ws.bufferedAmount > BACKPRESSURE_THRESHOLD) {
+        // Schedule a summary update instead so the client eventually catches up
+        scheduleSummaryUpdate();
+        return;
       }
+
+      const msg: WsMessage = { type: "request", data: metrics };
+      ws.send(JSON.stringify(msg));
     });
 
-    ws.on("close", () => {
-      unsubscribe();
+    function scheduleSummaryUpdate(): void {
+      if (pendingSummaryTimer) return; // already scheduled
+      pendingSummaryTimer = setTimeout(() => {
+        pendingSummaryTimer = undefined;
+        if (!alive()) return;
+        const msg: WsMessage = { type: "summary", data: metricsStore.getSummary() };
+        ws.send(JSON.stringify(msg));
+      }, SUMMARY_DEBOUNCE_MS);
+    }
+
+    // Ping/pong heartbeat for liveness tracking
+    const pingTimer = setInterval(() => {
+      if (!alive()) {
+        clearInterval(pingTimer);
+        return;
+      }
+      // Terminate if client missed too many pongs
+      if (missedPongs >= MAX_MISSED_PONGS) {
+        ws.terminate();
+        return;
+      }
+      ws.ping();
+      missedPongs++;
+    }, PING_INTERVAL_MS);
+
+    ws.on("pong", () => {
+      missedPongs = 0; // reset on successful pong
     });
 
-    ws.on("error", () => {
+    const cleanup = () => {
+      clearInterval(pingTimer);
+      if (pendingSummaryTimer) clearTimeout(pendingSummaryTimer);
       unsubscribe();
-    });
+    };
+
+    ws.on("close", cleanup);
+    ws.on("error", cleanup);
   });
 }
