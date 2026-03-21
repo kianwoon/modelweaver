@@ -1,5 +1,5 @@
 // src/settings.ts — Read/write/merge Claude Code settings.json
-import { readFileSync, writeFileSync, existsSync, copyFileSync, mkdirSync, renameSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, copyFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 
@@ -19,6 +19,7 @@ export interface SettingsWriteOptions {
     opus?: string;
     haiku?: string;
   };
+  availableModels?: string[]; // model aliases for /model picker
 }
 
 // --- Paths ---
@@ -41,9 +42,10 @@ export function readSettings(): ClaudeSettings {
   const raw = readFileSync(SETTINGS_PATH, "utf-8");
   try {
     return JSON.parse(raw) as ClaudeSettings;
-  } catch {
-    console.warn("[settings] Malformed settings.json, starting fresh");
-    return {};
+  } catch (err) {
+    // Log the error so the user knows settings failed to parse
+    console.error("[settings] Failed to parse settings.json:", err);
+    throw err;
   }
 }
 
@@ -104,6 +106,11 @@ export function mergeSettings(
     result.model = options.defaultModel;
   }
 
+  // availableModels — set if provided, otherwise leave untouched
+  if (options.availableModels && options.availableModels.length > 0) {
+    result.availableModels = options.availableModels;
+  }
+
   return result;
 }
 
@@ -117,8 +124,11 @@ export function writeSettings(settings: ClaudeSettings): void {
   try {
     writeFileSync(tmpPath, JSON.stringify(settings, null, 2) + "\n", "utf-8");
     renameSync(tmpPath, SETTINGS_PATH);
-  } catch {
-    // Clean up temp file if rename failed
-    try { renameSync(tmpPath, SETTINGS_PATH); } catch { /* ignore */ }
+  } catch (err) {
+    // Log the error so the user knows settings failed to write
+    console.error("[settings] Failed to write settings.json:", err);
+    // Clean up temp file if it exists
+    try { unlinkSync(tmpPath); } catch { /* ignore */ }
+    throw err;
   }
 }

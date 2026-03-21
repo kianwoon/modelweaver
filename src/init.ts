@@ -5,6 +5,7 @@ import { stringify as stringifyYaml } from 'yaml';
 import { writeFileSync, existsSync, readFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { readSettings, backupSettings, mergeSettings, writeSettings, getSettingsPath } from './settings.js';
+import net from 'node:net';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -20,9 +21,21 @@ interface ConfiguredProvider {
   models: Record<string, string>;
 }
 
-interface RoutingTier {
-  provider: string;
-  model: string;
+interface ConfiguredModel {
+  alias: string;       // user-facing name for /model and availableModels
+  provider: string;    // provider ID
+  model: string;       // actual model name sent to provider API
+  fallbacks: { provider: string; model: string }[];
+}
+
+/** Lightweight representation of a provider found in existing config.yaml.
+ *  Used for display and pre-fill; no API key resolution or validation. */
+interface ExistingProvider {
+  id: string;
+  baseUrl: string;
+  envKey: string;
+  authType: "anthropic" | "bearer";
+  timeout: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -62,7 +75,7 @@ export async function testApiKey(
 
   const headers: Record<string, string> =
     preset.authType === 'anthropic'
-      ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' }
+      ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'anthropic-beta': 'interleaved-thinking-2025-05-14', 'content-type': 'application/json' }
       : { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' };
 
   try {
@@ -75,6 +88,13 @@ export async function testApiKey(
 
     if (res.status === 401 || res.status === 403) return { ok: false, error: 'Invalid API key' };
     if (res.status === 200 || res.status === 400 || res.status === 429) return { ok: true };
+    // Check for "insufficient balance" — key is valid, account just has no credits
+    try {
+      const body = await res.json() as { error?: { message?: string } };
+      if (body.error?.message?.includes('insufficient balance')) {
+        return { ok: true };
+      }
+    } catch { /* ignore parse errors */ }
     return { ok: false, error: `Unexpected status ${res.status}` };
   } catch (err: unknown) {
     if ((err as Error).name === 'AbortError') return { ok: false, error: 'Request timed out' };
@@ -104,29 +124,10 @@ function detectEnvApiKey(preset: ProviderPreset): { found: boolean; key: string;
 
 function calculateTotalSteps(selectedProviderCount: number, quick: boolean): number {
   if (quick) {
-    // Provider select + API key (may be skipped) + confirm + claude settings
-    return 4;
+    return 3;
   }
-  // Normal mode:
-  // 1 (select providers) + N (configure each) + routing tiers + server + confirm + claude settings
-  let steps = 1 + selectedProviderCount + 1 + 1 + 1 + 1; // select + configure each + server + confirm + claude settings + settings prompt
-  if (selectedProviderCount > 1) {
-    steps += 3; // 3 routing tiers (only for multi-provider)
-  }
-  return steps;
-}
-
-// ---------------------------------------------------------------------------
-// [Improvement 5] autoRoutingForSingleProvider — skip routing for single
-// ---------------------------------------------------------------------------
-
-function autoRoutingForSingleProvider(provider: ConfiguredProvider): Record<string, RoutingTier[]> {
-  const tiers = ['sonnet', 'opus', 'haiku'] as const;
-  const routing: Record<string, RoutingTier[]> = {};
-  for (const tier of tiers) {
-    routing[tier] = [{ provider: provider.id, model: provider.models[tier] }];
-  }
-  return routing;
+  // Normal mode: N (configure each provider) + model config (1) + server (1) + confirm (1)
+  return selectedProviderCount + 1 + 1 + 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +136,7 @@ function autoRoutingForSingleProvider(provider: ConfiguredProvider): Record<stri
 
 function buildSummaryTable(
   providers: ConfiguredProvider[],
-  routing: Record<string, RoutingTier[]>,
+  models: ConfiguredModel[],
   server: { port: number; host: string },
 ): string {
   const lines: string[] = [];
@@ -147,21 +148,16 @@ function buildSummaryTable(
   lines.push(`${CYAN}\u2502${RESET}  ${BOLD}Server:${RESET} ${server.host}:${server.port}${''.padEnd(W - 8 - `${server.host}:${server.port}`.length)}${CYAN}\u2502${RESET}`);
   lines.push(`${CYAN}\u251c${'\u2500'.repeat(W)}\u2524${RESET}`);
 
-  const tiers = ['sonnet', 'opus', 'haiku'] as const;
-  for (const tier of tiers) {
-    const entries = routing[tier];
-    if (!entries || entries.length === 0) continue;
-    const primary = providers.find(p => p.id === entries[0].provider);
-    const pName = primary ? primary.name : entries[0].provider;
-    const label = `${BOLD}${tier.charAt(0).toUpperCase() + tier.slice(1)}:${RESET}`;
-    const primaryInfo = `${pName} \u2192 ${entries[0].model}`;
-    lines.push(`${CYAN}\u2502${RESET}  ${label} ${primaryInfo}${''.padEnd(W - 10 - primaryInfo.length)}${CYAN}\u2502${RESET}`);
-
-    for (let i = 1; i < entries.length; i++) {
-      const fb = providers.find(p => p.id === entries[i].provider);
-      const fbName = fb ? fb.name : entries[i].provider;
-      const fbInfo = `  fallback: ${fbName} \u2192 ${entries[i].model}`;
-      lines.push(`${CYAN}\u2502${RESET}${fbInfo}${''.padEnd(W - fbInfo.length - 2)}${CYAN}\u2502${RESET}`);
+  for (const m of models) {
+    const provider = providers.find(p => p.id === m.provider);
+    const pName = provider ? provider.name : m.provider;
+    const info = `${m.alias.padEnd(16)} ${pName} \u2192 ${m.model}`;
+    lines.push(`${CYAN}\u2502${RESET}  ${info}${''.padEnd(Math.max(0, W - info.length - 2))}${CYAN}\u2502${RESET}`);
+    for (const fb of m.fallbacks) {
+      const fbProvider = providers.find(p => p.id === fb.provider);
+      const fbPName = fbProvider ? fbProvider.name : fb.provider;
+      const fbInfo = `                    fallback: ${fbPName} \u2192 ${fb.model}`;
+      lines.push(`${CYAN}\u2502${RESET}  ${fbInfo}${''.padEnd(Math.max(0, W - fbInfo.length - 2))}${CYAN}\u2502${RESET}`);
     }
   }
 
@@ -169,13 +165,68 @@ function buildSummaryTable(
   return lines.join('\n');
 }
 
+/** Build a formatted table showing existing configured providers. */
+function buildExistingProvidersTable(
+  existingProviders: Map<string, ExistingProvider>,
+): string {
+  const lines: string[] = [];
+  const W = 56;
+  const providers = [...existingProviders.entries()];
+
+  lines.push(`${CYAN}${'\u250c' + '\u2500'.repeat(W) + '\u2510'}${RESET}`);
+  lines.push(`${CYAN}\u2502${RESET}${BOLD}  Currently Configured Providers${''.padEnd(W - 30)}${CYAN}\u2502${RESET}`);
+  lines.push(`${CYAN}\u251c${'\u2500'.repeat(W)}\u2524${RESET}`);
+
+  for (const [id, p] of providers) {
+    lines.push(`${CYAN}\u2502${RESET}  ${BOLD}${id}${RESET}${''.padEnd(Math.max(0, 20 - id.length))} ${p.baseUrl}${''.padEnd(Math.max(0, W - 22 - p.baseUrl.length))}${CYAN}\u2502${RESET}`);
+    const envLabel = p.envKey || '(hardcoded key)';
+    const padding = Math.max(0, W - 22 - envLabel.length - p.authType.length);
+    lines.push(`${CYAN}\u2502${RESET}    env: ${envLabel}   auth: ${p.authType}${''.padEnd(padding)}${CYAN}\u2502${RESET}`);
+  }
+
+  lines.push(`${CYAN}${'\u2514' + '\u2500'.repeat(W) + '\u2518'}${RESET}`);
+  return lines.join('\n');
+}
+
+/** Merge freshly configured providers with untouched existing providers.
+ *  Used for routing selection and summary display. */
+function buildAllProviders(
+  configured: ConfiguredProvider[],
+  existingMap: Map<string, ExistingProvider>,
+): ConfiguredProvider[] {
+  const touchedIds = new Set(configured.map(p => p.id));
+  const result = [...configured];
+
+  for (const [id, ep] of existingMap.entries()) {
+    if (!touchedIds.has(id)) {
+      const preset = getPreset(id);
+      result.push({
+        id,
+        name: preset?.name ?? id,
+        baseUrl: ep.baseUrl,
+        envKey: ep.envKey,
+        apiKey: "",
+        authType: ep.authType,
+        models: preset?.models ?? { sonnet: "", opus: "", haiku: "" },
+      });
+    }
+  }
+
+  return result;
+}
+
 // ---------------------------------------------------------------------------
 // Wizard steps
 // ---------------------------------------------------------------------------
 
-// [Modified] selectProviders — supports singleSelect for --quick mode
-async function selectProviders(options?: { singleSelect?: boolean }): Promise<string[]> {
-  const allPresets = getPresets();
+// [Modified] selectProviders — supports singleSelect for --quick mode, excludeIds for add mode
+async function selectProviders(options?: { singleSelect?: boolean; excludeIds?: Set<string> }): Promise<string[]> {
+  let allPresets = getPresets();
+  if (options?.excludeIds) {
+    allPresets = allPresets.filter(p => !options.excludeIds!.has(p.id));
+  }
+
+  if (allPresets.length === 0) return [];
 
   if (options?.singleSelect) {
     const { providerId } = await prompts(
@@ -183,7 +234,10 @@ async function selectProviders(options?: { singleSelect?: boolean }): Promise<st
         type: 'select',
         name: 'providerId',
         message: 'Select a provider:',
-        choices: allPresets.map((p) => ({ title: p.name, value: p.id, description: p.baseUrl })),
+        choices: [
+          { title: '\u2B05  Go back', value: '__back__' },
+          ...allPresets.map((p) => ({ title: p.name, value: p.id, description: p.baseUrl })),
+        ],
       },
       CANCEL,
     );
@@ -203,10 +257,11 @@ async function selectProviders(options?: { singleSelect?: boolean }): Promise<st
   return providerIds as string[];
 }
 
-// [Modified] configureProvider — auto-detect env keys + step counter
+// [Modified] configureProvider — auto-detect env keys + step counter + existing provider pre-fill
 async function configureProvider(
   id: string,
   stepInfo?: { current: number; total: number },
+  existing?: ExistingProvider,
 ): Promise<ConfiguredProvider | null> {
   const preset = getPreset(id);
   if (!preset) {
@@ -214,24 +269,33 @@ async function configureProvider(
     return null;
   }
 
-  // [Improvement 1] Auto-detect existing env key
-  const detected = detectEnvApiKey(preset);
+  const effectiveEnvKey = existing?.envKey ?? preset.envKey;
+  const effectiveBaseUrl = existing?.baseUrl ?? preset.baseUrl;
+  const effectiveAuthType = existing?.authType ?? preset.authType;
+
+  // [Improvement 1] Auto-detect existing env key — check custom env key first if editing
+  let detected = detectEnvApiKey(preset);
+  if (existing?.envKey && existing.envKey !== preset.envKey) {
+    const customDetected = detectEnvApiKey({ ...preset, envKey: existing.envKey });
+    if (customDetected.found) detected = customDetected;
+  }
+
   if (detected.found) {
     process.stdout.write(`  Testing API key for ${preset.name} (from ${detected.source})...`);
-    const result = await testApiKey(preset.baseUrl, detected.key, preset);
+    const result = await testApiKey(effectiveBaseUrl, detected.key, preset);
     process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
     if (result.ok) {
-      check(`${preset.name}: using existing ${preset.envKey} (${detected.source})`);
+      check(`${preset.name}: using existing ${effectiveEnvKey} (${detected.source})`);
       return {
-        id, name: preset.name, baseUrl: preset.baseUrl,
-        envKey: preset.envKey, apiKey: detected.key,
-        authType: preset.authType, models: preset.models,
+        id, name: preset.name, baseUrl: effectiveBaseUrl,
+        envKey: effectiveEnvKey, apiKey: detected.key,
+        authType: effectiveAuthType, models: preset.models,
       };
     }
 
     // Key found but invalid — fall through to prompt
-    console.log(`  ${RED}\u26A0${RESET} Existing ${preset.envKey} (${detected.source}) is invalid, please provide a new key.`);
+    console.log(`  ${RED}\u26A0${RESET} Existing ${effectiveEnvKey} (${detected.source}) is invalid, please provide a new key.`);
   }
 
   const stepLabel = stepInfo ? `[Step ${stepInfo.current} of ${stepInfo.total}] ` : '';
@@ -240,7 +304,7 @@ async function configureProvider(
 
   for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
     const { baseUrl } = await prompts(
-      { type: 'text', name: 'baseUrl', message: `${stepLabel}[${preset.name}] Base URL:`, initial: preset.baseUrl },
+      { type: 'text', name: 'baseUrl', message: `${stepLabel}[${preset.name}] Base URL:`, initial: effectiveBaseUrl },
       CANCEL,
     );
 
@@ -270,7 +334,7 @@ async function configureProvider(
 
     if (result.ok) {
       check(`${preset.name} API key accepted`);
-      return { id, name: preset.name, baseUrl: baseUrl as string, envKey: preset.envKey, apiKey: apiKey as string, authType: preset.authType, models: preset.models };
+      return { id, name: preset.name, baseUrl: baseUrl as string, envKey: effectiveEnvKey, apiKey: apiKey as string, authType: effectiveAuthType, models: preset.models };
     }
 
     fail(`${preset.name}: ${result.error}`);
@@ -288,90 +352,527 @@ async function configureProvider(
   return null;
 }
 
-// [Modified] configureRouting — skip for single provider + fallback defaults + step counter
-async function configureRouting(
+// ---------------------------------------------------------------------------
+// Fallback configuration helper
+// ---------------------------------------------------------------------------
+
+/** Prompt the user to add fallback providers for a model. Returns the fallbacks array. */
+async function configureFallbacks(
+  alias: string,
+  primaryProviderId: string,
   providers: ConfiguredProvider[],
-  options?: { stepOffset?: number; totalSteps?: number },
-): Promise<Record<string, RoutingTier[]>> {
-  // [Improvement 2] Skip routing for single provider
-  if (providers.length === 1) {
-    check(`All tiers \u2192 ${providers[0].name} (preset defaults)`);
-    return autoRoutingForSingleProvider(providers[0]);
+  existingFallbacks: { provider: string; model: string }[] = [],
+): Promise<{ provider: string; model: string }[]> {
+  const fallbacks = [...existingFallbacks];
+
+  while (true) {
+    const { addFallback } = await prompts(
+      {
+        type: 'confirm',
+        name: 'addFallback',
+        message: fallbacks.length === 0
+          ? `Add a fallback provider for ${alias}?`
+          : `Add another fallback provider for ${alias}?`,
+        initial: false,
+      },
+      CANCEL,
+    );
+
+    if (!addFallback) break;
+
+    const availableProviders = providers.filter(p => p.id !== primaryProviderId);
+    if (availableProviders.length === 0) {
+      console.log(`  ${RED}No other providers available for fallback.${RESET}`);
+      break;
+    }
+
+    const providerChoices = availableProviders.map((p) => ({ title: p.name, value: p.id }));
+    const { providerId } = await prompts(
+      {
+        type: 'select',
+        name: 'providerId',
+        message: `Select fallback provider for ${alias}:`,
+        choices: [
+          { title: '\u2B05  Go back', value: '__back__' },
+          ...providerChoices,
+        ],
+      },
+      CANCEL,
+    );
+
+    if (providerId === '__back__') continue;
+
+    const selectedProvider = providers.find((p) => p.id === (providerId as string))!;
+    const { modelName } = await prompts(
+      {
+        type: 'text',
+        name: 'modelName',
+        message: `[${selectedProvider.name}] Fallback model name:`,
+        initial: '',
+      },
+      CANCEL,
+    );
+
+    fallbacks.push({
+      provider: selectedProvider.id,
+      model: (modelName as string).trim(),
+    });
+
+    check(`Added fallback: ${selectedProvider.id} \u2192 ${(modelName as string).trim()}`);
   }
 
-  const tiers = ['sonnet', 'opus', 'haiku'] as const;
-  const routing: Record<string, RoutingTier[]> = {};
-  const stepOffset = options?.stepOffset ?? 0;
-  const totalSteps = options?.totalSteps ?? 99;
+  return fallbacks;
+}
 
-  for (let t = 0; t < tiers.length; t++) {
-    const tier = tiers[t];
-    const stepCurrent = stepOffset + t + 1;
-    const stepLabel = `[Step ${stepCurrent} of ${totalSteps}] `;
-    const choices = providers.map((p) => ({ title: p.name, value: p.id }));
+// ---------------------------------------------------------------------------
+// N-model configuration
+// ---------------------------------------------------------------------------
 
-    const { primaryId } = await prompts(
-      { type: 'select', name: 'primaryId', message: `${stepLabel}[${tier}] Primary provider:`, choices },
-      CANCEL,
-    );
+/** Build a formatted table showing existing modelRouting entries. */
+function buildExistingModelsTable(
+  modelRouting: Map<string, { provider: string; model: string }[]>,
+): string {
+  const lines: string[] = [];
+  const W = 56;
+  const entries = [...modelRouting.entries()];
 
-    const primary = providers.find((p) => p.id === (primaryId as string))!;
-    const { modelName } = await prompts(
-      { type: 'text', name: 'modelName', message: `${stepLabel}[${tier}] Model name:`, initial: primary.models[tier] },
-      CANCEL,
-    );
+  lines.push(`${CYAN}${'\u250c' + '\u2500'.repeat(W) + '\u2510'}${RESET}`);
+  lines.push(`${CYAN}\u2502${RESET}${BOLD}  Currently Configured Models${''.padEnd(W - 28)}${CYAN}\u2502${RESET}`);
+  lines.push(`${CYAN}\u251c${'\u2500'.repeat(W)}\u2524${RESET}`);
 
-    const entries: RoutingTier[] = [{ provider: primary.id, model: modelName as string }];
+  if (entries.length === 0) {
+    lines.push(`${CYAN}\u2502${RESET}  (none)${''.padEnd(W - 7)}${CYAN}\u2502${RESET}`);
+  } else {
+    for (const [alias, chain] of entries) {
+      const primary = chain[0];
+      const info = `${alias.padEnd(20)} ${primary.provider} \u2192 ${primary.model}`;
+      lines.push(`${CYAN}\u2502${RESET}  ${info}${''.padEnd(Math.max(0, W - info.length - 2))}${CYAN}\u2502${RESET}`);
+      for (let i = 1; i < chain.length; i++) {
+        const fbInfo = `                    fallback: ${chain[i].provider} \u2192 ${chain[i].model}`;
+        lines.push(`${CYAN}\u2502${RESET}  ${fbInfo}${''.padEnd(Math.max(0, W - fbInfo.length - 2))}${CYAN}\u2502${RESET}`);
+      }
+    }
+  }
 
-    const { addFallbacks } = await prompts(
-      { type: 'confirm', name: 'addFallbacks', message: `Add fallback providers for ${tier}?`, initial: false },
-      CANCEL,
-    );
+  lines.push(`${CYAN}${'\u2514' + '\u2500'.repeat(W) + '\u2518'}${RESET}`);
+  return lines.join('\n');
+}
 
-    if (addFallbacks) {
-      const fallbackChoices = providers
-        .filter((p) => p.id !== primary.id)
-        .map((p) => ({ title: p.name, value: p.id }));
+async function configureModels(
+  providers: ConfiguredProvider[],
+  existingModels?: Map<string, { provider: string; model: string }[]>,
+): Promise<ConfiguredModel[]> {
+  const models: ConfiguredModel[] = [];
+  const hasExisting = existingModels && existingModels.size > 0;
 
-      const { fallbackIds } = await prompts(
-        { type: 'multiselect', name: 'fallbackIds', message: `[${tier}] Fallback providers:`, choices: fallbackChoices, min: 1 },
-        CANCEL,
-      );
+  // Seed models from existing modelRouting
+  if (hasExisting) {
+    for (const [alias, chain] of existingModels!.entries()) {
+      const primary = chain[0];
+      models.push({
+        alias,
+        provider: primary.provider,
+        model: primary.model,
+        fallbacks: chain.slice(1),
+      });
+    }
+  }
 
-      // [Improvement 5] Conditional fallback defaults
-      if ((fallbackIds as string[]).length > 1) {
-        const { useDefaults } = await prompts(
-          { type: 'confirm', name: 'useDefaults', message: 'Use preset model defaults for all fallbacks?', initial: true },
+  console.log();
+  console.log('  Configure models \u2014 each model gets an alias that appears in Claude Code\'s /model picker.');
+  console.log('  The proxy will route requests matching the alias to the chosen provider.');
+  console.log();
+
+  if (hasExisting) {
+    // Editing existing config: show current models, then offer add/edit/delete menu
+    while (true) {
+      console.log(buildExistingModelsTable(existingModels!));
+      console.log();
+
+      const { action } = await prompts({
+        type: 'select',
+        name: 'action',
+        message: 'What would you like to do?',
+        choices: [
+          { title: 'Add new model', value: 'add', description: 'Add a model alias routed to a provider' },
+          ...(models.length > 0 ? [{ title: 'Edit existing model', value: 'edit', description: 'Change alias, provider, or model name' }] : []),
+          ...(models.length > 0 ? [{ title: 'Delete model', value: 'delete', description: 'Remove a model alias' }] : []),
+          { title: 'Done', value: 'done', description: 'Continue to server configuration' },
+        ],
+      }, CANCEL);
+
+      if (action === 'done') break;
+
+      if (action === 'add') {
+        const providerChoices = providers.map((p) => ({ title: p.name, value: p.id }));
+        const { providerId } = await prompts(
+          {
+            type: 'select',
+            name: 'providerId',
+            message: 'Select provider:',
+            choices: [
+              { title: '\u2B05  Go back', value: '__back__' },
+              ...providerChoices,
+            ],
+          },
           CANCEL,
         );
 
-        if (useDefaults) {
-          for (const fid of fallbackIds as string[]) {
-            const fp = providers.find((p) => p.id === fid)!;
-            entries.push({ provider: fid, model: fp.models[tier] });
+        if (providerId === '__back__') continue;
+
+        const selectedProvider = providers.find((p) => p.id === (providerId as string))!;
+        const { alias } = await prompts(
+          {
+            type: 'text',
+            name: 'alias',
+            message: `[${selectedProvider.name}] Model alias (name in /model picker):`,
+            initial: '',
+          },
+          CANCEL,
+        );
+
+        const { modelName } = await prompts(
+          {
+            type: 'text',
+            name: 'modelName',
+            message: `[${selectedProvider.name}] Actual model name (sent to provider API):`,
+            initial: alias as string,
+          },
+          CANCEL,
+        );
+
+        const newModel: ConfiguredModel = {
+          alias: (alias as string).trim(),
+          provider: selectedProvider.id,
+          model: (modelName as string).trim(),
+          fallbacks: [],
+        };
+
+        // Configure fallbacks for this model
+        newModel.fallbacks = await configureFallbacks(
+          newModel.alias, newModel.provider, providers, newModel.fallbacks,
+        );
+
+        models.push(newModel);
+        // Update the existing map so the table stays current (including fallbacks)
+        existingModels!.set(newModel.alias, [
+          { provider: newModel.provider, model: newModel.model },
+          ...newModel.fallbacks,
+        ]);
+        check(`Added model: ${newModel.alias}`);
+      }
+
+      if (action === 'edit') {
+        const modelChoices = models.map((m) => ({
+          title: m.alias,
+          value: m.alias,
+          description: `${m.provider} \u2192 ${m.model}`,
+        }));
+        const { editAlias } = await prompts({
+          type: 'select',
+          name: 'editAlias',
+          message: 'Select model to edit:',
+          choices: [
+            { title: '\u2B05  Go back', value: '__back__' },
+            ...modelChoices,
+          ],
+        }, CANCEL);
+
+        if (editAlias === '__back__') continue;
+
+        const idx = models.findIndex((m) => m.alias === editAlias);
+        if (idx === -1) continue;
+
+        const current = models[idx];
+        let currentFallbacks = [...current.fallbacks];
+
+        // If alias changed, remove old entry from existing map
+        const { alias } = await prompts(
+          {
+            type: 'text',
+            name: 'alias',
+            message: `Model alias:`,
+            initial: current.alias,
+          },
+          CANCEL,
+        );
+
+        const providerChoices = providers.map((p) => ({ title: p.name, value: p.id }));
+        const { providerId } = await prompts(
+          {
+            type: 'select',
+            name: 'providerId',
+            message: 'Select provider:',
+            choices: [
+              { title: '\u2B05  Go back', value: '__back__' },
+              ...providerChoices,
+            ],
+          },
+          CANCEL,
+        );
+
+        if (providerId === '__back__') continue;
+
+        const selectedProvider = providers.find((p) => p.id === (providerId as string))!;
+        const { modelName } = await prompts(
+          {
+            type: 'text',
+            name: 'modelName',
+            message: `Actual model name:`,
+            initial: current.model,
+          },
+          CANCEL,
+        );
+
+        const newAlias = (alias as string).trim();
+        const newModel = (modelName as string).trim();
+
+        // Fallback management loop
+        while (true) {
+          // Show current fallbacks
+          if (currentFallbacks.length === 0) {
+            console.log(`  ${CYAN}No fallbacks configured.${RESET}`);
+          } else {
+            console.log(`  ${CYAN}Current fallbacks:${RESET}`);
+            for (let i = 0; i < currentFallbacks.length; i++) {
+              const fb = currentFallbacks[i];
+              const fbProvider = providers.find(p => p.id === fb.provider);
+              const fbPName = fbProvider ? fbProvider.name : fb.provider;
+              console.log(`    ${i + 1}. ${fbPName} \u2192 ${fb.model}`);
+            }
           }
-        } else {
-          for (const fid of fallbackIds as string[]) {
-            const fp = providers.find((p) => p.id === fid)!;
-            const { fallbackModel } = await prompts(
-              { type: 'text', name: 'fallbackModel', message: `[${tier}] Model name for ${fp.name}:`, initial: fp.models[tier] },
-              CANCEL,
+          console.log();
+
+          const fallbackActions = [
+            { title: 'Add fallback', value: 'add_fb' },
+            ...(currentFallbacks.length > 0 ? [{ title: 'Remove fallback', value: 'remove_fb' }] : []),
+            { title: 'Done editing fallbacks', value: 'done_fb' },
+          ];
+
+          const { fallbackAction } = await prompts({
+            type: 'select',
+            name: 'fallbackAction',
+            message: 'Manage fallbacks:',
+            choices: fallbackActions,
+          }, CANCEL);
+
+          if (fallbackAction === 'done_fb') break;
+
+          if (fallbackAction === 'add_fb') {
+            const newFb = await configureFallbacks(
+              newAlias, selectedProvider.id, providers, currentFallbacks,
             );
-            entries.push({ provider: fid, model: fallbackModel as string });
+            currentFallbacks = newFb;
+          }
+
+          if (fallbackAction === 'remove_fb') {
+            const fbChoices = currentFallbacks.map((fb, i) => {
+              const fbProvider = providers.find(p => p.id === fb.provider);
+              const fbPName = fbProvider ? fbProvider.name : fb.provider;
+              return { title: `${fbPName} \u2192 ${fb.model}`, value: i };
+            });
+            const { removeIdx } = await prompts({
+              type: 'select',
+              name: 'removeIdx',
+              message: 'Select fallback to remove:',
+              choices: [
+                { title: '\u2B05  Go back', value: '__back__' },
+                ...fbChoices,
+              ],
+            }, CANCEL);
+
+            if (removeIdx !== '__back__') {
+              const removed = currentFallbacks.splice(removeIdx as number, 1);
+              check(`Removed fallback: ${removed[0].provider} \u2192 ${removed[0].model}`);
+            }
           }
         }
-      } else {
-        // Single fallback — just use preset default
-        const fid = (fallbackIds as string[])[0];
-        const fp = providers.find((p) => p.id === fid)!;
-        entries.push({ provider: fid, model: fp.models[tier] });
+
+        // If alias changed, remove old entry from existing map
+        if (newAlias !== current.alias) {
+          existingModels!.delete(current.alias);
+        }
+
+        models[idx] = {
+          alias: newAlias,
+          provider: selectedProvider.id,
+          model: newModel,
+          fallbacks: currentFallbacks,
+        };
+
+        // Update existing map with full chain including fallbacks
+        existingModels!.set(newAlias, [
+          { provider: selectedProvider.id, model: newModel },
+          ...currentFallbacks,
+        ]);
+
+        check(`Updated model: ${newAlias} (${selectedProvider.id} \u2192 ${newModel})`);
+      }
+
+      if (action === 'delete') {
+        const modelChoices = models.map((m) => ({
+          title: m.alias,
+          value: m.alias,
+          description: `${m.provider} \u2192 ${m.model}`,
+        }));
+        const { deleteAlias } = await prompts({
+          type: 'select',
+          name: 'deleteAlias',
+          message: 'Select model to delete:',
+          choices: [
+            { title: '\u2B05  Go back', value: '__back__' },
+            ...modelChoices,
+          ],
+        }, CANCEL);
+
+        if (deleteAlias === '__back__') continue;
+
+        const idx = models.findIndex((m) => m.alias === deleteAlias);
+        if (idx !== -1) {
+          models.splice(idx, 1);
+          existingModels!.delete(deleteAlias as string);
+          check(`Deleted model: ${deleteAlias as string}`);
+        }
+      }
+
+      clearScreen();
+    }
+  } else {
+    // Fresh setup: auto-suggest one model per provider using preset defaults
+    for (const provider of providers) {
+      const { addModel } = await prompts(
+        {
+          type: 'confirm',
+          name: 'addModel',
+          message: `Add a model for ${provider.name}?`,
+          initial: true,
+        },
+        CANCEL,
+      );
+
+      if (addModel) {
+        const presetModel = provider.models?.sonnet || provider.models?.opus || provider.models?.haiku || '';
+        const { alias } = await prompts(
+          {
+            type: 'text',
+            name: 'alias',
+            message: `[${provider.name}] Model alias (name in /model picker):`,
+            initial: presetModel || provider.id,
+          },
+          CANCEL,
+        );
+
+        const { modelName } = await prompts(
+          {
+            type: 'text',
+            name: 'modelName',
+            message: `[${provider.name}] Actual model name (sent to provider API):`,
+            initial: presetModel,
+          },
+          CANCEL,
+        );
+
+        const newModel: ConfiguredModel = {
+          alias: (alias as string).trim(),
+          provider: provider.id,
+          model: (modelName as string).trim(),
+          fallbacks: [],
+        };
+
+        // Configure fallbacks for this model
+        newModel.fallbacks = await configureFallbacks(
+          newModel.alias, newModel.provider, providers, newModel.fallbacks,
+        );
+
+        models.push(newModel);
       }
     }
 
-    routing[tier] = entries;
+    // Allow adding additional models
+    while (true) {
+      console.log();
+      const { addMore } = await prompts(
+        {
+          type: 'confirm',
+          name: 'addMore',
+          message: models.length === 0
+            ? 'Add a model?'
+            : 'Add another model?',
+          initial: models.length === 0,
+        },
+        CANCEL,
+      );
+
+      if (!addMore) break;
+
+      const providerChoices = providers.map((p) => ({ title: p.name, value: p.id }));
+      const { providerId } = await prompts(
+        {
+          type: 'select',
+          name: 'providerId',
+          message: 'Select provider:',
+          choices: providerChoices,
+        },
+        CANCEL,
+      );
+
+      const selectedProvider = providers.find((p) => p.id === (providerId as string))!;
+      const { alias } = await prompts(
+        {
+          type: 'text',
+          name: 'alias',
+          message: `[${selectedProvider.name}] Model alias:`,
+          initial: '',
+        },
+        CANCEL,
+      );
+
+      const { modelName } = await prompts(
+        {
+          type: 'text',
+          name: 'modelName',
+          message: `[${selectedProvider.name}] Actual model name:`,
+          initial: alias as string,
+        },
+        CANCEL,
+      );
+
+      const newModel: ConfiguredModel = {
+        alias: (alias as string).trim(),
+        provider: selectedProvider.id,
+        model: (modelName as string).trim(),
+        fallbacks: [],
+      };
+
+      // Configure fallbacks for this model
+      newModel.fallbacks = await configureFallbacks(
+        newModel.alias, newModel.provider, providers, newModel.fallbacks,
+      );
+
+      models.push(newModel);
+    }
   }
 
-  return routing;
+  if (models.length === 0) {
+    console.log('  No models configured.');
+  } else {
+    check(`${models.length} model(s) configured`);
+  }
+
+  return models;
+}
+
+// ---------------------------------------------------------------------------
+// Port collision detection
+// ---------------------------------------------------------------------------
+
+function isPortInUse(port: number, host: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once('error', () => { server.close(); resolve(true); });
+    server.once('listening', () => { server.close(); resolve(false); });
+    server.listen(port, host);
+  });
 }
 
 // [Modified] configureServer — supports useDefaults for --quick mode
@@ -392,47 +893,40 @@ async function configureServer(
     { type: 'text', name: 'host', message: `${stepLabel}Server host:`, initial: 'localhost' },
     CANCEL,
   );
-  return { port: port as number, host: host as string };
-}
 
-function collectAvailableModels(
-  routing: Record<string, RoutingTier[]>,
-): { id: string; source: string }[] {
-  const models: { id: string; source: string }[] = [];
-
-  // Collect unique primary models from each tier
-  for (const [tier, entries] of Object.entries(routing)) {
-    if (entries.length > 0 && !models.some((m) => m.id === entries[0].model)) {
-      models.push({ id: entries[0].model, source: `${tier} tier` });
+  // Port collision check
+  if (await isPortInUse(port as number, host as string)) {
+    console.log(`  ${RED}\u26A0 Warning:${RESET} Port ${port} is already in use on ${host}.`);
+    const { proceed } = await prompts(
+      { type: 'confirm', name: 'proceed', message: 'Use this port anyway?', initial: false },
+      CANCEL,
+    );
+    if (!proceed) {
+      console.log('  Please choose a different port and try again.');
+      process.exit(1);
     }
   }
 
-  return models;
+  return { port: port as number, host: host as string };
 }
 
 interface SettingsConfig {
   defaultModel: string;
-  tierModels: { sonnet?: string; opus?: string; haiku?: string };
+  availableModels: string[];
 }
 
 async function configureClaudeCodeSettings(
-  routing: Record<string, RoutingTier[]>,
-  providers: ConfiguredProvider[],
-  server: { port: number; host: string },
-  stepInfo?: { current: number; total: number },
+  models: ConfiguredModel[],
 ): Promise<SettingsConfig | null> {
-  const availableModels = collectAvailableModels(routing);
-  if (availableModels.length === 0) return null;
+  if (models.length === 0) return null;
 
   console.log();
-  const stepLabel = stepInfo ? `[Step ${stepInfo.current} of ${stepInfo.total}] ` : '';
 
-  // Step A: Ask to configure
   const { configure } = await prompts(
     {
       type: 'confirm',
       name: 'configure',
-      message: `${stepLabel}Configure Claude Code to use ModelWeaver automatically?`,
+      message: 'Configure Claude Code to use ModelWeaver automatically?',
       initial: true,
     },
     CANCEL,
@@ -440,88 +934,47 @@ async function configureClaudeCodeSettings(
 
   if (!configure) return null;
 
-  // Step B: Select default model
   const { defaultModel } = await prompts(
     {
       type: 'select',
       name: 'defaultModel',
       message: 'Select default model for Claude Code:',
-      choices: availableModels.map((m) => ({
-        title: m.id,
-        description: m.source,
-        value: m.id,
+      choices: models.map((m) => ({
+        title: m.alias,
+        description: `${m.provider} \u2192 ${m.model}`,
+        value: m.alias,
       })),
     },
     CANCEL,
   );
 
-  // Step C: Ask about tier alias mapping
-  console.log();
-  const { mapAliases } = await prompts(
-    {
-      type: 'confirm',
-      name: 'mapAliases',
-      message: 'Map tier aliases? (e.g., when Claude Code uses /sonnet, send a specific model)',
-      initial: false,
-    },
-    CANCEL,
-  );
+  const availableModels = models.map((m) => m.alias);
 
-  const tierModels: { sonnet?: string; opus?: string; haiku?: string } = {};
-
-  if (mapAliases) {
-    const tiers = ['sonnet', 'opus', 'haiku'] as const;
-    for (const tier of tiers) {
-      const { tierModel } = await prompts(
-        {
-          type: 'select',
-          name: 'tierModel',
-          message: `[${tier}] When Claude Code uses ${tier}, send model:`,
-          choices: availableModels.map((m) => ({
-            title: m.id,
-            description: m.source,
-            value: m.id,
-          })),
-        },
-        CANCEL,
-      );
-      tierModels[tier] = tierModel as string;
-    }
-  }
-
-  return { defaultModel: defaultModel as string, tierModels };
+  return { defaultModel: defaultModel as string, availableModels };
 }
 
 function buildYamlConfig(
   providers: ConfiguredProvider[],
-  routing: Record<string, RoutingTier[]>,
+  models: ConfiguredModel[],
   server: { port: number; host: string },
+  existingProviders?: Map<string, ExistingProvider>,
+  existingModelRouting?: Map<string, { provider: string; model: string }[]>,
 ): string {
-  // Build modelRouting from routing entries — this is the primary routing mechanism.
-  // modelRouting is checked first (Priority 1), so routing + tierPatterns are only
-  // needed as fallback for models NOT covered by modelRouting.
+  // Build modelRouting from configured models (primary + fallbacks)
   const modelRouting: Record<string, { provider: string; model: string }[]> = {};
-  for (const [tier, entries] of Object.entries(routing)) {
-    if (entries.length > 0) {
-      const primaryModel = entries[0].model;
-      if (!modelRouting[primaryModel]) {
-        modelRouting[primaryModel] = entries.map(e => ({ provider: e.provider, model: e.model }));
-      }
-    }
+  for (const m of models) {
+    modelRouting[m.alias] = [
+      { provider: m.provider, model: m.model },
+      ...m.fallbacks,
+    ];
   }
-
-  // Collect all model names covered by modelRouting — these don't need tier fallback
-  const modelRoutingKeys = new Set(Object.keys(modelRouting));
-
-  // Only include tier routing for tiers whose primary model is NOT in modelRouting
-  // (i.e. models that might be requested by name substrings like "sonnet", "opus", "haiku")
-  const filteredRouting: Record<string, RoutingTier[]> = {};
-  const needsTierPatterns = { sonnet: false, opus: false, haiku: false } as Record<string, boolean>;
-
-  for (const [tier, entries] of Object.entries(routing)) {
-    if (entries.length > 0 && !modelRoutingKeys.has(entries[0].model)) {
-      filteredRouting[tier] = entries;
-      needsTierPatterns[tier] = true;
+  // For any models in existing routing that are NOT in the current models list,
+  // preserve them as-is (backward compatibility)
+  if (existingModelRouting) {
+    for (const [alias, chain] of existingModelRouting.entries()) {
+      if (!modelRouting[alias]) {
+        modelRouting[alias] = chain.map(e => ({ provider: e.provider, model: e.model }));
+      }
     }
   }
 
@@ -529,24 +982,11 @@ function buildYamlConfig(
     server: { port: number; host: string };
     providers: Record<string, Record<string, unknown>>;
     modelRouting: Record<string, { provider: string; model: string }[]>;
-    routing?: Record<string, RoutingTier[]>;
-    tierPatterns?: Record<string, string[]>;
   } = {
     server,
     providers: {},
     modelRouting,
   };
-
-  // Only add routing + tierPatterns if there are tiers not covered by modelRouting
-  if (Object.keys(filteredRouting).length > 0) {
-    configObj.routing = filteredRouting;
-    configObj.tierPatterns = {};
-    for (const tier of ['sonnet', 'opus', 'haiku'] as const) {
-      if (needsTierPatterns[tier]) {
-        configObj.tierPatterns[tier] = [tier];
-      }
-    }
-  }
 
   for (const p of providers) {
     const providerConfig: Record<string, unknown> = {
@@ -558,6 +998,24 @@ function buildYamlConfig(
       providerConfig.authType = "bearer";
     }
     configObj.providers[p.id] = providerConfig;
+  }
+
+  // Merge in untouched existing providers (preserved verbatim)
+  if (existingProviders) {
+    const touchedIds = new Set(providers.map(p => p.id));
+    for (const [id, ep] of existingProviders.entries()) {
+      if (!touchedIds.has(id)) {
+        const providerConfig: Record<string, unknown> = {
+          baseUrl: ep.baseUrl,
+          apiKey: ep.envKey ? `\${${ep.envKey}}` : "",
+          timeout: ep.timeout,
+        };
+        if (ep.authType === "bearer") {
+          providerConfig.authType = "bearer";
+        }
+        configObj.providers[id] = providerConfig;
+      }
+    }
   }
 
   return stringifyYaml(configObj);
@@ -591,9 +1049,8 @@ function writeEnvFile(entries: ConfiguredProvider[]): void {
     }
   }
 
-  if (lines.length === 0 || (lines.length === 1 && lines[0] === '')) return;
 
-  writeFileSync(envPath, existing + lines.join('\n') + '\n', { mode: 0o600 });
+  writeFileSync(envPath, existing + lines.join('\n') + (lines.length > 0 ? '\n' : ''), { mode: 0o600 });
 }
 
 // ---------------------------------------------------------------------------
@@ -607,11 +1064,16 @@ async function runQuickInit(): Promise<void> {
     process.exit(1);
   }
 
+  // Peek at existing config for merge support
+  const { peekConfig } = await import('./config.js');
+  const existingPeek = peekConfig();
+  const existingProviderMap = existingPeek?.providers ?? new Map();
+  const existingModelRouting = existingPeek?.modelRouting ?? new Map();
+
   let configured: ConfiguredProvider[] = [];
-  let routing: Record<string, RoutingTier[]>;
+  let configuredModels: ConfiguredModel[] = [];
   let server: { port: number; host: string };
   let yaml: string;
-  let settingsConfig: SettingsConfig | null = null;
 
   const totalSteps = calculateTotalSteps(1, true);
 
@@ -629,10 +1091,14 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     // Step 1: Select single provider
     const selectedIds = await selectProviders({ singleSelect: true });
 
+    if (selectedIds.length === 1 && selectedIds[0] === '__back__') {
+      continue; // Go back — restart quick setup loop
+    }
+
     // Step 2: Configure provider (auto-detects env key)
     configured = [];
     for (const id of selectedIds) {
-      const provider = await configureProvider(id, { current: 2, total: totalSteps });
+      const provider = await configureProvider(id, { current: 1, total: totalSteps });
       if (provider) configured.push(provider);
     }
 
@@ -641,21 +1107,27 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
       process.exit(1);
     }
 
-    // Auto-assign routing (no prompts)
-    routing = autoRoutingForSingleProvider(configured[0]);
+    // Auto-configure models from single provider's presets
+    const provider = configured[0];
+    configuredModels = [];
+    for (const [tier, modelName] of Object.entries(provider.models)) {
+      if (modelName) {
+        configuredModels.push({ alias: modelName, provider: provider.id, model: modelName, fallbacks: [] });
+      }
+    }
 
     // Server defaults (no prompts)
     server = { port: 3456, host: 'localhost' };
 
     // Step 3: Summary + Confirm
-    yaml = buildYamlConfig(configured, routing, server);
+    yaml = buildYamlConfig(configured, configuredModels, server, existingProviderMap, existingModelRouting);
     console.log(`\n${BOLD}  Generated configuration:${RESET}\n`);
-    console.log(buildSummaryTable(configured, routing, server));
+    console.log(buildSummaryTable(configured, configuredModels, server));
     console.log();
     console.log(yaml.split('\n').map((l) => `  ${l}`).join('\n'));
 
     const { confirm } = await prompts(
-      { type: 'confirm', name: 'confirm', message: `[Step 3 of ${totalSteps}] Write this configuration?`, initial: true },
+      { type: 'confirm', name: 'confirm', message: `[Step 2 of ${totalSteps}] Write this configuration?`, initial: true },
       CANCEL,
     );
 
@@ -665,7 +1137,7 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   }
 
   // Write files
-  await writeConfigAndSettings(configured, routing, server, yaml, settingsConfig, totalSteps);
+  await writeConfigAndSettings(configured, configuredModels, server, yaml, totalSteps, true, !!existingPeek);
 }
 
 // ---------------------------------------------------------------------------
@@ -674,27 +1146,20 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
 async function writeConfigAndSettings(
   configured: ConfiguredProvider[],
-  routing: Record<string, RoutingTier[]>,
+  models: ConfiguredModel[],
   server: { port: number; host: string },
   yaml: string,
-  settingsConfig: SettingsConfig | null,
   totalSteps: number,
+  quick?: boolean,
+  hasExisting?: boolean,
 ): Promise<SettingsConfig | null> {
   const modelweaverDir = join(process.env.HOME || process.env.USERPROFILE || '', '.modelweaver');
   mkdirSync(modelweaverDir, { recursive: true });
   const configPath = join(modelweaverDir, 'config.yaml');
-  if (existsSync(configPath)) {
-    console.log(`\n  \u26A0  Warning: ${configPath} already exists and will be overwritten.\n`);
-    const { overwrite } = await prompts({
-      type: 'confirm',
-      name: 'overwrite',
-      message: 'Overwrite existing config?',
-      initial: false,
-    }, { onCancel: () => { console.log('\n  Setup cancelled. No files were changed.'); process.exit(0); } });
-    if (!overwrite) {
-      console.log('\n  Setup cancelled. No files were changed.');
-      process.exit(0);
-    }
+  if (existsSync(configPath) && hasExisting) {
+    check(`Updating existing config at ${configPath}`);
+  } else {
+    check(`Writing new config to ${configPath}`);
   }
   writeFileSync(configPath, yaml);
   writeEnvFile(configured);
@@ -707,7 +1172,7 @@ async function writeConfigAndSettings(
       if (process.platform !== "win32") {
         try { process.kill(pid, 'SIGUSR1'); } catch { /* process may not exist */ }
       } else {
-        console.log("  Windows does not support SIGUSR1 — run 'modelweaver reload' to pick up new config.");
+        console.log("  Windows does not support SIGUSR1 \u2014 run 'modelweaver reload' to pick up new config.");
       }
       check('ModelWeaver daemon reloaded with new config');
     }
@@ -716,7 +1181,7 @@ async function writeConfigAndSettings(
   }
 
   // Configure Claude Code settings.json
-  const result = await configureClaudeCodeSettings(routing, configured, server, { current: totalSteps, total: totalSteps });
+  const result = await configureClaudeCodeSettings(models);
 
   if (result) {
     const baseUrl = server.host === 'localhost'
@@ -732,18 +1197,14 @@ async function writeConfigAndSettings(
     const merged = mergeSettings(existing, {
       baseUrl,
       defaultModel: result.defaultModel,
-      tierModels: result.tierModels,
+      availableModels: result.availableModels,
     });
     writeSettings(merged);
 
     check(`Claude Code settings updated at ${getSettingsPath()}`);
-    console.log(`    Proxy endpoint: ${baseUrl}`);
-    console.log(`    Default model:  ${result.defaultModel}`);
-    if (Object.keys(result.tierModels).length > 0) {
-      for (const [tier, model] of Object.entries(result.tierModels)) {
-        console.log(`    ${tier.padEnd(8)} \u2192 ${model}`);
-      }
-    }
+    console.log(`    Proxy endpoint:   ${baseUrl}`);
+    console.log(`    Default model:    ${result.defaultModel}`);
+    console.log(`    Available models: ${result.availableModels.join(', ')}`);
     console.log();
     console.log(`  ${GREEN}Restart Claude Code to apply changes.${RESET}`);
   }
@@ -754,6 +1215,12 @@ async function writeConfigAndSettings(
 // ---------------------------------------------------------------------------
 // Main wizard (normal mode)
 // ---------------------------------------------------------------------------
+
+// Phase constants for the phase-based loop
+const PHASE_PROVIDERS = 0;
+const PHASE_MODELS = 1;
+const PHASE_SERVER = 2;
+const PHASE_CONFIRM = 3;
 
 export async function runInit(options?: { quick?: boolean }): Promise<void> {
   if (options?.quick) {
@@ -766,17 +1233,30 @@ export async function runInit(options?: { quick?: boolean }): Promise<void> {
     process.exit(1);
   }
 
-  // Collect wizard output via loop (avoids unbounded recursion on restart)
+  // Peek at existing config for provider detection + merge
+  const { peekConfig } = await import('./config.js');
+  const existingPeek = peekConfig();
+  const existingProviderMap = existingPeek?.providers ?? new Map();
+  const existingModelRouting = existingPeek?.modelRouting ?? new Map();
+  const hasExisting = existingProviderMap.size > 0;
+
+  // State that persists across phases (go-back preserves these)
   let configured: ConfiguredProvider[] = [];
-  let routing: Record<string, RoutingTier[]>;
-  let server: { port: number; host: string };
+  let configuredModels: ConfiguredModel[] = [];
+  let allProviders: ConfiguredProvider[] = [];
+  let server: { port: number; host: string } = { port: 3456, host: 'localhost' };
   let yaml: string;
   let settingsConfig: SettingsConfig | null = null;
+  let useExistingModels = hasExisting;
+
+  let phase = PHASE_PROVIDERS;
 
   while (true) {
-    // Step 1 — Welcome (use clearScreen instead of full clear)
-    clearScreen();
-    console.log(`
+    // ── PHASE: Provider configuration ──
+    if (phase <= PHASE_PROVIDERS) {
+      // Step 1 — Welcome
+      clearScreen();
+      console.log(`
 ${BOLD}${CYAN}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557\u2500
 \u2551       Welcome to ModelWeaver!        \u2551
 \u2551                                      \u2551
@@ -785,65 +1265,191 @@ ${BOLD}${CYAN}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D${RESET}
 `);
 
-    // Step 2 — Choose providers
-    const selectedIds = await selectProviders();
+      if (hasExisting) {
+        // Show existing providers + action menu
+        console.log(`\n${buildExistingProvidersTable(existingProviderMap)}\n`);
 
-    // Calculate total steps for counter
-    const totalSteps = calculateTotalSteps(selectedIds.length, false);
+        const { action } = await prompts({
+          type: 'select',
+          name: 'action',
+          message: 'What would you like to do?',
+          choices: [
+            { title: 'Add new provider(s)', value: 'add', description: 'Keep existing, add more' },
+            { title: 'Edit existing provider', value: 'edit', description: 'Modify settings of a configured provider' },
+            { title: 'Reconfigure all from scratch', value: 'reset', description: 'Start over (existing providers will be replaced)' },
+          ],
+        }, CANCEL);
 
-    // Step 3 — Configure each provider
-    configured = [];
-    for (let i = 0; i < selectedIds.length; i++) {
-      const provider = await configureProvider(selectedIds[i], { current: 2 + i, total: totalSteps });
-      if (provider) configured.push(provider);
+        if (action === 'add') {
+          const excludeIds = new Set(existingProviderMap.keys());
+          const selectedIds = await selectProviders({ excludeIds });
+          if (selectedIds.length === 0) {
+            console.log('  No additional providers selected. All existing providers preserved.');
+          }
+          const totalSteps = calculateTotalSteps(
+            existingProviderMap.size + selectedIds.length, false
+          );
+          configured = [];
+          for (let i = 0; i < selectedIds.length; i++) {
+            const provider = await configureProvider(
+              selectedIds[i],
+              { current: 1 + i, total: totalSteps }
+            );
+            if (provider) configured.push(provider);
+          }
+        } else if (action === 'edit') {
+          const existingIds = [...existingProviderMap.keys()];
+          const { editId } = await prompts({
+            type: 'select',
+            name: 'editId',
+            message: 'Select provider to edit:',
+            choices: [
+              { title: '\u2B05  Go back', value: '__back__' },
+              ...existingIds.map(id => {
+                const p = existingProviderMap.get(id)!;
+                return { title: id, value: id, description: p.baseUrl };
+              }),
+            ],
+          }, CANCEL);
+          if (editId === '__back__') {
+            continue; // Go back to the main action menu
+          }
+          const existing = existingProviderMap.get(editId as string)!;
+          const totalSteps = calculateTotalSteps(existingProviderMap.size, false);
+          const provider = await configureProvider(
+            editId as string,
+            { current: 1, total: totalSteps },
+            existing,
+          );
+          configured = provider ? [provider] : [];
+        } else {
+          // 'reset' — fresh start, clear existing map so nothing gets merged
+          existingProviderMap.clear();
+          existingModelRouting.clear();
+          useExistingModels = false;
+          const selectedIds = await selectProviders();
+          const totalSteps = calculateTotalSteps(selectedIds.length, false);
+          configured = [];
+          for (let i = 0; i < selectedIds.length; i++) {
+            const provider = await configureProvider(selectedIds[i], { current: 1 + i, total: totalSteps });
+            if (provider) configured.push(provider);
+          }
+        }
+
+        if (configured.length === 0 && (existingProviderMap.size === 0)) {
+          console.log(`\n  ${RED}No providers configured. Exiting.${RESET}\n`);
+          process.exit(1);
+        }
+      } else {
+        // ── FRESH SETUP (original flow, no changes) ──
+        const selectedIds = await selectProviders();
+        const totalSteps = calculateTotalSteps(selectedIds.length, false);
+        configured = [];
+        for (let i = 0; i < selectedIds.length; i++) {
+          const provider = await configureProvider(selectedIds[i], { current: 1 + i, total: totalSteps });
+          if (provider) configured.push(provider);
+        }
+
+        if (configured.length === 0) {
+          console.log(`\n  ${RED}No providers configured. Exiting.${RESET}\n`);
+          process.exit(1);
+        }
+      }
+
+      // Build the full provider list: configured (new/edited) + untouched existing
+      allProviders = buildAllProviders(configured, existingProviderMap);
+      phase = PHASE_MODELS;
     }
 
-    if (configured.length === 0) {
-      console.log(`\n  ${RED}No providers configured. Exiting.${RESET}\n`);
-      process.exit(1);
+    // ── PHASE: Model configuration ──
+    if (phase <= PHASE_MODELS) {
+      // Configure models (N-model flow)
+      configuredModels = await configureModels(allProviders, useExistingModels ? existingModelRouting : undefined);
+
+      // Navigation prompt: continue to server config or go back to providers
+      const { nav } = await prompts({
+        type: 'select',
+        name: 'nav',
+        message: 'Next step:',
+        choices: [
+          { title: 'Continue to server configuration', value: 'next', description: 'Configure port and host' },
+          { title: 'Go back to provider configuration', value: 'back', description: 'Reconfigure providers' },
+        ],
+      }, CANCEL);
+
+      if (nav === 'back') {
+        phase = PHASE_PROVIDERS;
+        continue;
+      }
+
+      phase = PHASE_SERVER;
     }
 
-    // Step 4 — Configure routing (auto-skipped for single provider)
-    console.log();
-    const routingStepOffset = 2 + selectedIds.length;
-    routing = await configureRouting(configured, { stepOffset: routingStepOffset, totalSteps });
+    // ── PHASE: Server configuration ──
+    if (phase <= PHASE_SERVER) {
+      // Server config
+      console.log();
+      const totalSteps = calculateTotalSteps(allProviders.length, false);
+      const serverStep = allProviders.length + 2; // providers + models + server
+      server = await configureServer({ stepInfo: { current: serverStep, total: totalSteps } });
 
-    // Step N-2 — Server config
-    console.log();
-    const serverStep = routingStepOffset + (configured.length > 1 ? 3 : 0) + 1;
-    server = await configureServer({ stepInfo: { current: serverStep, total: totalSteps } });
+      // Navigation prompt: continue to review or go back to models
+      const { nav } = await prompts({
+        type: 'select',
+        name: 'nav',
+        message: 'Next step:',
+        choices: [
+          { title: 'Review and write configuration', value: 'next', description: 'Confirm and save' },
+          { title: 'Go back to model configuration', value: 'back', description: 'Reconfigure models' },
+        ],
+      }, CANCEL);
 
-    // Step N-1 — Review & confirm
-    yaml = buildYamlConfig(configured, routing, server);
-    console.log(`\n${BOLD}  Generated configuration:${RESET}\n`);
-    console.log(buildSummaryTable(configured, routing, server));
-    console.log();
-    console.log(yaml.split('\n').map((l) => `  ${l}`).join('\n'));
+      if (nav === 'back') {
+        phase = PHASE_MODELS;
+        continue;
+      }
 
-    const confirmStep = totalSteps - 1;
-    const { confirm } = await prompts(
-      { type: 'confirm', name: 'confirm', message: `[Step ${confirmStep} of ${totalSteps}] Write this configuration?`, initial: true },
-      CANCEL,
-    );
+      phase = PHASE_CONFIRM;
+    }
 
-    if (confirm) break;
+    // ── PHASE: Review & confirm ──
+    if (phase <= PHASE_CONFIRM) {
+      // Review & confirm
+      yaml = buildYamlConfig(allProviders, configuredModels, server, existingProviderMap, existingModelRouting);
+      console.log(`\n${BOLD}  Generated configuration:${RESET}\n`);
+      console.log(buildSummaryTable(allProviders, configuredModels, server));
+      console.log();
+      console.log(yaml.split('\n').map((l) => `  ${l}`).join('\n'));
 
-    console.log('\n  Restarting wizard...\n');
+      const totalSteps = calculateTotalSteps(allProviders.length, false);
+      const confirmStep = allProviders.length + 3; // providers + models + server + confirm
+      const { confirm } = await prompts(
+        { type: 'confirm', name: 'confirm', message: `[Step ${confirmStep} of ${totalSteps}] Write this configuration?`, initial: true },
+        CANCEL,
+      );
+
+      if (confirm) break;
+
+      // Go back to server configuration instead of restarting the entire wizard
+      console.log('\n  Returning to server configuration...\n');
+      phase = PHASE_SERVER;
+      continue;
+    }
   }
 
-  // Step 7 — Write files + settings
+  // Write files + settings
   const finalTotalSteps = calculateTotalSteps(configured.length, false);
-  settingsConfig = await writeConfigAndSettings(configured, routing, server, yaml, settingsConfig, finalTotalSteps);
+  settingsConfig = await writeConfigAndSettings(configured, configuredModels, server, yaml, finalTotalSteps, false, hasExisting);
 
   // Step 8 — Success banner
   console.log(`
 ${BOLD}${CYAN}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
-\u2551  ModelWeaver is configured!                   \u2551
+\u2551  ModelWeaver is configured!                    \u2551
 \u2551                                                \u2551
 ${settingsConfig
   ? `\u2551  Claude Code settings have been updated.       \u2551
 \u2551                                                \u2551
-\u2551  Just restart Claude Code to get started.     \u2551`
+\u2551  Just restart Claude Code to get started.      \u2551`
   : `\u2551  To use with Claude Code:                      \u2551
 \u2551                                                \u2551
 \u2551  Terminal 1:                                   \u2551
@@ -851,7 +1457,7 @@ ${settingsConfig
 \u2551                                                \u2551
 \u2551  Terminal 2:                                   \u2551
 \u2551    export ANTHROPIC_BASE_URL=\\                 \u2551
-\u2551      http://localhost:${String(server.port).padEnd(20)}\u2551
+\u2551      http://localhost:${String(server.port).padEnd(25)}\u2551
 \u2551    claude                                      \u2551`
 }
 \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D${RESET}

@@ -10,7 +10,6 @@ import type { AppConfig, ProviderConfig, RoutingEntry, ServerConfig } from "./ty
 // --- Zod schemas for raw (pre-resolution) config ---
 
 const modelLimitsSchema = z.object({
-  maxInputTokens: z.number().int().positive(),
   maxOutputTokens: z.number().int().positive(),
 }).optional();
 
@@ -90,6 +89,53 @@ export function findConfigFile(cwd: string = process.cwd(), { skipGlobal = false
   return null;
 }
 
+// --- Lightweight peek (no env resolution, no Zod validation) ---
+
+/** Peek at existing config to extract provider metadata without resolving env vars or validating.
+ *  Used by init wizard to show existing providers and offer add/edit. */
+export function peekConfig(
+  cwd?: string,
+): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string }[]> } | null {
+  const configPath = findConfigFile(cwd);
+  if (!configPath) return null;
+
+  const raw = readFileSync(configPath, "utf-8");
+  const parsed = parseYaml(raw) as Record<string, unknown>;
+  const providersRaw = (parsed?.providers ?? {}) as Record<string, Record<string, unknown>>;
+
+  const providers = new Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number }>();
+
+  for (const [id, config] of Object.entries(providersRaw)) {
+    const apiKey = String(config.apiKey ?? "");
+    const envMatch = apiKey.match(/^\$\{([^}]+)\}$/);
+    const envKey = envMatch ? envMatch[1] : "";
+
+    providers.set(id, {
+      baseUrl: String(config.baseUrl ?? ""),
+      envKey,
+      authType: String(config.authType ?? "anthropic") as "anthropic" | "bearer",
+      timeout: Number(config.timeout ?? 30000),
+    });
+  }
+
+  const serverRaw = parsed?.server as Record<string, unknown> | undefined;
+  const server = serverRaw ? {
+    port: Number(serverRaw.port ?? 3456),
+    host: String(serverRaw.host ?? "localhost"),
+  } : null;
+
+  // Parse modelRouting (alias -> provider chain)
+  const modelRouting = new Map<string, { provider: string; model: string }[]>();
+  const modelRoutingRaw = (parsed?.modelRouting ?? {}) as Record<string, { provider: string; model: string }[]>;
+  for (const [alias, entries] of Object.entries(modelRoutingRaw)) {
+    if (Array.isArray(entries)) {
+      modelRouting.set(alias, entries.map(e => ({ provider: String(e.provider ?? ""), model: String(e.model ?? alias) })));
+    }
+  }
+
+  return { configPath, providers, server, modelRouting };
+}
+
 // --- Load & validate ---
 
 export function loadConfig(configPath?: string, cwd?: string): { config: AppConfig; configPath: string } {
@@ -167,7 +213,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
       apiKey: p.apiKey,
       timeout: p.timeout,
       authType: p.authType,
-      modelLimits: p.modelLimits ? { maxInputTokens: p.modelLimits.maxInputTokens, maxOutputTokens: p.modelLimits.maxOutputTokens } : undefined,
+      modelLimits: p.modelLimits ? { maxOutputTokens: p.modelLimits.maxOutputTokens } : undefined,
     };
     try {
       const parsedUrl = new URL(p.baseUrl);

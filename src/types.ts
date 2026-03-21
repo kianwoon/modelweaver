@@ -1,7 +1,6 @@
 import type { CircuitBreaker } from "./circuit-breaker.js";
 
 export interface ModelLimits {
-  maxInputTokens: number;
   maxOutputTokens: number;
 }
 

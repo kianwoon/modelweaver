@@ -160,6 +160,40 @@ describe("settings module", () => {
       expect(result.hooks).toEqual(existing.hooks);
       expect(result.model).toBe("opus[1m]");
     });
+
+    it("sets availableModels when provided", () => {
+      const result = mergeSettings({}, {
+        baseUrl: "http://localhost:3456",
+        availableModels: ["glm-5-turbo", "MiniMax-M2.7", "opusplan"],
+      });
+      expect(result.availableModels).toEqual(["glm-5-turbo", "MiniMax-M2.7", "opusplan"]);
+    });
+
+    it("preserves existing availableModels when not provided", () => {
+      const existing = { availableModels: ["haiku", "sonnet"], env: {} };
+      const result = mergeSettings(existing, {
+        baseUrl: "http://localhost:3456",
+      });
+      expect(result.availableModels).toEqual(["haiku", "sonnet"]);
+    });
+
+    it("overwrites existing availableModels when new ones provided", () => {
+      const existing = { availableModels: ["haiku", "sonnet"], env: {} };
+      const result = mergeSettings(existing, {
+        baseUrl: "http://localhost:3456",
+        availableModels: ["glm-5-turbo", "MiniMax-M2.7"],
+      });
+      expect(result.availableModels).toEqual(["glm-5-turbo", "MiniMax-M2.7"]);
+    });
+
+    it("does not set availableModels when empty array provided", () => {
+      const existing = { availableModels: ["haiku"], env: {} };
+      const result = mergeSettings(existing, {
+        baseUrl: "http://localhost:3456",
+        availableModels: [],
+      });
+      expect(result.availableModels).toEqual(["haiku"]);
+    });
   });
 
   describe("writeSettings + readSettings round-trip", () => {
