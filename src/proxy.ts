@@ -191,7 +191,8 @@ export async function forwardRequest(
   entry: RoutingEntry,
   ctx: RequestContext,
   incomingRequest: Request,
-  externalSignal?: AbortSignal
+  externalSignal?: AbortSignal,
+  chainIndex: number = 0,
 ): Promise<Response> {
   const outgoingPath = incomingRequest.url.replace(/^https?:\/\/[^/]+/, "");
 
@@ -205,7 +206,10 @@ export async function forwardRequest(
   const cachedBaseUrl = provider._cachedBaseUrl;
   const url = buildOutboundUrl(cachedBaseUrl ?? provider.baseUrl, outgoingPath);
 
-  // Prepare body — prefer pre-parsed object to avoid double JSON.parse
+  // Prepare body — prefer raw passthrough to preserve upstream prompt caching.
+  // Only parse and re-serialize when a modification is actually required,
+  // because Anthropic's cache breakpoints are position-sensitive and
+  // JSON.stringify changes whitespace / key order, breaking cache hits.
   let body: string;
   const contentType = incomingRequest.headers.get("content-type") || "";
 
@@ -214,33 +218,63 @@ export async function forwardRequest(
       const parsed = (ctx as RequestContext & { parsedBody?: Record<string, unknown> }).parsedBody
         ?? JSON.parse(ctx.rawBody);
 
-      // Deep clone so mutations from this attempt don't affect the next fallback attempt
-      const mutable = structuredClone(parsed);
+      // Determine whether any body modification is needed
+      let needsModification = false;
 
-      // Model override in the request body
-      if (entry.model) {
-        const originalModel = mutable.model as string | undefined;
-        mutable.model = entry.model;
-        if (originalModel && originalModel !== entry.model) {
-          console.warn(
-            `Routing override: ${originalModel} → ${entry.model} via ${provider.name}`
-          );
-        }
+      // Check 1: Model override needed?
+      if (entry.model && (parsed.model as string | undefined) !== entry.model) {
+        needsModification = true;
       }
 
-      // Clean orphaned tool references from cross-provider conversation history
-      cleanOrphanedToolMessages(mutable);
+      // Check 2: Orphan cleaning needed? (only for fallback attempts, not primary)
+      // On the primary attempt (index 0), conversation history is intact.
+      // Only when falling back (index > 0) do cross-provider orphans appear.
+      const needsOrphanClean = chainIndex > 0;
+      if (needsOrphanClean) needsModification = true;
 
-      // Clamp max_tokens to provider's advertised output limit (let upstream handle input context checks)
+      // Check 3: max_tokens clamping needed?
       if (provider.modelLimits) {
         const { maxOutputTokens } = provider.modelLimits;
-        const requestedMaxTokens = typeof mutable.max_tokens === "number" ? mutable.max_tokens : maxOutputTokens;
-        if (mutable.max_tokens === undefined || requestedMaxTokens > maxOutputTokens) {
-          mutable.max_tokens = Math.min(requestedMaxTokens, maxOutputTokens);
+        const requestedMaxTokens = typeof parsed.max_tokens === "number" ? parsed.max_tokens : maxOutputTokens;
+        if (parsed.max_tokens === undefined || requestedMaxTokens > maxOutputTokens) {
+          needsModification = true;
         }
       }
 
-      body = JSON.stringify(mutable);
+      if (needsModification) {
+        // Deep clone so mutations from this attempt don't affect the next fallback attempt
+        const mutable = structuredClone(parsed);
+
+        // Model override in the request body
+        if (entry.model) {
+          const originalModel = mutable.model as string | undefined;
+          mutable.model = entry.model;
+          if (originalModel && originalModel !== entry.model) {
+            console.warn(
+              `Routing override: ${originalModel} → ${entry.model} via ${provider.name}`
+            );
+          }
+        }
+
+        // Clean orphaned tool references from cross-provider conversation history
+        if (needsOrphanClean) {
+          cleanOrphanedToolMessages(mutable);
+        }
+
+        // Clamp max_tokens to provider's advertised output limit
+        if (provider.modelLimits) {
+          const { maxOutputTokens } = provider.modelLimits;
+          const requestedMaxTokens = typeof mutable.max_tokens === "number" ? mutable.max_tokens : maxOutputTokens;
+          if (mutable.max_tokens === undefined || requestedMaxTokens > maxOutputTokens) {
+            mutable.max_tokens = Math.min(requestedMaxTokens, maxOutputTokens);
+          }
+        }
+
+        body = JSON.stringify(mutable);
+      } else {
+        // No modifications needed — passthrough raw body to preserve prompt caching
+        body = ctx.rawBody;
+      }
     } catch {
       // If body can't be parsed, send it as-is without model override
       body = ctx.rawBody;
@@ -367,7 +401,7 @@ async function raceProviders(
     onAttempt?.(entry.provider, index);
 
     try {
-      const response = await forwardRequest(provider, entry, ctx, incomingRequest, sharedController.signal);
+      const response = await forwardRequest(provider, entry, ctx, incomingRequest, sharedController.signal, index);
       // Record for circuit breaker
       if (provider._circuitBreaker) {
         provider._circuitBreaker.recordResult(response.status);
@@ -487,7 +521,7 @@ export async function forwardWithFallback(
     onAttempt?.(entry.provider, i);
 
     // forwardRequest uses ctx.rawBody, so body can be re-read on each attempt
-    const response = await forwardRequest(provider, entry, ctx, incomingRequest);
+    const response = await forwardRequest(provider, entry, ctx, incomingRequest, undefined, i);
     lastResponse = response;
 
     // Record result for circuit breaker
