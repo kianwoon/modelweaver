@@ -45,9 +45,12 @@ function setStatus(mode) {
   if (mode === 'live') {
     statusEl.className = 'status connected';
     statusText.textContent = 'Connected (live)';
+  } else if (mode === 'reconnecting') {
+    statusEl.className = 'status reconnecting';
+    statusText.textContent = 'Reconnecting...';
   } else if (mode === 'poll') {
     statusEl.className = 'status connected';
-    statusText.textContent = 'Reconnecting...';
+    statusText.textContent = 'Connected (polling)';
   } else if (mode) {
     // Bare truthy (e.g. true from fetchSummary) means HTTP-connected
     statusEl.className = 'status connected';
@@ -100,6 +103,7 @@ function updateSummary(data) {
 
       const bar = document.createElement('div');
       bar.className = 'model-bar';
+      bar.setAttribute('data-model', m.model || '');
 
       const name = document.createElement('span');
       name.className = 'model-name';
@@ -139,6 +143,7 @@ function updateSummary(data) {
 
       const row = document.createElement('div');
       row.className = 'provider-row';
+      row.setAttribute('data-provider', p.provider);
 
       const name = document.createElement('span');
       name.className = 'provider-name';
@@ -267,6 +272,115 @@ function appendRequestMetric(r) {
   while (recentEl.children.length > 10) {
     recentEl.removeChild(recentEl.lastChild);
   }
+
+  // Update active models list
+  const modelKey = r.model || 'unknown';
+  let modelBar = modelsEl.querySelector(`[data-model="${CSS.escape(modelKey)}"]`);
+  if (modelBar) {
+    const countEl = modelBar.querySelector('.model-count');
+    countEl.textContent = (parseInt(countEl.textContent, 10) || 0) + 1;
+  } else {
+    const emptyEl = modelsEl.querySelector('.empty');
+    if (emptyEl) emptyEl.remove();
+
+    const barClass = modelKey.toLowerCase().includes('sonnet') ? 'sonnet'
+      : modelKey.toLowerCase().includes('haiku') ? 'haiku'
+      : modelKey.toLowerCase().includes('opus') ? 'opus'
+      : '';
+
+    modelBar = document.createElement('div');
+    modelBar.className = 'model-bar';
+    modelBar.setAttribute('data-model', modelKey);
+
+    const name = document.createElement('span');
+    name.className = 'model-name';
+    name.title = modelKey;
+    name.textContent = shortModel(modelKey);
+
+    const track = document.createElement('div');
+    track.className = 'model-bar-track';
+
+    const fill = document.createElement('div');
+    fill.className = 'model-bar-fill ' + barClass;
+
+    const count = document.createElement('span');
+    count.className = 'model-count';
+    count.textContent = '1';
+
+    track.appendChild(fill);
+    modelBar.appendChild(name);
+    modelBar.appendChild(track);
+    modelBar.appendChild(count);
+    modelsEl.appendChild(modelBar);
+  }
+
+  // Re-sort model bars by count (descending)
+  const modelBars = Array.from(modelsEl.querySelectorAll('.model-bar'));
+  modelBars.sort((a, b) => {
+    return (parseInt(b.querySelector('.model-count').textContent, 10) || 0)
+         - (parseInt(a.querySelector('.model-count').textContent, 10) || 0);
+  });
+  modelBars.forEach(bar => modelsEl.appendChild(bar));
+
+  // Recalculate model bar widths
+  const maxModelCount = Math.max(1, ...modelBars.map(b => parseInt(b.querySelector('.model-count').textContent, 10) || 0));
+  modelBars.forEach(bar => {
+    const cnt = parseInt(bar.querySelector('.model-count').textContent, 10) || 0;
+    bar.querySelector('.model-bar-fill').style.width = (cnt / maxModelCount * 100) + '%';
+  });
+
+  // Update providers list
+  const providerKey = r.targetProvider || r.provider || '';
+  if (providerKey) {
+    let providerRow = providersEl.querySelector(`[data-provider="${CSS.escape(providerKey)}"]`);
+    if (providerRow) {
+      const countEl = providerRow.querySelector('.provider-count');
+      const currentMatch = countEl.textContent.match(/^(\d+)/);
+      const currentCount = currentMatch ? parseInt(currentMatch[1], 10) : 0;
+      const newCount = currentCount + 1;
+
+      // Recalculate all provider percentages (total = existing sum + 1 for this request)
+      const allRows = Array.from(providersEl.querySelectorAll('.provider-row'));
+      const totalNew = allRows.reduce((s, row) => {
+        const m = row.querySelector('.provider-count').textContent.match(/^(\d+)/);
+        return s + (m ? parseInt(m[1], 10) : 0);
+      }, 0) + 1;
+      allRows.forEach(row => {
+        const match = row.querySelector('.provider-count').textContent.match(/^(\d+)/);
+        const existingCount = match ? parseInt(match[1], 10) : 0;
+        const count = row === providerRow ? newCount : existingCount;
+        row.querySelector('.provider-count').textContent = count + ' (' + Math.round(count / totalNew * 100) + '%)';
+      });
+    } else {
+      const emptyEl = providersEl.querySelector('.empty');
+      if (emptyEl) emptyEl.remove();
+
+      providerRow = document.createElement('div');
+      providerRow.className = 'provider-row';
+      providerRow.setAttribute('data-provider', providerKey);
+
+      const name = document.createElement('span');
+      name.className = 'provider-name';
+      name.textContent = providerKey;
+
+      const count = document.createElement('span');
+      count.className = 'provider-count';
+      count.textContent = '1 (100%)';
+
+      providerRow.appendChild(name);
+      providerRow.appendChild(count);
+      providersEl.appendChild(providerRow);
+    }
+
+    // Re-sort provider rows by count (descending)
+    const providerRows = Array.from(providersEl.querySelectorAll('.provider-row'));
+    providerRows.sort((a, b) => {
+      const aMatch = a.querySelector('.provider-count').textContent.match(/^(\d+)/);
+      const bMatch = b.querySelector('.provider-count').textContent.match(/^(\d+)/);
+      return (bMatch ? parseInt(bMatch[1], 10) : 0) - (aMatch ? parseInt(aMatch[1], 10) : 0);
+    });
+    providerRows.forEach(row => providersEl.appendChild(row));
+  }
 }
 
 function connectWebSocket(port) {
@@ -288,6 +402,9 @@ function connectWebSocket(port) {
     }
     wsBackoff = 1000;
     setStatus('live');
+    // Defensive: fetch summary via HTTP to ensure active models/providers
+    // are populated even if the initial WS summary message is missed
+    fetchSummary();
   });
 
   ws.addEventListener('message', (event) => {
@@ -313,9 +430,8 @@ function connectWebSocket(port) {
     // Schedule reconnection with exponential backoff
     reconnectTimer = setTimeout(() => connectWebSocket(port), wsBackoff);
     wsBackoff = Math.min(wsBackoff * 2, WS_MAX_BACKOFF);
-    // Show reconnecting state only if we previously had data
-    const hasData = (parseInt(statRequests.textContent, 10) || 0) > 0;
-    setStatus(hasData ? 'poll' : false);
+    // Show reconnecting state while backoff timer is pending
+    setStatus('reconnecting');
   });
 
   ws.addEventListener('error', (err) => {
@@ -328,7 +444,8 @@ async function fetchSummary() {
   try {
     const data = await invoke('fetch_metrics', { port: DEFAULT_PORT });
     updateSummary(data);
-    setStatus(true);
+    // Don't overwrite status if WebSocket is already live
+    if (ws) setStatus('live');
   } catch (err) {
     console.error('[fetchSummary] failed:', err);
     setStatus(false);

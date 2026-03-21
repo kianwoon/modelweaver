@@ -117,6 +117,11 @@ body {
   animation: pulse 2s infinite;
 }
 
+.status.reconnecting .status-dot {
+  background: var(--yellow);
+  animation: pulse 1.5s infinite;
+}
+
 .proxy-url {
   font-size: 10px;
   opacity: 0.6;
