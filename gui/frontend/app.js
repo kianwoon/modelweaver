@@ -384,7 +384,12 @@ function appendRequestMetric(r) {
 }
 
 function connectWebSocket(port) {
-  if (ws) return;
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  // Close stale sockets stuck in CONNECTING or CLOSING state
+  if (ws) {
+    ws.close();
+    ws = null;
+  }
 
   try {
     ws = new WebSocket('ws://localhost:' + port + '/ws');
@@ -393,7 +398,16 @@ function connectWebSocket(port) {
     return;
   }
 
+  // Force-close the socket if it never reaches OPEN within WS_CONNECT_TIMEOUT
+  const connectTimer = setTimeout(() => {
+    if (ws && ws.readyState === WebSocket.CONNECTING) {
+      console.warn('[WebSocket] connect timeout — force closing');
+      ws.close();
+    }
+  }, WS_CONNECT_TIMEOUT);
+
   ws.addEventListener('open', () => {
+    clearTimeout(connectTimer);
     console.log('[WebSocket] connected');
     // Stop HTTP polling — WS is now the primary data source
     if (pollTimer) {
@@ -458,6 +472,7 @@ let pollTimer = null;
 let wsBackoff = 1000;
 let reconnectTimer = null;
 const WS_MAX_BACKOFF = 30000;
+const WS_CONNECT_TIMEOUT = 5000;
 
 // Initial HTTP fetch for instant data
 fetchSummary();
