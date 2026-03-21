@@ -40,6 +40,7 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
 
       const msg: WsMessage = { type: "request", data: metrics };
       ws.send(JSON.stringify(msg));
+      scheduleSummaryUpdate();
     });
 
     function scheduleSummaryUpdate(): void {
