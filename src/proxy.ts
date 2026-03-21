@@ -13,6 +13,13 @@ const FORWARD_HEADERS = new Set([
 /** Pre-compiled regex for normalizing duplicate slashes in URL paths */
 const MULTI_SLASH = /\/+/g;
 
+/** Pre-compiled regex for stripping origin from URLs */
+const STRIP_ORIGIN = /^https?:\/\/[^/]+/;
+
+/** Pre-compiled regexes for targeted body replacements (preserve prompt caching) */
+const MODEL_KEY_REGEX = /"model"\s*:\s*"([^"]*)"/;
+const MAX_TOKENS_REGEX = /"max_tokens"\s*:\s*(\d+)/;
+
 /** Module-level TextEncoder — avoids per-request allocation */
 const textEncoder = new TextEncoder();
 
@@ -181,6 +188,69 @@ function cleanOrphanedToolMessages(body: Record<string, unknown>): void {
 }
 
 /**
+ * Apply targeted string replacements to rawBody to preserve prompt caching.
+ * On the primary attempt (chainIndex === 0), we avoid full JSON.stringify which
+ * breaks Anthropic's cache breakpoints (position-sensitive, whitespace/order-sensitive).
+ * Falls back to full JSON parse/mutate/stringify when structural changes are needed.
+ */
+function applyTargetedReplacements(
+  rawBody: string,
+  entry: RoutingEntry,
+  provider: ProviderConfig,
+  parsed: Record<string, unknown>,
+  needsOrphanClean: boolean,
+): string {
+  // If orphan cleaning is needed, we must do full JSON parse (structural changes to messages)
+  if (needsOrphanClean) {
+    const mutable = structuredClone(parsed);
+    if (entry.model) mutable.model = entry.model;
+    cleanOrphanedToolMessages(mutable);
+    if (provider.modelLimits) {
+      const { maxOutputTokens } = provider.modelLimits;
+      const requested = typeof mutable.max_tokens === "number" ? mutable.max_tokens : maxOutputTokens;
+      if (mutable.max_tokens === undefined || requested > maxOutputTokens) {
+        mutable.max_tokens = Math.min(requested, maxOutputTokens);
+      }
+    }
+    return JSON.stringify(mutable);
+  }
+
+  // Targeted replacement path -- only model override and/or max_tokens clamping
+  let body = rawBody;
+
+  // Model override via regex (no JSON.parse/stringify)
+  if (entry.model && (parsed.model as string | undefined) !== entry.model) {
+    const modelMatch = MODEL_KEY_REGEX.exec(body);
+    if (modelMatch) {
+      body = body.replace(MODEL_KEY_REGEX, `"model":"${entry.model}"`);
+      console.warn(
+        `Routing override: ${modelMatch[1]} -> ${entry.model} via ${provider.name}`
+      );
+    }
+  }
+
+  // max_tokens clamping
+  if (provider.modelLimits) {
+    const { maxOutputTokens } = provider.modelLimits;
+    const maxTokensMatch = MAX_TOKENS_REGEX.exec(body);
+    if (maxTokensMatch) {
+      const current = parseInt(maxTokensMatch[1], 10);
+      if (current > maxOutputTokens) {
+        body = body.replace(MAX_TOKENS_REGEX, `"max_tokens":${maxOutputTokens}`);
+      }
+    } else if (typeof parsed.max_tokens !== "number") {
+      // max_tokens not present in body -- need to add it. Fall back to full JSON approach.
+      const mutable = structuredClone(parsed);
+      if (entry.model) mutable.model = entry.model;
+      mutable.max_tokens = maxOutputTokens;
+      return JSON.stringify(mutable);
+    }
+  }
+
+  return body;
+}
+
+/**
  * Forward a request to a single provider.
  * Uses ctx.parsedBody when available (avoids re-parsing); falls back to ctx.rawBody.
  * incomingRequest is used for metadata only (url, headers).
@@ -194,7 +264,7 @@ export async function forwardRequest(
   externalSignal?: AbortSignal,
   chainIndex: number = 0,
 ): Promise<Response> {
-  const outgoingPath = incomingRequest.url.replace(/^https?:\/\/[^/]+/, "");
+  const outgoingPath = incomingRequest.url.replace(STRIP_ORIGIN, "");
 
   // Set actualModel early so metrics always record the routed model,
   // even if body parsing or the fetch itself fails
@@ -242,35 +312,39 @@ export async function forwardRequest(
       }
 
       if (needsModification) {
-        // Deep clone so mutations from this attempt don't affect the next fallback attempt
-        const mutable = structuredClone(parsed);
+        // On primary attempt (chainIndex === 0) without orphan cleaning, use targeted
+        // string replacements to preserve prompt caching. Anthropic's cache breakpoints
+        // are position-sensitive -- JSON.stringify changes whitespace/order, breaking hits.
+        if (chainIndex === 0 && !needsOrphanClean) {
+          body = applyTargetedReplacements(ctx.rawBody, entry, provider, parsed, false);
+        } else {
+          // Fallback attempts: full JSON parse/mutate/stringify (caching already broken)
+          const mutable = structuredClone(parsed);
 
-        // Model override in the request body
-        if (entry.model) {
-          const originalModel = mutable.model as string | undefined;
-          mutable.model = entry.model;
-          if (originalModel && originalModel !== entry.model) {
-            console.warn(
-              `Routing override: ${originalModel} → ${entry.model} via ${provider.name}`
-            );
+          if (entry.model) {
+            const originalModel = mutable.model as string | undefined;
+            mutable.model = entry.model;
+            if (originalModel && originalModel !== entry.model) {
+              console.warn(
+                `Routing override: ${originalModel} -> ${entry.model} via ${provider.name}`
+              );
+            }
           }
-        }
 
-        // Clean orphaned tool references from cross-provider conversation history
-        if (needsOrphanClean) {
-          cleanOrphanedToolMessages(mutable);
-        }
-
-        // Clamp max_tokens to provider's advertised output limit
-        if (provider.modelLimits) {
-          const { maxOutputTokens } = provider.modelLimits;
-          const requestedMaxTokens = typeof mutable.max_tokens === "number" ? mutable.max_tokens : maxOutputTokens;
-          if (mutable.max_tokens === undefined || requestedMaxTokens > maxOutputTokens) {
-            mutable.max_tokens = Math.min(requestedMaxTokens, maxOutputTokens);
+          if (needsOrphanClean) {
+            cleanOrphanedToolMessages(mutable);
           }
-        }
 
-        body = JSON.stringify(mutable);
+          if (provider.modelLimits) {
+            const { maxOutputTokens } = provider.modelLimits;
+            const requestedMaxTokens = typeof mutable.max_tokens === "number" ? mutable.max_tokens : maxOutputTokens;
+            if (mutable.max_tokens === undefined || requestedMaxTokens > maxOutputTokens) {
+              mutable.max_tokens = Math.min(requestedMaxTokens, maxOutputTokens);
+            }
+          }
+
+          body = JSON.stringify(mutable);
+        }
       } else {
         // No modifications needed — passthrough raw body to preserve prompt caching
         body = ctx.rawBody;

@@ -1,6 +1,6 @@
 {
   "name": "modelweaver",
-  "version": "0.1.9",
+  "version": "0.2.0",
   "description": "Multi-provider model orchestration proxy for Claude Code",
   "type": "module",
   "main": "dist/index.js",
@@ -16,7 +16,8 @@
     "status": "node dist/index.js status",
     "remove": "node dist/index.js remove",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bench": "vitest bench"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.11",

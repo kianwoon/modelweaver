@@ -13,8 +13,9 @@ export interface ProviderConfig {
   modelLimits?: ModelLimits;
 
   /** Runtime-only cached fields — not serialized to config */
-  _cachedBaseUrl?: string;
   _cachedHost?: string;
+  _cachedOrigin?: string;
+  _cachedPathname?: string;
   _agent?: import("undici").Agent;
   _circuitBreaker?: CircuitBreaker;
   poolSize?: number;

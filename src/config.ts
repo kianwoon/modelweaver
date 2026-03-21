@@ -217,9 +217,9 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
     };
     try {
       const parsedUrl = new URL(p.baseUrl);
-      // Build a normalized base URL string that buildOutboundUrl can use directly
-      providerConfig._cachedBaseUrl = `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname}`;
       providerConfig._cachedHost = parsedUrl.host;
+      providerConfig._cachedOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
+      providerConfig._cachedPathname = parsedUrl.pathname.replace(/\/+$/, "");
     } catch {
       // If baseUrl is invalid, skip caching — buildOutboundHeaders will fall back gracefully
     }

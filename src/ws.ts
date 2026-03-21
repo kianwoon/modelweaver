@@ -38,8 +38,13 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
         return;
       }
 
-      const msg: WsMessage = { type: "request", data: metrics };
-      ws.send(JSON.stringify(msg));
+      // Defer JSON.stringify + send off the critical path
+      setImmediate(() => {
+        if (!alive()) return;
+        const msg: WsMessage = { type: "request", data: metrics };
+        ws.send(JSON.stringify(msg));
+      });
+
       scheduleSummaryUpdate();
     });
 

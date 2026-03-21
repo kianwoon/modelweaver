@@ -1,6 +1,6 @@
 // tests/router.test.ts
-import { describe, it, expect } from "vitest";
-import { matchTier, buildRoutingChain, resolveRequest } from "../src/router.js";
+import { describe, it, expect, beforeEach } from "vitest";
+import { matchTier, buildRoutingChain, resolveRequest, clearRoutingCache } from "../src/router.js";
 import type { RoutingEntry, AppConfig } from "../src/types.js";
 
 describe("matchTier", () => {
@@ -64,6 +64,10 @@ describe("buildRoutingChain", () => {
 });
 
 describe("resolveRequest", () => {
+  beforeEach(() => {
+    clearRoutingCache();
+  });
+
   const baseConfig: AppConfig = {
     server: { port: 13000, host: "localhost" },
     providers: new Map(),

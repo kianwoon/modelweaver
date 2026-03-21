@@ -11,6 +11,9 @@ import { promisify } from "node:util";
 const gzipAsync = promisify(gzip);
 import type { MetricsStore } from "./metrics.js";
 
+/** Module-level TextDecoder singleton -- avoids per-request allocation */
+const textDecoder = new TextDecoder();
+
 function anthropicError(type: string, message: string, requestId: string): Response {
   return new Response(
     JSON.stringify({ type: "error", error: { type, message } }),
@@ -57,7 +60,6 @@ function extractTokensAsync(
   contentType: string,
 ): void {
   const reader = body.getReader();
-  const decoder = new TextDecoder();
 
   (async () => {
     try {
@@ -66,44 +68,58 @@ function extractTokensAsync(
       if (first.done) return;
 
       const isSSE = contentType.includes("text/event-stream")
-        || decoder.decode(first.value, { stream: true }).startsWith("event:");
+        || textDecoder.decode(first.value, { stream: true }).startsWith("event:");
 
       if (isSSE) {
-        // Streaming SSE: parse line-by-line, only track usage fields
-        let inputTokens = 0;
-        let outputTokens = 0;
+        // Streaming SSE: parse line-by-line, only track usage fields.
+        // ~95% of SSE events lack usage data; the includes('"usage"') check
+        // avoids JSON.parse for those events.
+        const tokens = { input: 0, output: 0 };
+
+        // Shared helper to extract tokens from accumulated event text
+        const drainEvents = (eventText: string) => {
+          for (const event of eventText.split("\n\n")) {
+            if (!event) continue;
+            const dataLine = event.split("\n").find(l => l.startsWith("data:"));
+            if (!dataLine || !dataLine.includes('"usage"')) continue;
+            try {
+              const data = JSON.parse(dataLine.slice(5)) as Record<string, unknown>;
+              const usage = parseUsageFromData(data);
+              if (usage.inputTokens > tokens.input) tokens.input = usage.inputTokens;
+              if (usage.outputTokens > tokens.output) tokens.output = usage.outputTokens;
+            } catch { /* skip malformed */ }
+          }
+        };
+
         // Prepend first chunk to the line buffer
-        let lineBuf = decoder.decode(first.value, { stream: true });
+        let lineBuf = textDecoder.decode(first.value, { stream: true });
+        let eventBuf = "";
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) {
-            // Process any remaining buffer
-            if (lineBuf.trim()) processSSEChunk(lineBuf);
+            if (eventBuf.trim()) drainEvents(eventBuf);
             break;
           }
-          lineBuf += decoder.decode(value, { stream: true });
-          // Process complete lines (split, keep incomplete last segment)
+          lineBuf += textDecoder.decode(value, { stream: true });
           const lines = lineBuf.split("\n");
           lineBuf = lines.pop()!;
-          processSSEChunk(lines.join("\n"));
-        }
 
-        function processSSEChunk(chunk: string): void {
-          for (const event of chunk.split("\n\n")) {
-            const dataLine = event.split("\n").find(l => l.startsWith("data:"));
-            if (!dataLine) continue;
-            try {
-              const data = JSON.parse(dataLine.slice(5)) as Record<string, unknown>;
-              const usage = parseUsageFromData(data);
-              if (usage.inputTokens > inputTokens) inputTokens = usage.inputTokens;
-              if (usage.outputTokens > outputTokens) outputTokens = usage.outputTokens;
-            } catch { /* skip malformed */ }
+          // Accumulate complete lines; process full events on blank-line boundaries
+          for (const line of lines) {
+            if (line === "") {
+              if (eventBuf) {
+                drainEvents(eventBuf);
+                eventBuf = "";
+              }
+            } else {
+              eventBuf += (eventBuf ? "\n" : "") + line;
+            }
           }
         }
 
-        if (inputTokens === 0 && outputTokens === 0) return;
-        recordMetrics(inputTokens, outputTokens);
+        if (tokens.input === 0 && tokens.output === 0) return;
+        recordMetrics(tokens.input, tokens.output);
       } else {
         // Non-streaming JSON: streaming regex scan with bounded sliding window.
         // Only keeps ~4KB in memory -- no O(n^2) buffer accumulation.
@@ -112,13 +128,13 @@ function extractTokensAsync(
         let cacheReadTokens = 0;
         let cacheCreationTokens = 0;
         let outputTokens = 0;
-        let windowBuf = decoder.decode(first.value, { stream: true });
+        let windowBuf = textDecoder.decode(first.value, { stream: true });
         scanWindow(windowBuf);
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          windowBuf += decoder.decode(value, { stream: true });
+          windowBuf += textDecoder.decode(value, { stream: true });
           if (windowBuf.length > WINDOW_SIZE) {
             windowBuf = windowBuf.slice(-WINDOW_SIZE);
           }

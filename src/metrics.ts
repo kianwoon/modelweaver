@@ -3,6 +3,14 @@ import type { RequestMetrics, MetricsSummary } from "./types.js";
 
 type Subscriber = (metrics: RequestMetrics) => void;
 
+const WS_RECENT_REQUESTS_CAP = 50;
+
+interface ModelEntry {
+  actualModel?: string;
+  count: number;
+  lastSeen: number;
+}
+
 export class MetricsStore {
   private buffer: (RequestMetrics | null)[];
   private maxSize: number;
@@ -10,6 +18,13 @@ export class MetricsStore {
   private count = 0;
   private subscribers: Set<Subscriber>;
   private createdAt: number;
+
+  // Running counters — updated incrementally in recordRequest()
+  private _totalInputTokens = 0;
+  private _totalOutputTokens = 0;
+  private _totalTokensPerSec = 0;
+  private _modelMap = new Map<string, ModelEntry>();
+  private _providerMap = new Map<string, number>();
 
   constructor(maxSize: number = 1000) {
     this.buffer = new Array(maxSize).fill(null);
@@ -19,8 +34,48 @@ export class MetricsStore {
   }
 
   recordRequest(metrics: RequestMetrics): void {
-    // Ring buffer: overwrite oldest entry when full
     const index = this.head % this.maxSize;
+    const evicted = this.count >= this.maxSize ? this.buffer[index] : null;
+
+    // Decrement counters for evicted entry
+    if (evicted !== null) {
+      this._totalInputTokens -= evicted.inputTokens ?? 0;
+      this._totalOutputTokens -= evicted.outputTokens ?? 0;
+      this._totalTokensPerSec -= evicted.tokensPerSec ?? 0;
+
+      const mKey = evicted.model;
+      const mEntry = this._modelMap.get(mKey);
+      if (mEntry) {
+        mEntry.count--;
+        if (mEntry.count <= 0) this._modelMap.delete(mKey);
+      }
+
+      const pKey = evicted.targetProvider ?? evicted.provider;
+      const pCount = this._providerMap.get(pKey) ?? 0;
+      if (pCount <= 1) this._providerMap.delete(pKey);
+      else this._providerMap.set(pKey, pCount - 1);
+    }
+
+    // Increment counters for new entry
+    this._totalInputTokens += metrics.inputTokens ?? 0;
+    this._totalOutputTokens += metrics.outputTokens ?? 0;
+    this._totalTokensPerSec += metrics.tokensPerSec ?? 0;
+
+    const mKey = metrics.model;
+    const existing = this._modelMap.get(mKey);
+    if (existing) {
+      existing.count++;
+      if (metrics.timestamp > existing.lastSeen) existing.lastSeen = metrics.timestamp;
+      // Update actualModel to latest seen for the grouped model
+      existing.actualModel = metrics.actualModel;
+    } else {
+      this._modelMap.set(mKey, { actualModel: metrics.actualModel, count: 1, lastSeen: metrics.timestamp });
+    }
+
+    const pKey = metrics.targetProvider ?? metrics.provider;
+    this._providerMap.set(pKey, (this._providerMap.get(pKey) ?? 0) + 1);
+
+    // Ring buffer: overwrite oldest entry when full
     this.buffer[index] = metrics;
     this.head++;
     if (this.count < this.maxSize) this.count++;
@@ -38,47 +93,20 @@ export class MetricsStore {
   getSummary(): MetricsSummary {
     const requests = this.getRecentRequests();
 
-    // Single-pass aggregation: compute all metrics in one iteration
-    let totalInputTokens = 0;
-    let totalOutputTokens = 0;
-    let totalTokensPerSec = 0;
-    const modelMap = new Map<string, { actualModel?: string; count: number; lastSeen: number }>();
-    const providerMap = new Map<string, number>();
-
-    for (let i = 0; i < requests.length; i++) {
-      const r = requests[i];
-      totalInputTokens += r.inputTokens ?? 0;
-      totalOutputTokens += r.outputTokens ?? 0;
-      totalTokensPerSec += r.tokensPerSec ?? 0;
-
-      // Model grouping — group by requested model so fallbacks don't hide the original
-      const groupKey = r.model;
-      const existing = modelMap.get(groupKey);
-      if (existing) {
-        existing.count++;
-        if (r.timestamp > existing.lastSeen) existing.lastSeen = r.timestamp;
-      } else {
-        modelMap.set(groupKey, { actualModel: r.actualModel, count: 1, lastSeen: r.timestamp });
-      }
-
-      // Provider grouping — use target provider so fallbacks don't hide the original
-      const p = r.targetProvider ?? r.provider;
-      providerMap.set(p, (providerMap.get(p) ?? 0) + 1);
-    }
-
-    const activeModels = [...modelMap.entries()]
+    const activeModels = [...this._modelMap.entries()]
       .map(([model, { actualModel, count, lastSeen }]) => ({ model, actualModel, count, lastSeen }))
       .sort((a, b) => b.count - a.count);
 
-    const providerDistribution = [...providerMap.entries()]
+    const providerDistribution = [...this._providerMap.entries()]
       .map(([provider, count]) => ({ provider, count }))
       .sort((a, b) => b.count - a.count);
 
+    // getRecentRequests() already caps at WS_RECENT_REQUESTS_CAP
     return {
-      totalRequests: requests.length,
-      totalInputTokens,
-      totalOutputTokens,
-      avgTokensPerSec: requests.length > 0 ? Math.round((totalTokensPerSec / requests.length) * 10) / 10 : 0,
+      totalRequests: this.count,
+      totalInputTokens: this._totalInputTokens,
+      totalOutputTokens: this._totalOutputTokens,
+      avgTokensPerSec: this.count > 0 ? Math.round((this._totalTokensPerSec / this.count) * 10) / 10 : 0,
       activeModels,
       providerDistribution,
       recentRequests: requests,
@@ -96,22 +124,19 @@ export class MetricsStore {
   private getRecentRequests(): RequestMetrics[] {
     if (this.count === 0) return [];
 
-    // Extract in chronological order from the ring buffer, filtering out null slots
+    // Collect only the last WS_RECENT_REQUESTS_CAP entries in reverse (newest first)
+    const cap = Math.min(this.count, WS_RECENT_REQUESTS_CAP);
     const result: RequestMetrics[] = [];
-    if (this.count < this.maxSize) {
-      // Buffer not yet wrapped — items are in order from index 0
-      for (let i = 0; i < this.count; i++) {
-        const entry = this.buffer[i];
-        if (entry !== null) result.push(entry);
-      }
-    } else {
-      // Buffer has wrapped — oldest is at head % maxSize, read from there
-      const start = this.head % this.maxSize;
-      for (let i = 0; i < this.maxSize; i++) {
-        const entry = this.buffer[(start + i) % this.maxSize];
-        if (entry !== null) result.push(entry);
+    // Start from the most recently written slot and walk backward
+    for (let i = 0; i < cap; i++) {
+      const index = ((this.head - 1 - i) % this.maxSize + this.maxSize) % this.maxSize;
+      const entry = this.buffer[index];
+      if (entry !== null) {
+        result.push(entry);
       }
     }
+    // Reverse to get chronological order (oldest first, newest last)
+    result.reverse();
     return result;
   }
 }

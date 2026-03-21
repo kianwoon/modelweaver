@@ -2,6 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createMockProvider } from "./helpers/mock-provider.js";
 import { createApp } from "../src/server.js";
+import { clearRoutingCache } from "../src/router.js";
 import { MetricsStore } from "../src/metrics.js";
 import type { AppConfig } from "../src/types.js";
 
@@ -28,6 +29,7 @@ describe("server", () => {
   let mock: ReturnType<typeof createMockProvider>;
 
   beforeEach(async () => {
+    clearRoutingCache();
     mock = createMockProvider();
   });
 
