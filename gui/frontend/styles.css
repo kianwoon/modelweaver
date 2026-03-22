@@ -186,6 +186,7 @@ body {
   top: 0;
   bottom: 0;
   width: 0%;
+  min-width: 18px;
   transition: width 0.3s ease;
   background-image: repeating-linear-gradient(
     -45deg,
