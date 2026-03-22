@@ -1,8 +1,9 @@
 // src/monitor.ts — Monitor mode: spawns daemon child, auto-restarts on crash
 import { spawn } from "node:child_process";
+import { existsSync, unlinkSync } from "node:fs";
 import { dirname, join as pathJoin } from "node:path";
 import { fileURLToPath } from "node:url";
-import { writePidFile, removePidFile, removeWorkerPidFile } from "./daemon.js";
+import { writePidFile, removePidFile, removeWorkerPidFile, getPidPath } from "./daemon.js";
 
 export async function startMonitor(args: {
   config?: string;
@@ -10,6 +11,11 @@ export async function startMonitor(args: {
   verbose: boolean;
 }): Promise<void> {
   // Monitor writes its own PID to modelweaver.pid
+  // Clean up any stale PID file left by a previous run
+  const pidPath = getPidPath();
+  if (existsSync(pidPath)) {
+    unlinkSync(pidPath);
+  }
   await writePidFile(process.pid);
 
   const entryScript =
@@ -104,7 +110,10 @@ export async function startMonitor(args: {
   }
 
   // SIGTERM from `stop` → kill child, then exit cleanly
-  process.on("SIGTERM", async () => {
+  // Does NOT register a second `exit` listener on the child. Instead, relies on
+  // the existing child exit handler (registered in spawnDaemon) which already
+  // checks `shuttingDown` and performs cleanup + process.exit(0).
+  process.on("SIGTERM", () => {
     shuttingDown = true;
     if (restartTimer) {
       clearTimeout(restartTimer);
@@ -120,13 +129,20 @@ export async function startMonitor(args: {
       } catch {
         /* already dead */
       }
+      // Child exit handler will clean up pid files and call process.exit(0).
+      // Safety: if child doesn't exit within 5 s, force exit.
+      setTimeout(() => {
+        console.error("[monitor] Child did not exit within 5 s, forcing exit");
+        process.exit(0);
+      }, 5000);
+    } else {
+      // Child already dead — clean up and exit.
+      removePidFile().then(() => process.exit(0));
     }
-    await removePidFile();
-    await removeWorkerPidFile();
-    process.exit(0);
   });
 
-  process.on("SIGINT", async () => {
+  // SIGINT (Ctrl-C) — same pattern as SIGTERM.
+  process.on("SIGINT", () => {
     shuttingDown = true;
     if (restartTimer) {
       clearTimeout(restartTimer);
@@ -142,10 +158,16 @@ export async function startMonitor(args: {
       } catch {
         /* already dead */
       }
+      // Child exit handler will clean up pid files and call process.exit(0).
+      // Safety: if child doesn't exit within 5 s, force exit.
+      setTimeout(() => {
+        console.error("[monitor] Child did not exit within 5 s, forcing exit");
+        process.exit(0);
+      }, 5000);
+    } else {
+      // Child already dead — clean up and exit.
+      removePidFile().then(() => process.exit(0));
     }
-    await removePidFile();
-    await removeWorkerPidFile();
-    process.exit(0);
   });
 
   // SIGHUP from `reload` → gracefully kill current worker so monitor restarts it

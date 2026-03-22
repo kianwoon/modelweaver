@@ -1,5 +1,5 @@
 // src/daemon.ts — Daemon lifecycle management for background mode
-import { spawn, execFile } from "node:child_process";
+import { spawn, execFile, execFileSync } from "node:child_process";
 import { access, readFile, writeFile, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { dirname } from "node:path";
@@ -194,7 +194,15 @@ async function killProcessTree(pids: number[], timeoutMs: number = 5000): Promis
   }
   // Force kill anything still alive
   for (const pid of pids) {
-    try { process.kill(pid, isWindows() ? "SIGTERM" : "SIGKILL"); } catch { /* already dead */ }
+    if (isWindows()) {
+      try {
+        execFileSync("taskkill", ["/F", "/PID", String(pid), "/T"], { stdio: "ignore" });
+      } catch {
+        // taskkill may fail if process already exited
+      }
+    } else {
+      try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+    }
   }
   return true;
 }
@@ -355,7 +363,7 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
   if (pid === null) {
     // PID file missing — try to find the process by configured port
     const port = portOverride ?? await getConfigPort();
-    if (port !== null) {
+    if (port !== null && port > 0) {
       const portPids = await findPidsOnPort(port);
       const livePids = portPids.filter((p) => isProcessAlive(p));
       if (livePids.length > 0) {
@@ -405,12 +413,17 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
 
   // Force kill if still running
   try {
-    process.kill(pid, isWindows() ? "SIGTERM" : "SIGKILL");
+    if (isWindows()) {
+      execFileSync("taskkill", ["/F", "/PID", String(pid), "/T"], { stdio: "ignore" });
+    } else {
+      process.kill(pid, "SIGKILL");
+    }
   } catch {
     // Already dead
   }
 
   await removePidFile();
+  await removeWorkerPidFile();
   return { success: true, message: `ModelWeaver force-stopped (PID ${pid})` };
 }
 
@@ -450,7 +463,7 @@ export async function reloadDaemon(portOverride?: number): Promise<void> {
   if (pid === null) {
     // PID file missing — try to find the process by configured port
     const port = portOverride ?? await getConfigPort();
-    if (port !== null) {
+    if (port !== null && port > 0) {
       const portPids = await findPidsOnPort(port);
       const livePids = portPids.filter((p) => isProcessAlive(p));
       if (livePids.length > 0) {

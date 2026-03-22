@@ -29,6 +29,8 @@ function getPlistContent(): string {
     <string>${nodePath}</string>
     <string>start</string>
   </array>
+  <key>KeepAlive</key>
+  <true/>
   <key>RunAtLoad</key>
   <true/>
   <key>WorkingDirectory</key>
@@ -77,7 +79,7 @@ export function install(): void {
     console.log(`  Try manually: launchctl load ${PLIST_PATH}`);
   }
 
-  console.log(`  Auto-starts on login (RunAtLoad enabled)`);
+  console.log(`  Auto-starts on login and auto-restarts if stopped (KeepAlive + RunAtLoad enabled)`);
   console.log(`  Logs: ${LOG_DIR}/stdout.log and ${LOG_DIR}/stderr.log`);
 }
 

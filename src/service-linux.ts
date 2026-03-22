@@ -21,8 +21,8 @@ Description=modelweaver daemon
 [Service]
 ExecStart=${process.execPath} ${entryScript} --monitor
 WorkingDirectory=${workDir}
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=3
 
 [Install]
 WantedBy=default.target
@@ -54,7 +54,7 @@ export function install(): void {
     console.log(`  Try manually: systemctl --user daemon-reload && systemctl --user enable --now modelweaver.service`);
   }
 
-  console.log(`  Auto-starts on login (user-level systemd)`);
+  console.log(`  Auto-starts on login and auto-restarts if stopped (user-level systemd)`);
 }
 
 export function uninstall(): void {
