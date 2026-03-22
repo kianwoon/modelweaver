@@ -200,7 +200,6 @@ function createMetricsTransform(
       }
 
       if (isFinal) {
-        if (tokens.input === 0 && tokens.output === 0) return;
         recordMetrics(tokens.input, tokens.output);
       }
     } else {
@@ -228,7 +227,6 @@ function createMetricsTransform(
 
       if (isFinal) {
         const totalInput = inputTokens + cacheReadTokens + cacheCreationTokens;
-        if (totalInput === 0 && outputTokens === 0) return;
         recordMetrics(totalInput, outputTokens);
       }
     }
