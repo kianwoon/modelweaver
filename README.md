@@ -50,6 +50,16 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 - **Node.js** 20 or later — [Install Node.js](https://nodejs.org)
 - `npx` — included with Node.js (no separate install needed)
 
+## Installation
+
+ModelWeaver requires no permanent install — `npx` downloads and runs it on the fly. But if you prefer a global install:
+
+```bash
+npm install -g modelweaver
+```
+
+After that, replace `npx modelweaver` with `modelweaver` in all commands below.
+
 ## Quick Start
 
 ### 1. Run the setup wizard
