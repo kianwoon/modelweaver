@@ -10,6 +10,8 @@ import { promisify } from "node:util";
 
 const gzipAsync = promisify(gzip);
 import type { MetricsStore } from "./metrics.js";
+import { broadcastStreamEvent } from "./ws.js";
+import type { StreamEvent } from "./types.js";
 
 function anthropicError(type: string, message: string, requestId: string): Response {
   return new Response(
@@ -73,6 +75,10 @@ function createMetricsTransform(
   // Detection: resolved after the first chunk arrives
   let isSSE: boolean | null = null;
 
+  // Stream event throttling (~4 Hz)
+  const STREAM_THROTTLE_MS = 250;
+  let lastStreamEmit = 0;
+
   const drainEvents = (eventText: string) => {
     for (const event of eventText.split("\n\n")) {
       if (!event) continue;
@@ -132,6 +138,22 @@ function createMetricsTransform(
         timestamp: Date.now(),
         fallbackMode: ctx.fallbackMode,
       });
+
+      // Broadcast completion event
+      setImmediate(() => {
+        broadcastStreamEvent({
+          requestId: ctx.requestId,
+          model: ctx.model,
+          tier: ctx.tier,
+          state: "complete",
+          status,
+          latencyMs: Date.now() - ctx.startTime,
+          inputTokens: inp,
+          outputTokens: out,
+          tokensPerSec: Math.round(tps * 10) / 10,
+          timestamp: Date.now(),
+        });
+      });
     } catch {
       // Metrics recording errors must not affect the response stream
     }
@@ -161,6 +183,22 @@ function createMetricsTransform(
 
       if (isFinal && eventBuf.trim()) drainEvents(eventBuf);
 
+      // Emit streaming progress (throttled ~4 Hz)
+      const now = Date.now();
+      if (now - lastStreamEmit >= STREAM_THROTTLE_MS && tokens.output > 0) {
+        lastStreamEmit = now;
+        setImmediate(() => {
+          broadcastStreamEvent({
+            requestId: ctx.requestId,
+            model: ctx.model,
+            tier: ctx.tier,
+            state: "streaming",
+            outputTokens: tokens.output,
+            timestamp: now,
+          });
+        });
+      }
+
       if (isFinal) {
         if (tokens.input === 0 && tokens.output === 0) return;
         recordMetrics(tokens.input, tokens.output);
@@ -171,6 +209,22 @@ function createMetricsTransform(
         windowBuf = windowBuf.slice(-WINDOW_SIZE);
       }
       scanWindow(windowBuf);
+
+      // Emit streaming progress (throttled ~4 Hz)
+      const nowJson = Date.now();
+      if (nowJson - lastStreamEmit >= STREAM_THROTTLE_MS && outputTokens > 0) {
+        lastStreamEmit = nowJson;
+        setImmediate(() => {
+          broadcastStreamEvent({
+            requestId: ctx.requestId,
+            model: ctx.model,
+            tier: ctx.tier,
+            state: "streaming",
+            outputTokens,
+            timestamp: nowJson,
+          });
+        });
+      }
 
       if (isFinal) {
         const totalInput = inputTokens + cacheReadTokens + cacheCreationTokens;
@@ -271,6 +325,16 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       providers: ctx.providerChain.map((e) => e.provider),
     });
 
+    // Broadcast stream start event
+    broadcastStreamEvent({
+      requestId,
+      model,
+      tier: ctx.tier,
+      state: "start",
+      provider: ctx.providerChain[0]?.provider ?? "unknown",
+      timestamp: Date.now(),
+    });
+
     // Forward with fallback chain
     let successfulProvider = "unknown";
     const response = await forwardWithFallback(
@@ -286,6 +350,21 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       },
       logger
     );
+
+    // Broadcast error event for non-2xx responses
+    if (response.status >= 400) {
+      setImmediate(() => {
+        broadcastStreamEvent({
+          requestId,
+          model,
+          tier: ctx.tier,
+          state: "error",
+          status: response.status,
+          message: `HTTP ${response.status}`,
+          timestamp: Date.now(),
+        });
+      });
+    }
 
     // Extract tokens via inline TransformStream for successful responses
     let responseBody: ReadableStream<Uint8Array> | null = response.body;
