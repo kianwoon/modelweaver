@@ -430,9 +430,7 @@ function removeActivityBar(requestId) {
   if (!entry) return;
   const bar = entry.element;
 
-  bar.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
-  bar.style.opacity = '0';
-  bar.style.transform = 'translateX(20px)';
+  bar.classList.add('dismissing');
   setTimeout(() => {
     bar.remove();
     activeRequests.delete(requestId);

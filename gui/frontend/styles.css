@@ -195,7 +195,9 @@ body {
     rgba(255, 255, 255, 0.15) 16px
   );
   background-size: 200% 100%;
+  -webkit-animation: activity-stripes 0.6s linear infinite;
   animation: activity-stripes 0.6s linear infinite;
+  will-change: background-position;
 }
 
 .activity-fill.state-streaming {
@@ -206,16 +208,19 @@ body {
 .activity-fill.state-fallback {
   background-color: var(--yellow);
   box-shadow: 0 0 8px rgba(255, 193, 7, 0.4);
+  -webkit-animation-duration: 0.4s;
   animation-duration: 0.4s;
 }
 
 .activity-fill.state-error {
   background-color: var(--accent);
   box-shadow: 0 0 8px rgba(233, 69, 96, 0.5);
+  -webkit-animation: none;
   animation: none;
 }
 
 .activity-fill.state-complete {
+  -webkit-animation: none;
   animation: none;
   background-color: var(--green);
   transition: width 0.15s ease, opacity 0.5s ease 0.5s;
@@ -225,6 +230,12 @@ body {
 .activity-fill.state-start {
   background-color: var(--blue);
   box-shadow: 0 0 8px rgba(33, 150, 243, 0.4);
+}
+
+.activity-track.dismissing {
+  opacity: 0;
+  transform: translateX(20px);
+  transition: opacity 0.5s ease, transform 0.5s ease;
 }
 
 .activity-label {
@@ -241,9 +252,25 @@ body {
   justify-content: space-between;
 }
 
+@-webkit-keyframes activity-stripes {
+  0% { background-position: 0 0; }
+  100% { background-position: 22.63px 0; }
+}
+
 @keyframes activity-stripes {
   0% { background-position: 0 0; }
   100% { background-position: 22.63px 0; }
+}
+
+@-webkit-keyframes activity-enter {
+  from {
+    opacity: 0;
+    -webkit-transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    -webkit-transform: translateY(0);
+  }
 }
 
 @keyframes activity-enter {

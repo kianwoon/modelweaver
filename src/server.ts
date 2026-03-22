@@ -240,6 +240,10 @@ function createMetricsTransform(
     flush() {
       processChunk("", true);
     },
+    cancel() {
+      // Stream was cancelled (client disconnected) — emit metrics with what we have
+      processChunk("", true);
+    },
   });
 }
 
