@@ -45,6 +45,11 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 - **Health endpoint** — `/api/status` returns circuit breaker state and uptime
 - **Desktop GUI** — native app with one-command launch (`modelweaver gui`), auto-downloads from GitHub Releases
 
+## Prerequisites
+
+- **Node.js** 20 or later — [Install Node.js](https://nodejs.org)
+- `npx` — included with Node.js (no separate install needed)
+
 ## Quick Start
 
 ### 1. Run the setup wizard
