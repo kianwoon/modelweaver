@@ -1,6 +1,9 @@
 // src/proxy.ts
 import type { ProviderConfig, RoutingEntry, RequestContext } from "./types.js";
 import { request as undiciRequest } from "undici";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 
 /** Headers forwarded as-is to upstream */
 const FORWARD_HEADERS = new Set([
@@ -25,6 +28,42 @@ const textEncoder = new TextEncoder();
 
 export function isRetriable(status: number): boolean {
   return status === 429 || status >= 500;
+}
+
+const CONTEXT_WINDOW_PATTERNS = [
+  'context window', 'context_limit', 'token limit',
+  'prompt is too long', 'max tokens', 'input too large', 'too many tokens',
+];
+
+function isContextWindowError(status: number, body: string): boolean {
+  if (status !== 400) return false;
+  const lower = body.toLowerCase();
+  return CONTEXT_WINDOW_PATTERNS.some(p => lower.includes(p));
+}
+
+function handleContextWindowError(status: number, body: string): Response | null {
+  if (!isContextWindowError(status, body)) return null;
+
+  console.warn('[context-compact] Upstream context window limit detected');
+  try {
+    const flagDir = path.join(os.homedir(), '.claude', 'state');
+    fs.mkdirSync(flagDir, { recursive: true });
+    fs.writeFileSync(path.join(flagDir, 'context-compact-needed'), Date.now().toString());
+  } catch {
+    // Best-effort flag write
+  }
+
+  const enhanced = JSON.stringify({
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: "Context window limit reached. Run /compact to reduce conversation size, then retry.",
+    },
+  });
+  return new Response(enhanced, {
+    status: 400,
+    headers: { "content-type": "application/json" },
+  });
 }
 
 export function buildOutboundUrl(baseUrl: string, incomingPath: string): string {
@@ -535,9 +574,24 @@ async function raceProviders(
         return winner.response;
       }
 
-      // Non-retriable error — propagate immediately
+      // Non-retriable error — check for context window limit before propagating
       if (!isRetriable(winner.response.status)) {
         sharedController.abort();
+        if (winner.response.status === 400 && winner.response.body) {
+          try {
+            const errBody = await winner.response.text();
+            const handled = handleContextWindowError(winner.response.status, errBody);
+            if (handled) return handled;
+            // Not a context error — re-create response with buffered body
+            return new Response(errBody, {
+              status: winner.response.status,
+              statusText: winner.response.statusText,
+              headers: winner.response.headers,
+            });
+          } catch {
+            return winner.response;
+          }
+        }
         return winner.response;
       }
 
@@ -627,8 +681,23 @@ export async function forwardWithFallback(
       return response;
     }
 
-    // Non-retriable error — fail immediately
+    // Non-retriable error — check for context window limit before passing through
     if (!isRetriable(response.status)) {
+      if (response.status === 400 && response.body) {
+        try {
+          const errBody = await response.text();
+          const handled = handleContextWindowError(response.status, errBody);
+          if (handled) return handled;
+          // Not a context error — re-create response with buffered body
+          return new Response(errBody, {
+            status: response.status,
+            statusText: response.statusText,
+            headers: response.headers,
+          });
+        } catch {
+          return response;
+        }
+      }
       return response;
     }
 
