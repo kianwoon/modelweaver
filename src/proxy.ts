@@ -272,9 +272,8 @@ export async function forwardRequest(
     ctx.actualModel = entry.model;
   }
 
-  // Use cached URL components when available (avoids per-request URL parsing)
-  const cachedBaseUrl = provider._cachedBaseUrl;
-  const url = buildOutboundUrl(cachedBaseUrl ?? provider.baseUrl, outgoingPath);
+  // Build outbound URL from provider base URL and request path
+  const url = buildOutboundUrl(provider.baseUrl, outgoingPath);
 
   // Prepare body — prefer raw passthrough to preserve upstream prompt caching.
   // Only parse and re-serialize when a modification is actually required,
