@@ -76,3 +76,22 @@ export interface MetricsSummary {
   providerDistribution: { provider: string; count: number }[];
   recentRequests: RequestMetrics[];
 }
+
+export type StreamState = "start" | "streaming" | "fallback" | "complete" | "error";
+
+export interface StreamEvent {
+  requestId: string;
+  model: string;
+  tier: string;
+  state: StreamState;
+  timestamp: number;
+  provider?: string;
+  outputTokens?: number;
+  from?: string;
+  to?: string;
+  status?: number;
+  latencyMs?: number;
+  inputTokens?: number;
+  tokensPerSec?: number;
+  message?: string;
+}

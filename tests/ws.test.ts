@@ -2,9 +2,9 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { createServer, type Server } from "node:http";
 import { WebSocket } from "ws";
-import { attachWebSocket } from "../src/ws.js";
+import { attachWebSocket, broadcastStreamEvent } from "../src/ws.js";
 import { MetricsStore } from "../src/metrics.js";
-import type { RequestMetrics } from "../src/types.js";
+import type { RequestMetrics, StreamEvent } from "../src/types.js";
 
 function createHttpServer(): Promise<Server> {
   return new Promise((resolve) => {
@@ -389,6 +389,79 @@ describe("attachWebSocket", () => {
       expect(parsed.type).toBe("request");
       expect(parsed.data).toEqual(metric);
       ws.close();
+    });
+  });
+
+  describe("broadcastStreamEvent", () => {
+    let server: Server;
+    let store: MetricsStore;
+
+    beforeEach(async () => {
+      server = await createHttpServer();
+      store = new MetricsStore(100);
+    });
+
+    afterEach(async () => {
+      await closeServer(server);
+    }, 5000);
+
+    it("broadcasts stream events to all connected clients", async () => {
+      attachWebSocket(server, store);
+      const [ws1] = await connectAndReceive(server);
+      const [ws2] = await connectAndReceive(server);
+
+      const event: StreamEvent = {
+        requestId: "stream-1",
+        model: "claude-sonnet-4",
+        tier: "sonnet",
+        state: "start",
+        provider: "anthropic",
+        timestamp: Date.now(),
+      };
+      broadcastStreamEvent(event);
+
+      const [msg1, msg2] = await Promise.all([
+        waitForMessage(ws1),
+        waitForMessage(ws2),
+      ]);
+
+      expect(JSON.parse(msg1).type).toBe("stream");
+      expect(JSON.parse(msg1).data.requestId).toBe("stream-1");
+      expect(JSON.parse(msg1).data.state).toBe("start");
+      expect(JSON.parse(msg2).type).toBe("stream");
+      expect(JSON.parse(msg2).data.requestId).toBe("stream-1");
+
+      ws1.close();
+      ws2.close();
+    });
+
+    it("does not throw when no WebSocket server is attached", () => {
+      expect(() => broadcastStreamEvent({
+        requestId: "no-op",
+        model: "test",
+        tier: "test",
+        state: "start",
+        timestamp: Date.now(),
+      })).not.toThrow();
+    });
+
+    it("skips closed clients when broadcasting", async () => {
+      attachWebSocket(server, store);
+      const [ws1] = await connectAndReceive(server);
+      const [ws2] = await connectAndReceive(server);
+
+      ws2.close();
+      await new Promise((r) => setTimeout(r, 50));
+
+      expect(() => broadcastStreamEvent({
+        requestId: "skip-closed",
+        model: "test",
+        tier: "test",
+        state: "start",
+        timestamp: Date.now(),
+      })).not.toThrow();
+
+      ws1.close();
     });
   });
 });

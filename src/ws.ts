@@ -2,7 +2,7 @@
 import { WebSocketServer } from "ws";
 import type { Server } from "node:http";
 import type { MetricsStore } from "./metrics.js";
-import type { RequestMetrics, MetricsSummary } from "./types.js";
+import type { RequestMetrics, MetricsSummary, StreamEvent } from "./types.js";
 
 interface WsMessage {
   type: "request" | "summary";
@@ -14,8 +14,11 @@ const MAX_MISSED_PONGS = 2;
 const BACKPRESSURE_THRESHOLD = 64 * 1024; // 64KB
 const SUMMARY_DEBOUNCE_MS = 500;
 
+let wssInstance: InstanceType<typeof import("ws").WebSocketServer> | null = null;
+
 export function attachWebSocket(server: Server, metricsStore: MetricsStore): void {
   const wss = new WebSocketServer({ server, path: "/ws" });
+  wssInstance = wss;
 
   wss.on("connection", (ws) => {
     // Send current summary as initial state
@@ -90,4 +93,18 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
     ws.on("close", cleanup);
     ws.on("error", cleanup);
   });
+}
+
+export function broadcastStreamEvent(data: StreamEvent): void {
+  if (!wssInstance) return;
+  const msg = JSON.stringify({ type: "stream", data });
+  for (const client of wssInstance.clients) {
+    if (client.readyState === client.OPEN) {
+      setImmediate(() => {
+        if (client.readyState === client.OPEN) {
+          client.send(msg);
+        }
+      });
+    }
+  }
 }
