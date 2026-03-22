@@ -21,6 +21,11 @@ const modelsEl = document.getElementById('models');
 const providersEl = document.getElementById('providers');
 const recentEl = document.getElementById('recent');
 
+// Activity bar state
+const activityContent = document.getElementById('activity-content');
+const activeRequests = new Map();
+const MAX_VISIBLE_BARS = 3;
+
 // Title bar buttons
 document.getElementById('btn-close').addEventListener('click', () => {
   if (window.__TAURI__) {
@@ -383,6 +388,118 @@ function appendRequestMetric(r) {
   }
 }
 
+// --- Activity progress bar helpers ---
+
+function createActivityBar(requestId, model, tier) {
+  const track = document.createElement('div');
+  track.className = 'activity-track';
+
+  const fill = document.createElement('div');
+  fill.className = 'activity-fill state-start';
+  track.appendChild(fill);
+
+  const label = document.createElement('span');
+  label.className = 'activity-label';
+  const modelName = document.createElement('span');
+  modelName.textContent = shortModel(model);
+  const statusSpan = document.createElement('span');
+  statusSpan.textContent = '';
+  label.appendChild(modelName);
+  label.appendChild(statusSpan);
+  track.appendChild(label);
+
+  // Hide idle text
+  const idle = activityContent.querySelector('.activity-idle');
+  if (idle) idle.style.display = 'none';
+
+  activityContent.appendChild(track);
+  trimBars();
+
+  return { element: track, fill, label, statusSpan, startTime: Date.now(), lastOutputTokens: 0, model, tier };
+}
+
+function trimBars() {
+  const bars = activityContent.querySelectorAll('.activity-track');
+  while (bars.length > MAX_VISIBLE_BARS) {
+    bars[0].remove();
+  }
+}
+
+function removeActivityBar(requestId) {
+  const entry = activeRequests.get(requestId);
+  if (!entry) return;
+  const bar = entry.element;
+
+  bar.style.transition = 'opacity 0.5s ease, transform 0.5s ease';
+  bar.style.opacity = '0';
+  bar.style.transform = 'translateX(20px)';
+  setTimeout(() => {
+    bar.remove();
+    activeRequests.delete(requestId);
+    if (activeRequests.size === 0) {
+      let idle = activityContent.querySelector('.activity-idle');
+      if (!idle) {
+        idle = document.createElement('span');
+        idle.className = 'activity-idle';
+        idle.textContent = 'Idle';
+        activityContent.appendChild(idle);
+      }
+      idle.style.display = '';
+    }
+  }, 500);
+}
+
+function handleStreamEvent(data) {
+  if (data.state === 'start') {
+    const bar = createActivityBar(data.requestId, data.model, data.tier);
+    activeRequests.set(data.requestId, bar);
+    setTimeout(() => {
+      if (bar.fill) {
+        bar.fill.classList.remove('state-start');
+        bar.fill.classList.add('state-streaming');
+      }
+    }, 300);
+
+  } else if (data.state === 'streaming') {
+    const entry = activeRequests.get(data.requestId);
+    if (!entry) return;
+    const elapsed = (Date.now() - entry.startTime) / 1000;
+    const pct = Math.min(80, elapsed * 5);
+    entry.fill.style.width = pct + '%';
+    entry.lastOutputTokens = data.outputTokens || 0;
+    entry.statusSpan.textContent = data.outputTokens + ' tok';
+
+  } else if (data.state === 'fallback') {
+    const entry = activeRequests.get(data.requestId);
+    if (!entry) return;
+    entry.fill.classList.remove('state-streaming');
+    entry.fill.classList.add('state-fallback');
+    entry.statusSpan.textContent = 'fallback \u2192 ' + (data.to || '?');
+
+  } else if (data.state === 'complete') {
+    const entry = activeRequests.get(data.requestId);
+    if (!entry) return;
+    entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
+    entry.fill.classList.add('state-complete');
+    entry.fill.style.width = '100%';
+    const tps = data.tokensPerSec ? data.tokensPerSec.toFixed(0) + ' tok/s' : '';
+    const latency = data.latencyMs >= 1000 ? (data.latencyMs / 1000).toFixed(1) + 's' : data.latencyMs + 'ms';
+    entry.statusSpan.textContent = (data.outputTokens || 0) + ' tok \u00b7 ' + tps + ' \u00b7 ' + latency;
+    setTimeout(() => removeActivityBar(data.requestId), 1200);
+
+  } else if (data.state === 'error') {
+    const entry = activeRequests.get(data.requestId);
+    if (!entry) return;
+    entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
+    entry.fill.classList.add('state-error');
+    if (!entry.fill.style.width || entry.fill.style.width === '0%') {
+      entry.fill.style.width = '10%';
+    }
+    entry.statusSpan.textContent = 'error ' + (data.status || '');
+    setTimeout(() => removeActivityBar(data.requestId), 1500);
+  }
+}
+
 function connectWebSocket(port) {
   if (ws && ws.readyState === WebSocket.OPEN) return;
   // Close stale sockets stuck in CONNECTING or CLOSING state
@@ -428,6 +545,8 @@ function connectWebSocket(port) {
         updateSummary(msg.data);
       } else if (msg.type === 'request') {
         appendRequestMetric(msg.data);
+      } else if (msg.type === 'stream') {
+        handleStreamEvent(msg.data);
       }
     } catch (err) {
       console.error('[WebSocket] parse error:', err);
