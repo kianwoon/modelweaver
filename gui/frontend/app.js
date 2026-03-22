@@ -429,22 +429,18 @@ function removeActivityBar(requestId) {
   const entry = activeRequests.get(requestId);
   if (!entry) return;
   const bar = entry.element;
-
-  bar.classList.add('dismissing');
-  setTimeout(() => {
-    bar.remove();
-    activeRequests.delete(requestId);
-    if (activeRequests.size === 0) {
-      let idle = activityContent.querySelector('.activity-idle');
-      if (!idle) {
-        idle = document.createElement('span');
-        idle.className = 'activity-idle';
-        idle.textContent = 'Idle';
-        activityContent.appendChild(idle);
-      }
-      idle.style.display = '';
+  bar.remove();
+  activeRequests.delete(requestId);
+  if (activeRequests.size === 0) {
+    let idle = activityContent.querySelector('.activity-idle');
+    if (!idle) {
+      idle = document.createElement('span');
+      idle.className = 'activity-idle';
+      idle.textContent = 'Idle';
+      activityContent.appendChild(idle);
     }
-  }, 500);
+    idle.style.display = '';
+  }
 }
 
 function handleStreamEvent(data) {
@@ -483,7 +479,9 @@ function handleStreamEvent(data) {
     const tps = data.tokensPerSec ? data.tokensPerSec.toFixed(0) + ' tok/s' : '';
     const latency = data.latencyMs >= 1000 ? (data.latencyMs / 1000).toFixed(1) + 's' : data.latencyMs + 'ms';
     entry.statusSpan.textContent = (data.outputTokens || 0) + ' tok \u00b7 ' + tps + ' \u00b7 ' + latency;
-    setTimeout(() => removeActivityBar(data.requestId), 1200);
+    // Dismiss track immediately so it fades together with the fill
+    entry.element.classList.add('dismissing');
+    setTimeout(() => removeActivityBar(data.requestId), 800);
 
   } else if (data.state === 'error') {
     const entry = activeRequests.get(data.requestId);
@@ -494,7 +492,9 @@ function handleStreamEvent(data) {
       entry.fill.style.width = '10%';
     }
     entry.statusSpan.textContent = 'error ' + (data.status || '');
-    setTimeout(() => removeActivityBar(data.requestId), 1500);
+    // Dismiss track immediately so it fades together with the fill
+    entry.element.classList.add('dismissing');
+    setTimeout(() => removeActivityBar(data.requestId), 800);
   }
 }
 
