@@ -3,16 +3,13 @@ import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
 import { forwardWithFallback } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
-import type { AppConfig, RequestContext } from "./types.js";
+import type { AppConfig, ProviderConfig, RequestContext } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { gzip } from "node:zlib";
 import { promisify } from "node:util";
 
 const gzipAsync = promisify(gzip);
 import type { MetricsStore } from "./metrics.js";
-
-/** Module-level TextDecoder singleton -- avoids per-request allocation */
-const textDecoder = new TextDecoder();
 
 function anthropicError(type: string, message: string, requestId: string): Response {
   return new Response(
@@ -45,164 +42,165 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
 }
 
 /**
- * Asynchronously read a response stream and extract token counts for metrics.
- * Uses a streaming line-by-line SSE parser — does NOT buffer the entire response.
+ * Creates a TransformStream that forwards chunks unchanged while extracting
+ * token counts for metrics inline (no tee() or separate reader needed).
  * For SSE responses, extracts token counts from usage events incrementally.
- * For non-streaming JSON responses, accumulates a small buffer to parse at the end.
+ * For non-streaming JSON responses, uses a bounded sliding-window regex scan.
  */
-function extractTokensAsync(
-  body: ReadableStream<Uint8Array>,
+function createMetricsTransform(
   ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race" },
   provider: string,
   targetProvider: string,
   metricsStore: MetricsStore,
   status: number,
   contentType: string,
-): void {
-  const reader = body.getReader();
+): TransformStream<Uint8Array, Uint8Array> {
+  const td = new TextDecoder();
 
-  (async () => {
+  // --- SSE state ---
+  const tokens = { input: 0, output: 0 };
+  let lineBuf = "";
+  let eventBuf = "";
+
+  // --- JSON state ---
+  const WINDOW_SIZE = 4096;
+  let inputTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheCreationTokens = 0;
+  let outputTokens = 0;
+  let windowBuf = "";
+
+  // Detection: resolved after the first chunk arrives
+  let isSSE: boolean | null = null;
+
+  const drainEvents = (eventText: string) => {
+    for (const event of eventText.split("\n\n")) {
+      if (!event) continue;
+      const dataLine = event.split("\n").find(l => l.startsWith("data:"));
+      if (!dataLine || !dataLine.includes('"usage"')) continue;
+      try {
+        const data = JSON.parse(dataLine.slice(5)) as Record<string, unknown>;
+        const usage = parseUsageFromData(data);
+        if (usage.inputTokens > tokens.input) tokens.input = usage.inputTokens;
+        if (usage.outputTokens > tokens.output) tokens.output = usage.outputTokens;
+      } catch { /* skip malformed */ }
+    }
+  };
+
+  const scanWindow = (text: string) => {
+    const inputMatches = [...text.matchAll(/"(?:input_tokens|prompt_tokens)"\s*:\s*(\d+)/g)];
+    const cacheReadMatches = [...text.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g)];
+    const cacheCreationMatches = [...text.matchAll(/"cache_creation_input_tokens"\s*:\s*(\d+)/g)];
+    const outputMatches = [...text.matchAll(/"(?:output_tokens|completion_tokens)"\s*:\s*(\d+)/g)];
+
+    if (inputMatches.length > 0) {
+      const val = parseInt(inputMatches[inputMatches.length - 1][1], 10);
+      if (val > inputTokens) inputTokens = val;
+    }
+    if (cacheReadMatches.length > 0) {
+      const val = parseInt(cacheReadMatches[cacheReadMatches.length - 1][1], 10);
+      if (val > cacheReadTokens) cacheReadTokens = val;
+    }
+    if (cacheCreationMatches.length > 0) {
+      const val = parseInt(cacheCreationMatches[cacheCreationMatches.length - 1][1], 10);
+      if (val > cacheCreationTokens) cacheCreationTokens = val;
+    }
+    if (outputMatches.length > 0) {
+      const val = parseInt(outputMatches[outputMatches.length - 1][1], 10);
+      if (val > outputTokens) outputTokens = val;
+    }
+  };
+
+  const recordMetrics = (inp: number, out: number) => {
     try {
-      // Detect SSE vs JSON by checking the first chunk
-      const first = await reader.read();
-      if (first.done) return;
+      const latencyMs = Date.now() - ctx.startTime;
+      const latencySec = latencyMs / 1000;
+      const tps = latencySec > 0 ? out / latencySec : 0;
 
-      const isSSE = contentType.includes("text/event-stream")
-        || textDecoder.decode(first.value, { stream: true }).startsWith("event:");
+      metricsStore.recordRequest({
+        requestId: ctx.requestId,
+        model: ctx.model,
+        actualModel: ctx.actualModel || ctx.model,
+        tier: ctx.tier,
+        provider,
+        targetProvider,
+        status,
+        inputTokens: inp,
+        outputTokens: out,
+        latencyMs,
+        tokensPerSec: Math.round(tps * 10) / 10,
+        timestamp: Date.now(),
+        fallbackMode: ctx.fallbackMode,
+      });
+    } catch {
+      // Metrics recording errors must not affect the response stream
+    }
+  };
 
-      if (isSSE) {
-        // Streaming SSE: parse line-by-line, only track usage fields.
-        // ~95% of SSE events lack usage data; the includes('"usage"') check
-        // avoids JSON.parse for those events.
-        const tokens = { input: 0, output: 0 };
+  const processChunk = (decoded: string, isFinal: boolean) => {
+    if (isSSE === null) {
+      // First chunk — detect format
+      isSSE = contentType.includes("text/event-stream") || decoded.startsWith("event:");
+    }
 
-        // Shared helper to extract tokens from accumulated event text
-        const drainEvents = (eventText: string) => {
-          for (const event of eventText.split("\n\n")) {
-            if (!event) continue;
-            const dataLine = event.split("\n").find(l => l.startsWith("data:"));
-            if (!dataLine || !dataLine.includes('"usage"')) continue;
-            try {
-              const data = JSON.parse(dataLine.slice(5)) as Record<string, unknown>;
-              const usage = parseUsageFromData(data);
-              if (usage.inputTokens > tokens.input) tokens.input = usage.inputTokens;
-              if (usage.outputTokens > tokens.output) tokens.output = usage.outputTokens;
-            } catch { /* skip malformed */ }
+    if (isSSE) {
+      lineBuf += decoded;
+      const lines = lineBuf.split("\n");
+      lineBuf = lines.pop()!;
+
+      for (const line of lines) {
+        if (line === "") {
+          if (eventBuf) {
+            drainEvents(eventBuf);
+            eventBuf = "";
           }
-        };
-
-        // Prepend first chunk to the line buffer
-        let lineBuf = textDecoder.decode(first.value, { stream: true });
-        let eventBuf = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            if (eventBuf.trim()) drainEvents(eventBuf);
-            break;
-          }
-          lineBuf += textDecoder.decode(value, { stream: true });
-          const lines = lineBuf.split("\n");
-          lineBuf = lines.pop()!;
-
-          // Accumulate complete lines; process full events on blank-line boundaries
-          for (const line of lines) {
-            if (line === "") {
-              if (eventBuf) {
-                drainEvents(eventBuf);
-                eventBuf = "";
-              }
-            } else {
-              eventBuf += (eventBuf ? "\n" : "") + line;
-            }
-          }
+        } else {
+          eventBuf += (eventBuf ? "\n" : "") + line;
         }
+      }
 
+      if (isFinal && eventBuf.trim()) drainEvents(eventBuf);
+
+      if (isFinal) {
         if (tokens.input === 0 && tokens.output === 0) return;
         recordMetrics(tokens.input, tokens.output);
-      } else {
-        // Non-streaming JSON: streaming regex scan with bounded sliding window.
-        // Only keeps ~4KB in memory -- no O(n^2) buffer accumulation.
-        const WINDOW_SIZE = 4096;
-        let inputTokens = 0;
-        let cacheReadTokens = 0;
-        let cacheCreationTokens = 0;
-        let outputTokens = 0;
-        let windowBuf = textDecoder.decode(first.value, { stream: true });
-        scanWindow(windowBuf);
+      }
+    } else {
+      windowBuf += decoded;
+      if (windowBuf.length > WINDOW_SIZE) {
+        windowBuf = windowBuf.slice(-WINDOW_SIZE);
+      }
+      scanWindow(windowBuf);
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          windowBuf += textDecoder.decode(value, { stream: true });
-          if (windowBuf.length > WINDOW_SIZE) {
-            windowBuf = windowBuf.slice(-WINDOW_SIZE);
-          }
-          scanWindow(windowBuf);
-        }
-        // Final scan to catch any pattern at the tail end
-        scanWindow(windowBuf);
-
-        function scanWindow(text: string): void {
-          const inputMatches = [...text.matchAll(/"(?:input_tokens|prompt_tokens)"\s*:\s*(\d+)/g)];
-          const cacheReadMatches = [...text.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g)];
-          const cacheCreationMatches = [...text.matchAll(/"cache_creation_input_tokens"\s*:\s*(\d+)/g)];
-          const outputMatches = [...text.matchAll(/"(?:output_tokens|completion_tokens)"\s*:\s*(\d+)/g)];
-
-          if (inputMatches.length > 0) {
-            const val = parseInt(inputMatches[inputMatches.length - 1][1], 10);
-            if (val > inputTokens) inputTokens = val;
-          }
-          if (cacheReadMatches.length > 0) {
-            const val = parseInt(cacheReadMatches[cacheReadMatches.length - 1][1], 10);
-            if (val > cacheReadTokens) cacheReadTokens = val;
-          }
-          if (cacheCreationMatches.length > 0) {
-            const val = parseInt(cacheCreationMatches[cacheCreationMatches.length - 1][1], 10);
-            if (val > cacheCreationTokens) cacheCreationTokens = val;
-          }
-          if (outputMatches.length > 0) {
-            const val = parseInt(outputMatches[outputMatches.length - 1][1], 10);
-            if (val > outputTokens) outputTokens = val;
-          }
-        }
-
+      if (isFinal) {
         const totalInput = inputTokens + cacheReadTokens + cacheCreationTokens;
         if (totalInput === 0 && outputTokens === 0) return;
         recordMetrics(totalInput, outputTokens);
       }
-
-      function recordMetrics(inputTokens: number, outputTokens: number): void {
-        const latencyMs = Date.now() - ctx.startTime;
-        const latencySec = latencyMs / 1000;
-        const tokensPerSec = latencySec > 0 ? outputTokens / latencySec : 0;
-
-        metricsStore.recordRequest({
-          requestId: ctx.requestId,
-          model: ctx.model,
-          actualModel: ctx.actualModel || ctx.model,
-          tier: ctx.tier,
-          provider,
-          targetProvider,
-          status,
-          inputTokens,
-          outputTokens,
-          latencyMs,
-          tokensPerSec: Math.round(tokensPerSec * 10) / 10,
-          timestamp: Date.now(),
-          fallbackMode: ctx.fallbackMode,
-        });
-      }
-    } catch {
-      // Metrics extraction errors must not affect the response stream
     }
-  })();
+  };
+
+  return new TransformStream({
+    transform(chunk, controller) {
+      controller.enqueue(chunk);
+      processChunk(td.decode(chunk, { stream: true }), false);
+    },
+    flush() {
+      processChunk("", true);
+    },
+  });
 }
 
 export interface AppHandle {
   app: Hono;
   getConfig: () => AppConfig;
   setConfig: (config: AppConfig) => void;
+}
+
+function agentKey(provider: ProviderConfig): string {
+  const origin = provider._cachedOrigin;
+  const size = provider.poolSize ?? 10;
+  return `${origin ?? "unknown"}:${size}`;
 }
 
 export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStore?: MetricsStore): AppHandle {
@@ -289,13 +287,12 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       logger
     );
 
-    // Extract tokens via tee() for successful responses
-    let responseBody = response.body;
+    // Extract tokens via inline TransformStream for successful responses
+    let responseBody: ReadableStream<Uint8Array> | null = response.body;
     if (response.body && response.status >= 200 && response.status < 300 && metricsStore) {
-      const [clientBody, metricsBody] = response.body.tee();
       const targetProvider = ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider;
-      extractTokensAsync(metricsBody, ctx, successfulProvider, targetProvider, metricsStore, response.status, response.headers.get("content-type") || "");
-      responseBody = clientBody;
+      const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, metricsStore, response.status, response.headers.get("content-type") || "");
+      responseBody = response.body.pipeThrough(transform) as typeof responseBody;
     }
 
     // Add request ID to response (responses from fetch have immutable headers, so create new)
@@ -363,12 +360,34 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     app,
     getConfig: () => config,
     setConfig: (newConfig: AppConfig) => {
-      // Close old connection pool agents to prevent leaks
+      // Build key → agent map from old config for reuse lookup
+      const oldAgents = new Map<string, import("undici").Agent>();
       for (const provider of config.providers.values()) {
         if (provider._agent) {
-          provider._agent.close();
+          oldAgents.set(agentKey(provider), provider._agent);
         }
       }
+
+      // For each new provider, check if we can reuse an existing agent
+      const reusedKeys = new Set<string>();
+      for (const provider of newConfig.providers.values()) {
+        const key = agentKey(provider);
+        const existingAgent = oldAgents.get(key);
+        if (existingAgent) {
+          // Reuse: the origin and poolSize haven't changed
+          provider._agent = existingAgent;
+          reusedKeys.add(key);
+        }
+        // else: loadConfig() already created a fresh agent for this provider
+      }
+
+      // Close agents that are no longer needed (removed or changed origin/poolSize)
+      for (const [key, agent] of oldAgents) {
+        if (!reusedKeys.has(key)) {
+          agent.close();
+        }
+      }
+
       config = newConfig;
       clearRoutingCache();
     },

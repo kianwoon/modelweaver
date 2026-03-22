@@ -229,6 +229,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
       keepAliveTimeout: 30000,
       keepAliveMaxTimeout: 60000,
       connections: poolSize ?? 10,
+      allowH2: true,
     });
     providerConfig.poolSize = poolSize ?? 10;
     // Create per-provider circuit breaker
