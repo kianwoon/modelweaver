@@ -40,7 +40,8 @@ body {
 /* Fixed elements — never shrink */
 .titlebar,
 .status,
-.stats {
+.stats,
+.activity-bar {
   flex-shrink: 0;
 }
 
@@ -138,6 +139,122 @@ body {
 @keyframes pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
+}
+
+/* Activity progress bar */
+.activity-bar {
+  flex-shrink: 0;
+  padding: 4px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-height: 0;
+  max-height: 58px;
+  overflow: hidden;
+}
+
+.activity-content {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.activity-idle {
+  font-size: 10px;
+  color: var(--text-dim);
+  padding: 2px 0;
+  user-select: none;
+}
+
+.activity-track {
+  height: 18px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 9px;
+  overflow: hidden;
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  animation: activity-enter 0.2s ease-out;
+}
+
+.activity-fill {
+  height: 100%;
+  border-radius: 9px;
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 0%;
+  transition: width 0.3s ease;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 8px,
+    rgba(255, 255, 255, 0.15) 8px,
+    rgba(255, 255, 255, 0.15) 16px
+  );
+  background-size: 200% 100%;
+  animation: activity-stripes 0.6s linear infinite;
+}
+
+.activity-fill.state-streaming {
+  background-color: var(--green);
+  box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
+}
+
+.activity-fill.state-fallback {
+  background-color: var(--yellow);
+  box-shadow: 0 0 8px rgba(255, 193, 7, 0.4);
+  animation-duration: 0.4s;
+}
+
+.activity-fill.state-error {
+  background-color: var(--accent);
+  box-shadow: 0 0 8px rgba(233, 69, 96, 0.5);
+  animation: none;
+}
+
+.activity-fill.state-complete {
+  animation: none;
+  background-color: var(--green);
+  transition: width 0.15s ease, opacity 0.5s ease 0.5s;
+  opacity: 0;
+}
+
+.activity-fill.state-start {
+  background-color: var(--blue);
+  box-shadow: 0 0 8px rgba(33, 150, 243, 0.4);
+}
+
+.activity-label {
+  position: relative;
+  z-index: 1;
+  font-size: 10px;
+  color: white;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  width: 100%;
+  display: flex;
+  justify-content: space-between;
+}
+
+@keyframes activity-stripes {
+  0% { background-position: 0 0; }
+  100% { background-position: 22.63px 0; }
+}
+
+@keyframes activity-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 /* Stats */
