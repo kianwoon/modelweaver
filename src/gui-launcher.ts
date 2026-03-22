@@ -1,5 +1,5 @@
 // src/gui-launcher.ts
-import { createReadStream, createWriteStream, mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync } from 'node:fs';
+import { createWriteStream, mkdirSync, existsSync, readFileSync, writeFileSync, chmodSync, unlinkSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir, platform, arch } from 'node:os';
 import { get } from 'node:https';
@@ -56,11 +56,15 @@ function setCachedVersion(version: string): void {
   writeFileSync(VERSION_FILE, version, 'utf-8');
 }
 
-function fetchJSON(url: string): Promise<any> {
+function fetchJSON(url: string, maxRedirects = 5): Promise<any> {
   return new Promise((resolve, reject) => {
     get(url, { headers: { 'User-Agent': 'modelweaver' } }, (res) => {
       if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        fetchJSON(res.headers.location).then(resolve).catch(reject);
+        if (maxRedirects <= 0) {
+          reject(new Error("Too many redirects"));
+          return;
+        }
+        fetchJSON(res.headers.location, maxRedirects - 1).then(resolve).catch(reject);
         return;
       }
       if (res.statusCode !== 200) {
@@ -99,7 +103,7 @@ async function downloadFile(url: string, dest: string): Promise<void> {
       file.on('finish', () => { file.close(); resolve(); });
     }).on('error', (err) => {
       // Clean up partial file on error
-      try { createReadStream(dest); } catch { /* file doesn't exist */ }
+      try { unlinkSync(dest); } catch { /* already gone */ }
       reject(err);
     });
   });

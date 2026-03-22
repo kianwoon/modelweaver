@@ -1,6 +1,6 @@
 // src/server.ts
 import { Hono } from "hono";
-import { resolveRequest } from "./router.js";
+import { resolveRequest, clearRoutingCache } from "./router.js";
 import { forwardWithFallback } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
 import type { AppConfig, RequestContext } from "./types.js";
@@ -235,10 +235,12 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   app.post("/v1/messages", async (c) => {
     const requestId = randomUUID();
 
-    // Parse model from request body
+    // Read raw body once, then parse — avoids double serialization
     let body: { model?: string };
+    let rawBody: string;
     try {
-      body = await c.req.json();
+      rawBody = await c.req.text();
+      body = JSON.parse(rawBody);
     } catch {
       return anthropicError("invalid_request_error", "Invalid JSON body", requestId);
     }
@@ -248,8 +250,6 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       return anthropicError("invalid_request_error", "Missing 'model' field in request body", requestId);
     }
 
-    // Resolve routing — rawBody is already serialized; attach parsed body to avoid double-parse in proxy
-    const rawBody = JSON.stringify(body);
     const ctx = resolveRequest(model, requestId, config, rawBody);
     if (ctx) {
       (ctx as RequestContext & { parsedBody?: Record<string, unknown> }).parsedBody = body as Record<string, unknown>;
@@ -282,7 +282,9 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       c.req.raw,
       (provider, index) => {
         logger.info("Attempting provider", { requestId, provider, index, tier: ctx.tier });
-        successfulProvider = provider;
+        // Only capture first attempted provider; accurate winner tracking requires
+        // an onSuccess callback in proxy.ts (handled separately).
+        if (!successfulProvider) successfulProvider = provider;
       },
       logger
     );
@@ -368,6 +370,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         }
       }
       config = newConfig;
+      clearRoutingCache();
     },
   };
 }

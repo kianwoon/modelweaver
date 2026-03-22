@@ -25,7 +25,11 @@ function getVbsContent(): string {
   const workDir = process.cwd();
 
   return `Set WshShell = CreateObject("WScript.Shell")
-WshShell.Run "cmd /c cd /d ""${workDir}"" && ""${process.execPath}"" ""${entryScript}"" start", 0, False
+Do While True
+  WshShell.Run "cmd /c cd /d ""${workDir}"" && ""${process.execPath}"" ""${entryScript}"" start", 0, True
+  ' Wait 3 seconds before restarting
+  WScript.Sleep 3000
+Loop
 `;
 }
 
@@ -43,7 +47,8 @@ export async function install(): Promise<void> {
   writeFileSync(VBS_PATH, getVbsContent(), "utf-8");
 
   console.log(`  Windows startup entry installed: ${VBS_PATH}`);
-  console.log(`  Auto-starts on login (startup folder)`);
+  console.log(`  Auto-starts on login and auto-restarts if stopped (startup folder watchdog)`);
+  console.log("  Daemon will auto-restart if it crashes or is stopped");
 
   // Start daemon immediately (don't wait for next login)
   try {

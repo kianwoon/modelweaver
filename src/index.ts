@@ -164,7 +164,7 @@ async function main() {
     try {
       const { getService } = await import('./service.js');
       const svc = await getService();
-      svc.install();
+      await svc.install();
     } catch (err) {
       console.error(`  Error: ${err instanceof Error ? err.message : String(err)}`);
       process.exit(1);

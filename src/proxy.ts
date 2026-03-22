@@ -28,24 +28,36 @@ export function isRetriable(status: number): boolean {
 }
 
 export function buildOutboundUrl(baseUrl: string, incomingPath: string): string {
-  const base = new URL(baseUrl);
-  // new URL("/v1/messages", base) replaces base's path entirely (URL spec).
-  // We need to append instead: base.path + incomingPath, normalizing slashes.
-  const basePath = base.pathname.replace(/\/+$/, "");
-  // Split off query string before path join to avoid encoding issues
-  const [pathOnly, queryString] = incomingPath.split("?", 2);
+  let basePath = "";
+  let origin = baseUrl;
+  const slashIndex = baseUrl.indexOf('/', baseUrl.indexOf('//') + 2);
+  if (slashIndex !== -1) {
+    origin = baseUrl.substring(0, slashIndex);
+    basePath = baseUrl.substring(slashIndex);
+  }
+
+  let incomingQuery = "";
+  let incomingOnly = incomingPath;
+  const qIndex = incomingPath.indexOf('?');
+  if (qIndex !== -1) {
+    incomingOnly = incomingPath.substring(0, qIndex);
+    incomingQuery = incomingPath.substring(qIndex);
+  }
 
   // Deduplicate /v1 when base URL path already ends with it and incoming path starts with it.
   // e.g. baseUrl="https://api.fireworks.ai/inference/v1" + path="/v1/chat/completions"
   //      → "/inference/v1/chat/completions" (not "/inference/v1/v1/chat/completions")
-  const dedupedPath = basePath.endsWith("/v1") && pathOnly.startsWith("/v1")
-    ? basePath + pathOnly.slice(3)
-    : basePath + pathOnly;
+  let resolvedPath;
+  if (basePath.endsWith('/v1') && incomingOnly.startsWith('/v1')) {
+    resolvedPath = basePath + incomingOnly.substring(3);
+  } else {
+    resolvedPath = basePath + incomingOnly;
+  }
 
-  const resolvedPath = dedupedPath.replace(MULTI_SLASH, "/");
-  base.pathname = resolvedPath;
-  if (queryString) base.search = "?" + queryString;
-  return base.toString();
+  // Normalize duplicate slashes
+  resolvedPath = resolvedPath.replace(MULTI_SLASH, "/");
+
+  return origin + resolvedPath + incomingQuery;
 }
 
 export function buildOutboundHeaders(
@@ -202,6 +214,7 @@ function applyTargetedReplacements(
 ): string {
   // If orphan cleaning is needed, we must do full JSON parse (structural changes to messages)
   if (needsOrphanClean) {
+    // deep clone required: cleanOrphanedToolMessages mutates the messages array in-place
     const mutable = structuredClone(parsed);
     if (entry.model) mutable.model = entry.model;
     cleanOrphanedToolMessages(mutable);
@@ -239,8 +252,9 @@ function applyTargetedReplacements(
         body = body.replace(MAX_TOKENS_REGEX, `"max_tokens":${maxOutputTokens}`);
       }
     } else if (typeof parsed.max_tokens !== "number") {
-      // max_tokens not present in body -- need to add it. Fall back to full JSON approach.
-      const mutable = structuredClone(parsed);
+      // max_tokens not present in body -- need to add it. Shallow clone suffices
+      // since only top-level properties (model, max_tokens) are mutated.
+      const mutable = { ...parsed };
       if (entry.model) mutable.model = entry.model;
       mutable.max_tokens = maxOutputTokens;
       return JSON.stringify(mutable);
@@ -318,6 +332,7 @@ export async function forwardRequest(
           body = applyTargetedReplacements(ctx.rawBody, entry, provider, parsed, false);
         } else {
           // Fallback attempts: full JSON parse/mutate/stringify (caching already broken)
+          // deep clone required: cleanOrphanedToolMessages may mutate the messages array in-place
           const mutable = structuredClone(parsed);
 
           if (entry.model) {
@@ -357,7 +372,7 @@ export async function forwardRequest(
   }
 
   const headers = buildOutboundHeaders(incomingRequest.headers, provider, ctx.requestId);
-  headers.set("content-length", textEncoder.encode(body).byteLength.toString());
+  headers.set("content-length", Buffer.byteLength(body, 'utf-8').toString());
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), provider.timeout);
@@ -436,7 +451,8 @@ async function raceProviders(
   ctx: RequestContext,
   incomingRequest: Request,
   onAttempt?: (provider: string, index: number) => void,
-  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
+  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
+  chainOffset: number = 0,
 ): Promise<Response> {
   const sharedController = new AbortController();
 
@@ -474,7 +490,7 @@ async function raceProviders(
     onAttempt?.(entry.provider, index);
 
     try {
-      const response = await forwardRequest(provider, entry, ctx, incomingRequest, sharedController.signal, index);
+      const response = await forwardRequest(provider, entry, ctx, incomingRequest, sharedController.signal, index + chainOffset);
       // Record for circuit breaker
       if (provider._circuitBreaker) {
         provider._circuitBreaker.recordResult(response.status);
@@ -512,6 +528,10 @@ async function raceProviders(
 
       if (winner.response.status >= 200 && winner.response.status < 300) {
         sharedController.abort();
+        // Cancel bodies of already-completed losing responses to free resources
+        for (const f of failures) {
+          try { f.response.body?.cancel(); } catch { /* ignore */ }
+        }
         return winner.response;
       }
 
@@ -620,7 +640,7 @@ export async function forwardWithFallback(
       if (response.status === 429 && i + 1 < chain.length) {
         ctx.fallbackMode = "race";
         const remaining = chain.slice(i + 1);
-        return raceProviders(remaining, providers, ctx, incomingRequest, onAttempt, logger);
+        return raceProviders(remaining, providers, ctx, incomingRequest, onAttempt, logger, i + 1);
       }
       continue;
     }
