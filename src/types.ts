@@ -10,6 +10,7 @@ export interface ProviderConfig {
   apiKey: string;
   timeout: number;
   ttfbTimeout?: number;
+  stallTimeout?: number;
   authType?: "anthropic" | "bearer";
   modelLimits?: ModelLimits;
   concurrentLimit?: number;
@@ -84,7 +85,7 @@ export interface MetricsSummary {
   recentRequests: RequestMetrics[];
 }
 
-export type StreamState = "start" | "streaming" | "fallback" | "complete" | "error";
+export type StreamState = "start" | "ttfb" | "streaming" | "fallback" | "complete" | "error";
 
 export interface StreamEvent {
   requestId: string;
@@ -107,4 +108,5 @@ export interface StreamEvent {
   cacheHitRate?: number;
   contextPercent?: number;
   contextWindowSize?: number;
+  headerSize?: number;
 }

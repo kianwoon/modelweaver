@@ -444,6 +444,21 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         },
         logger
       );
+    // Broadcast TTFB event — headers received from upstream
+    let headerSize = 0;
+    response.headers.forEach((v, k) => { headerSize += k.length + v.length + 4; });
+    setImmediate(() => {
+      broadcastStreamEvent({
+        requestId,
+        model,
+        tier: ctx.tier,
+        state: "ttfb",
+        status: response.status,
+        headerSize,
+        timestamp: Date.now(),
+      });
+    });
+
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error("Forward failed", { requestId, error: errMsg });

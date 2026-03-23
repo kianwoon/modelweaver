@@ -480,7 +480,9 @@ function applyStreamingUpdate(requestId, data) {
   entry.lastOutputTokens = tok;
   entry.prevTimestamp = data.timestamp || Date.now();
   const secs = elapsed >= 1 ? elapsed.toFixed(1) + 's' : Math.round(elapsed * 1000) + 'ms';
-  let meta = tok + ' tok' + (tps ? ' \u00b7 ' + tps : '') + ' \u00b7 ' + secs;
+  let meta = tok > 0
+    ? tok + ' tok' + (tps ? ' \u00b7 ' + tps : '') + ' \u00b7 ' + secs
+    : (entry.headerInfo || '') + ' \u00b7 ' + secs;
   // Cache hit rate and context usage
   const cacheHit = data.cacheHitRate;
   const ctxPct = data.contextPercent;
@@ -504,6 +506,17 @@ function handleStreamEvent(data) {
       const elapsed = ((Date.now() - bar.startTime) / 1000).toFixed(1);
       bar.statusSpan.textContent = (bar.provider || '') + ' ' + elapsed + 's';
     }, 100);
+
+  } else if (data.state === 'ttfb') {
+    const entry = activeRequests.get(data.requestId);
+    if (!entry) return;
+    if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+    entry.fill.classList.remove('state-start');
+    entry.fill.classList.add('state-streaming');
+    const secs = ((Date.now() - entry.startTime) / 1000).toFixed(1);
+    const hdr = data.headerSize || 0;
+    entry.statusSpan.textContent = hdr + 'B hdr \u00b7 ' + secs + 's';
+    entry.headerInfo = hdr + 'B hdr';
 
   } else if (data.state === 'streaming') {
     if (!activeRequests.has(data.requestId)) return;

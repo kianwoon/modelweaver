@@ -1,6 +1,7 @@
 // src/proxy.ts
 import type { ProviderConfig, RoutingEntry, RequestContext } from "./types.js";
 import { request as undiciRequest } from "undici";
+import { PassThrough } from "node:stream";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -473,9 +474,36 @@ export async function forwardRequest(
     // TTFB succeeded — cancel TTFB timer
     if (ttfbTimer) clearTimeout(ttfbTimer);
 
+    // Body stall detection: pipe through PassThrough to monitor for data without
+    // interfering with undici's internal stream state (no flowing mode conflict).
+    const stallTimeout = provider.stallTimeout ?? 30000;
+    let stalledBodyTimedOut = false;
+    const passThrough = new PassThrough();
+
+    const stallTimer = setTimeout(() => {
+      stalledBodyTimedOut = true;
+      passThrough.destroy(new Error(`Body stalled: no data after ${stallTimeout}ms`));
+    }, stallTimeout);
+
+    // Monitor OUR PassThrough for every data event — resets stall timer on each chunk
+    passThrough.on("data", () => {
+      clearTimeout(stallTimer);
+    });
+
+    passThrough.on("end", () => {
+      clearTimeout(stallTimer);
+    });
+
+    passThrough.on("error", () => {
+      clearTimeout(stallTimer);
+    });
+
+    // Pipe undici body → PassThrough. Data flows through without mode conflicts.
+    undiciResponse.body.pipe(passThrough);
+
     // Wrap undici response as a standard Web Response for downstream compatibility
     const response = new Response(
-      undiciResponse.body as unknown as BodyInit,
+      passThrough as unknown as BodyInit,
       {
         status: undiciResponse.statusCode,
         headers: undiciResponse.headers as unknown as HeadersInit,
@@ -491,9 +519,11 @@ export async function forwardRequest(
     // Network errors / timeouts — return a synthetic 502
     const message = ttfbTimedOut
       ? `Provider "${provider.name}" timed out waiting for first byte after ${ttfbTimeout}ms`
-      : error instanceof DOMException && error.name === "AbortError"
-        ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
-        : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
+      : stalledBodyTimedOut
+        ? `Provider "${provider.name}" stalled: headers received but no body data after ${stallTimeout}ms`
+        : error instanceof DOMException && error.name === "AbortError"
+          ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
+          : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
 
     const body = JSON.stringify({
         type: "error",
