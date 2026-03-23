@@ -12,6 +12,7 @@ export interface ProviderConfig {
   ttfbTimeout?: number;
   authType?: "anthropic" | "bearer";
   modelLimits?: ModelLimits;
+  concurrentLimit?: number;
 
   /** Runtime-only cached fields — not serialized to config */
   _cachedHost?: string;
@@ -95,4 +96,5 @@ export interface StreamEvent {
   inputTokens?: number;
   tokensPerSec?: number;
   message?: string;
+  preview?: string;
 }

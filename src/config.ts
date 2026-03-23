@@ -23,6 +23,7 @@ const providerSchema = z.object({
   ttfbTimeout: z.number().default(15000),
   authType: z.enum(["anthropic", "bearer"]).default("anthropic"),
   modelLimits: modelLimitsSchema,
+  concurrentLimit: z.number().int().min(1).optional(),
   poolSize: z.number().int().min(1).max(100).optional(),
   circuitBreaker: z.object({
     failureThreshold: z.number().int().min(1).optional(),
@@ -216,6 +217,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
       ttfbTimeout: p.ttfbTimeout,
       authType: p.authType,
       modelLimits: p.modelLimits ? { maxOutputTokens: p.modelLimits.maxOutputTokens } : undefined,
+      concurrentLimit: p.concurrentLimit,
     };
     try {
       const parsedUrl = new URL(p.baseUrl);

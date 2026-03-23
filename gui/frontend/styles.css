@@ -178,6 +178,20 @@ body {
   animation: activity-enter 0.2s ease-out;
 }
 
+.activity-track::after {
+  content: attr(data-preview);
+  position: absolute;
+  bottom: -14px;
+  left: 8px;
+  right: 8px;
+  font-size: 9px;
+  color: rgba(255, 255, 255, 0.5);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  pointer-events: none;
+}
+
 .activity-fill {
   height: 100%;
   border-radius: 9px;

@@ -78,17 +78,47 @@ function createMetricsTransform(
   // Stream event throttling (~4 Hz)
   const STREAM_THROTTLE_MS = 250;
   let lastStreamEmit = 0;
+  let firstChunk = true;
+
+  // Response text preview (last 100 chars for progress bar tooltip)
+  let responsePreview = "";
+  const PREVIEW_MAX = 100;
 
   const drainEvents = (eventText: string) => {
     for (const event of eventText.split("\n\n")) {
       if (!event) continue;
       const dataLine = event.split("\n").find(l => l.startsWith("data:"));
-      if (!dataLine || !dataLine.includes('"usage"')) continue;
+      if (!dataLine) continue;
       try {
         const data = JSON.parse(dataLine.slice(5)) as Record<string, unknown>;
-        const usage = parseUsageFromData(data);
-        if (usage.inputTokens > tokens.input) tokens.input = usage.inputTokens;
-        if (usage.outputTokens > tokens.output) tokens.output = usage.outputTokens;
+
+        // Extract usage (token counts)
+        if (dataLine.includes('"usage"')) {
+          const usage = parseUsageFromData(data);
+          if (usage.inputTokens > tokens.input) tokens.input = usage.inputTokens;
+          if (usage.outputTokens > tokens.output) tokens.output = usage.outputTokens;
+        }
+
+        // Extract text content for preview
+        // Anthropic format: content_block_delta with delta.text
+        const delta = data.delta as Record<string, unknown> | undefined;
+        if (delta && typeof delta.text === "string") {
+          responsePreview += delta.text;
+          if (responsePreview.length > PREVIEW_MAX) {
+            responsePreview = responsePreview.slice(-PREVIEW_MAX);
+          }
+        }
+        // OpenAI format: choices[0].delta.content
+        const choices = data.choices as Array<Record<string, unknown>> | undefined;
+        if (choices?.[0]) {
+          const choiceDelta = choices[0].delta as Record<string, unknown> | undefined;
+          if (choiceDelta && typeof choiceDelta.content === "string") {
+            responsePreview += choiceDelta.content;
+            if (responsePreview.length > PREVIEW_MAX) {
+              responsePreview = responsePreview.slice(-PREVIEW_MAX);
+            }
+          }
+        }
       } catch { /* skip malformed */ }
     }
   };
@@ -114,6 +144,17 @@ function createMetricsTransform(
     if (outputMatches.length > 0) {
       const val = parseInt(outputMatches[outputMatches.length - 1][1], 10);
       if (val > outputTokens) outputTokens = val;
+    }
+
+    // Extract text content for preview from JSON responses
+    // Anthropic format: "content":[{"type":"text","text":"..."}]
+    const anthContent = [...text.matchAll(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g)];
+    if (anthContent.length > 0) {
+      const lastText = anthContent[anthContent.length - 1][1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+      responsePreview += lastText;
+      if (responsePreview.length > PREVIEW_MAX) {
+        responsePreview = responsePreview.slice(-PREVIEW_MAX);
+      }
     }
   };
 
@@ -185,8 +226,9 @@ function createMetricsTransform(
 
       // Emit streaming progress (throttled ~4 Hz)
       const now = Date.now();
-      if (now - lastStreamEmit >= STREAM_THROTTLE_MS && tokens.output > 0) {
+      if (firstChunk || now - lastStreamEmit >= STREAM_THROTTLE_MS) {
         lastStreamEmit = now;
+        firstChunk = false;
         setImmediate(() => {
           broadcastStreamEvent({
             requestId: ctx.requestId,
@@ -195,6 +237,7 @@ function createMetricsTransform(
             state: "streaming",
             outputTokens: tokens.output,
             timestamp: now,
+            preview: responsePreview,
           });
         });
       }
@@ -211,8 +254,9 @@ function createMetricsTransform(
 
       // Emit streaming progress (throttled ~4 Hz)
       const nowJson = Date.now();
-      if (nowJson - lastStreamEmit >= STREAM_THROTTLE_MS && outputTokens > 0) {
+      if (firstChunk || nowJson - lastStreamEmit >= STREAM_THROTTLE_MS) {
         lastStreamEmit = nowJson;
+        firstChunk = false;
         setImmediate(() => {
           broadcastStreamEvent({
             requestId: ctx.requestId,
@@ -221,6 +265,7 @@ function createMetricsTransform(
             state: "streaming",
             outputTokens,
             timestamp: nowJson,
+            preview: responsePreview,
           });
         });
       }

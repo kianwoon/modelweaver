@@ -4,6 +4,7 @@ import { request as undiciRequest } from "undici";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
+import { latencyTracker, inFlightCounter, computeHedgingCount } from './hedging.js';
 
 /** Headers forwarded as-is to upstream */
 const FORWARD_HEADERS = new Set([
@@ -655,6 +656,108 @@ async function raceProviders(
 }
 
 /**
+ * Forward a request with optional adaptive hedging.
+ * When latency variance is high, sends multiple copies and returns the fastest.
+ */
+async function hedgedForwardRequest(
+  provider: ProviderConfig,
+  entry: RoutingEntry,
+  ctx: RequestContext,
+  incomingRequest: Request,
+  chainSignal: AbortSignal | undefined,
+  index: number,
+  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
+): Promise<Response> {
+  const count = computeHedgingCount(provider);
+
+  if (count <= 1) {
+    // No hedging — single request
+    inFlightCounter.increment(provider.name);
+    const start = Date.now();
+    try {
+      const r = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index);
+      latencyTracker.record(provider.name, Date.now() - start);
+      return r;
+    } finally {
+      inFlightCounter.decrement(provider.name);
+    }
+  }
+
+  // Hedged path: send multiple copies, race for first success
+  logger?.warn("Hedging request", {
+    requestId: ctx.requestId,
+    provider: provider.name,
+    count,
+    cv: Math.round(latencyTracker.getCV(provider.name) * 100) / 100,
+    inFlight: inFlightCounter.get(provider.name),
+    maxConcurrent: provider.concurrentLimit,
+  });
+
+  const start = Date.now();
+  const launched: Promise<Response>[] = [];
+
+  for (let h = 0; h < count; h++) {
+    inFlightCounter.increment(provider.name);
+    launched.push(
+      forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index)
+        .finally(() => inFlightCounter.decrement(provider.name))
+    );
+  }
+
+  // Race: first successful response wins, cancel the rest
+  // Wrap each promise so we can identify which one completed by index
+  const wrapped = launched.map((p, i) =>
+    p.then(response => ({ response, hedgeIndex: i }))
+  );
+
+  const completed = new Set<number>();
+  const failures: Response[] = [];
+
+  try {
+    while (completed.size < wrapped.length) {
+      const pending = wrapped.filter((_, i) => !completed.has(i));
+      if (pending.length === 0) break;
+
+      const winner = await Promise.race(pending);
+      completed.add(winner.hedgeIndex);
+
+      // Record each hedged copy's result for circuit breaker
+      if (provider._circuitBreaker) {
+        provider._circuitBreaker.recordResult(winner.response.status);
+      }
+
+      if (winner.response.status >= 200 && winner.response.status < 300) {
+        latencyTracker.record(provider.name, Date.now() - start);
+        // Cancel remaining — record 502 for each cancelled copy
+        for (let i = 0; i < wrapped.length; i++) {
+          if (!completed.has(i)) {
+            if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502);
+            wrapped[i].then(r => { try { r.response.body?.cancel(); } catch {} });
+          }
+        }
+        for (const f of failures) { try { f.body?.cancel(); } catch {} }
+        return winner.response;
+      }
+
+      failures.push(winner.response);
+    }
+
+    // All hedged copies returned errors — cancel bodies, return first failure
+    for (const f of failures) { try { f.body?.cancel(); } catch {} }
+    return failures[0] ?? new Response(
+      JSON.stringify({ type: "error", error: { type: "api_error", message: `Provider "${provider.name}" all hedged requests failed` } }),
+      { status: 502, headers: { "content-type": "application/json" } }
+    );
+  } catch {
+    for (const f of failures) { try { f.body?.cancel(); } catch {} }
+    return failures[0] ?? new Response(
+      JSON.stringify({ type: "error", error: { type: "api_error", message: `Provider "${provider.name}" hedging failed` } }),
+      { status: 502, headers: { "content-type": "application/json" } }
+    );
+  }
+}
+
+/**
  * Try forwarding through a chain of providers.
  * Returns the first successful response, or 502 if all fail.
  */
@@ -702,7 +805,7 @@ export async function forwardWithFallback(
 
     onAttempt?.(entry.provider, 0);
 
-    const response = await forwardRequest(provider, entry, ctx, incomingRequest, undefined, 0);
+    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger);
 
     if (provider._circuitBreaker) {
       provider._circuitBreaker.recordResult(response.status);
@@ -763,13 +866,14 @@ export async function forwardWithFallback(
     onAttempt?.(entry.provider, index);
 
     try {
-      const response = await forwardRequest(
+      const response = await hedgedForwardRequest(
         provider,
         entry,
         ctx,
         incomingRequest,
         sharedController.signal,
         index,
+        logger,
       );
       if (provider._circuitBreaker) provider._circuitBreaker.recordResult(response.status);
       return { response, index };

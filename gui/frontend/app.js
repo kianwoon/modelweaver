@@ -393,6 +393,7 @@ function appendRequestMetric(r) {
 function createActivityBar(requestId, model, tier) {
   const track = document.createElement('div');
   track.className = 'activity-track';
+  track.title = '';
 
   const fill = document.createElement('div');
   fill.className = 'activity-fill state-start';
@@ -415,7 +416,7 @@ function createActivityBar(requestId, model, tier) {
   activityContent.appendChild(track);
   trimBars();
 
-  return { element: track, fill, label, statusSpan, startTime: Date.now(), lastOutputTokens: 0, model, tier, ttfbTimer: null };
+  return { element: track, fill, label, statusSpan, startTime: Date.now(), lastOutputTokens: 0, prevTimestamp: 0, model, tier, ttfbTimer: null };
 }
 
 function trimBars() {
@@ -448,9 +449,10 @@ function handleStreamEvent(data) {
   if (data.state === 'start') {
     const bar = createActivityBar(data.requestId, data.model, data.tier);
     activeRequests.set(data.requestId, bar);
+    bar.provider = data.provider || '';
     bar.ttfbTimer = setInterval(() => {
       const elapsed = ((Date.now() - bar.startTime) / 1000).toFixed(1);
-      bar.statusSpan.textContent = elapsed + 's';
+      bar.statusSpan.textContent = (bar.provider || '') + ' ' + elapsed + 's';
     }, 100);
 
   } else if (data.state === 'streaming') {
@@ -462,8 +464,25 @@ function handleStreamEvent(data) {
     const elapsed = (Date.now() - entry.startTime) / 1000;
     const pct = Math.min(80, elapsed * 5);
     entry.fill.style.width = pct + '%';
-    entry.lastOutputTokens = data.outputTokens || 0;
-    entry.statusSpan.textContent = data.outputTokens + ' tok';
+    const tok = data.outputTokens || 0;
+    // Compute tok/s from delta between consecutive streaming events
+    let tps = '';
+    const prevTok = entry.lastOutputTokens;
+    if (entry.prevTimestamp > 0 && data.timestamp > entry.prevTimestamp && tok > prevTok) {
+      const deltaSec = (data.timestamp - entry.prevTimestamp) / 1000;
+      const rate = (tok - prevTok) / deltaSec;
+      tps = rate.toFixed(0) + ' tok/s';
+    }
+    entry.lastOutputTokens = tok;
+    entry.prevTimestamp = data.timestamp || Date.now();
+    const secs = elapsed >= 1 ? elapsed.toFixed(1) + 's' : Math.round(elapsed * 1000) + 'ms';
+    entry.statusSpan.textContent = tok + ' tok' + (tps ? ' \u00b7 ' + tps : '') + ' \u00b7 ' + secs;
+    // Show response preview as tooltip and inline via data attribute
+    if (data.preview) {
+      entry.element.title = data.preview;
+      entry.element.setAttribute('data-preview', data.preview);
+      entry.element.style.marginBottom = '16px';
+    }
 
   } else if (data.state === 'fallback') {
     const entry = activeRequests.get(data.requestId);
@@ -477,6 +496,8 @@ function handleStreamEvent(data) {
     const entry = activeRequests.get(data.requestId);
     if (!entry) return;
     if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+    entry.element.removeAttribute('data-preview');
+    entry.element.style.marginBottom = '';
     entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
     entry.fill.classList.add('state-complete');
     entry.fill.style.width = '100%';
@@ -484,13 +505,17 @@ function handleStreamEvent(data) {
     const latency = data.latencyMs >= 1000 ? (data.latencyMs / 1000).toFixed(1) + 's' : data.latencyMs + 'ms';
     entry.statusSpan.textContent = (data.outputTokens || 0) + ' tok \u00b7 ' + tps + ' \u00b7 ' + latency;
     // Dismiss track immediately so it fades together with the fill
-    entry.element.classList.add('dismissing');
-    setTimeout(() => removeActivityBar(data.requestId), 800);
+    setTimeout(() => {
+      entry.element.classList.add('dismissing');
+      setTimeout(() => removeActivityBar(data.requestId), 800);
+    }, 2000);
 
   } else if (data.state === 'error') {
     const entry = activeRequests.get(data.requestId);
     if (!entry) return;
     if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+    entry.element.removeAttribute('data-preview');
+    entry.element.style.marginBottom = '';
     entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
     entry.fill.classList.add('state-error');
     if (!entry.fill.style.width || entry.fill.style.width === '0%') {
@@ -498,8 +523,10 @@ function handleStreamEvent(data) {
     }
     entry.statusSpan.textContent = 'error ' + (data.status || '');
     // Dismiss track immediately so it fades together with the fill
-    entry.element.classList.add('dismissing');
-    setTimeout(() => removeActivityBar(data.requestId), 800);
+    setTimeout(() => {
+      entry.element.classList.add('dismissing');
+      setTimeout(() => removeActivityBar(data.requestId), 800);
+    }, 2000);
   }
 }
 
