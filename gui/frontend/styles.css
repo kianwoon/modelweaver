@@ -178,19 +178,9 @@ body {
   animation: activity-enter 0.2s ease-out;
 }
 
-.activity-track::after {
-  content: attr(data-preview);
-  position: absolute;
-  bottom: -14px;
-  left: 8px;
-  right: 8px;
-  font-size: 9px;
-  color: rgba(255, 255, 255, 0.5);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  pointer-events: none;
-}
+/* .activity-track::after removed — attr(data-preview) forced layout recalc on every
+   streaming event (~60/s with 3+ concurrent requests), freezing Tauri's WebView.
+   data-preview attribute and title tooltip are still set in JS for hover-only use. */
 
 .activity-fill {
   height: 100%;

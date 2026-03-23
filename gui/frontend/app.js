@@ -445,6 +445,48 @@ function removeActivityBar(requestId) {
   }
 }
 
+// rAF batching state for streaming events — prevents layout thrash at ~60 mutations/sec
+const pendingStreamUpdates = new Map();
+let rafScheduled = false;
+
+function flushStreamUpdates() {
+  rafScheduled = false;
+  for (const [requestId, data] of pendingStreamUpdates) {
+    applyStreamingUpdate(requestId, data);
+  }
+  pendingStreamUpdates.clear();
+}
+
+function applyStreamingUpdate(requestId, data) {
+  const entry = activeRequests.get(requestId);
+  if (!entry) return;
+  if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+  entry.fill.classList.remove('state-start');
+  entry.fill.classList.add('state-streaming');
+  const elapsed = (Date.now() - entry.startTime) / 1000;
+  const pct = Math.min(80, elapsed * 5);
+  entry.fill.style.width = pct + '%';
+  const tok = data.outputTokens || 0;
+  // Compute tok/s from delta between consecutive streaming events
+  let tps = '';
+  const prevTok = entry.lastOutputTokens;
+  if (entry.prevTimestamp > 0 && data.timestamp > entry.prevTimestamp && tok > prevTok) {
+    const deltaSec = (data.timestamp - entry.prevTimestamp) / 1000;
+    const rate = (tok - prevTok) / deltaSec;
+    tps = rate.toFixed(0) + ' tok/s';
+  }
+  entry.lastOutputTokens = tok;
+  entry.prevTimestamp = data.timestamp || Date.now();
+  const secs = elapsed >= 1 ? elapsed.toFixed(1) + 's' : Math.round(elapsed * 1000) + 'ms';
+  entry.statusSpan.textContent = tok + ' tok' + (tps ? ' \u00b7 ' + tps : '') + ' \u00b7 ' + secs;
+  // Show response preview as tooltip only (CSS ::after removed to avoid layout thrash)
+  if (data.preview) {
+    entry.element.title = data.preview;
+    entry.element.setAttribute('data-preview', data.preview);
+    entry.element.style.marginBottom = '16px';
+  }
+}
+
 function handleStreamEvent(data) {
   if (data.state === 'start') {
     const bar = createActivityBar(data.requestId, data.model, data.tier);
@@ -456,32 +498,12 @@ function handleStreamEvent(data) {
     }, 100);
 
   } else if (data.state === 'streaming') {
-    const entry = activeRequests.get(data.requestId);
-    if (!entry) return;
-    if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
-    entry.fill.classList.remove('state-start');
-    entry.fill.classList.add('state-streaming');
-    const elapsed = (Date.now() - entry.startTime) / 1000;
-    const pct = Math.min(80, elapsed * 5);
-    entry.fill.style.width = pct + '%';
-    const tok = data.outputTokens || 0;
-    // Compute tok/s from delta between consecutive streaming events
-    let tps = '';
-    const prevTok = entry.lastOutputTokens;
-    if (entry.prevTimestamp > 0 && data.timestamp > entry.prevTimestamp && tok > prevTok) {
-      const deltaSec = (data.timestamp - entry.prevTimestamp) / 1000;
-      const rate = (tok - prevTok) / deltaSec;
-      tps = rate.toFixed(0) + ' tok/s';
-    }
-    entry.lastOutputTokens = tok;
-    entry.prevTimestamp = data.timestamp || Date.now();
-    const secs = elapsed >= 1 ? elapsed.toFixed(1) + 's' : Math.round(elapsed * 1000) + 'ms';
-    entry.statusSpan.textContent = tok + ' tok' + (tps ? ' \u00b7 ' + tps : '') + ' \u00b7 ' + secs;
-    // Show response preview as tooltip and inline via data attribute
-    if (data.preview) {
-      entry.element.title = data.preview;
-      entry.element.setAttribute('data-preview', data.preview);
-      entry.element.style.marginBottom = '16px';
+    if (!activeRequests.has(data.requestId)) return;
+    // Batch streaming DOM updates via rAF — coalesces multiple events per frame
+    pendingStreamUpdates.set(data.requestId, data);
+    if (!rafScheduled) {
+      rafScheduled = true;
+      requestAnimationFrame(flushStreamUpdates);
     }
 
   } else if (data.state === 'fallback') {
