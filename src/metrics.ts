@@ -23,6 +23,8 @@ export class MetricsStore {
   private _totalInputTokens = 0;
   private _totalOutputTokens = 0;
   private _totalTokensPerSec = 0;
+  private _totalCacheReadTokens = 0;
+  private _totalCacheCreationTokens = 0;
   private _modelMap = new Map<string, ModelEntry>();
   private _providerMap = new Map<string, number>();
 
@@ -42,6 +44,8 @@ export class MetricsStore {
       this._totalInputTokens -= evicted.inputTokens ?? 0;
       this._totalOutputTokens -= evicted.outputTokens ?? 0;
       this._totalTokensPerSec -= evicted.tokensPerSec ?? 0;
+      this._totalCacheReadTokens -= evicted.cacheReadTokens ?? 0;
+      this._totalCacheCreationTokens -= evicted.cacheCreationTokens ?? 0;
 
       const mKey = evicted.model;
       const mEntry = this._modelMap.get(mKey);
@@ -60,6 +64,8 @@ export class MetricsStore {
     this._totalInputTokens += metrics.inputTokens ?? 0;
     this._totalOutputTokens += metrics.outputTokens ?? 0;
     this._totalTokensPerSec += metrics.tokensPerSec ?? 0;
+    this._totalCacheReadTokens += metrics.cacheReadTokens ?? 0;
+    this._totalCacheCreationTokens += metrics.cacheCreationTokens ?? 0;
 
     const mKey = metrics.model;
     const existing = this._modelMap.get(mKey);
@@ -101,12 +107,26 @@ export class MetricsStore {
       .map(([provider, count]) => ({ provider, count }))
       .sort((a, b) => b.count - a.count);
 
+    // Compute average cache hit rate across all requests with cache data
+    let cacheHitRateSum = 0;
+    let cacheHitRateCount = 0;
+    for (const r of requests) {
+      const totalInput = (r.inputTokens ?? 0) + (r.cacheReadTokens ?? 0) + (r.cacheCreationTokens ?? 0);
+      if (totalInput > 0 && (r.cacheReadTokens ?? 0) > 0) {
+        cacheHitRateSum += (r.cacheReadTokens! / totalInput) * 100;
+        cacheHitRateCount++;
+      }
+    }
+
     // getRecentRequests() already caps at WS_RECENT_REQUESTS_CAP
     return {
       totalRequests: this.count,
       totalInputTokens: this._totalInputTokens,
       totalOutputTokens: this._totalOutputTokens,
       avgTokensPerSec: this.count > 0 ? Math.round((this._totalTokensPerSec / this.count) * 10) / 10 : 0,
+      totalCacheReadTokens: this._totalCacheReadTokens,
+      totalCacheCreationTokens: this._totalCacheCreationTokens,
+      avgCacheHitRate: cacheHitRateCount > 0 ? Math.round((cacheHitRateSum / cacheHitRateCount) * 10) / 10 : 0,
       activeModels,
       providerDistribution,
       recentRequests: requests,

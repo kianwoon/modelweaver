@@ -17,6 +17,7 @@ const statSpeed = document.getElementById('stat-speed');
 const statRequests = document.getElementById('stat-requests');
 const statInputTokens = document.getElementById('stat-input-tokens');
 const statOutputTokens = document.getElementById('stat-output-tokens');
+const statCache = document.getElementById('stat-cache');
 const modelsEl = document.getElementById('models');
 const providersEl = document.getElementById('providers');
 const recentEl = document.getElementById('recent');
@@ -85,6 +86,7 @@ function updateSummary(data) {
   statRequests.textContent = data.totalRequests || 0;
   statInputTokens.textContent = formatNumber(data.totalInputTokens || 0);
   statOutputTokens.textContent = formatNumber(data.totalOutputTokens || 0);
+  statCache.textContent = data.avgCacheHitRate > 0 ? data.avgCacheHitRate.toFixed(0) + '%' : '\u2014';
 
   // Uptime
   const uptimeEl = document.getElementById('last-refresh');
@@ -478,7 +480,13 @@ function applyStreamingUpdate(requestId, data) {
   entry.lastOutputTokens = tok;
   entry.prevTimestamp = data.timestamp || Date.now();
   const secs = elapsed >= 1 ? elapsed.toFixed(1) + 's' : Math.round(elapsed * 1000) + 'ms';
-  entry.statusSpan.textContent = tok + ' tok' + (tps ? ' \u00b7 ' + tps : '') + ' \u00b7 ' + secs;
+  let meta = tok + ' tok' + (tps ? ' \u00b7 ' + tps : '') + ' \u00b7 ' + secs;
+  // Cache hit rate and context usage
+  const cacheHit = data.cacheHitRate;
+  const ctxPct = data.contextPercent;
+  if (cacheHit != null && cacheHit > 0) meta += ' \u00b7 ' + cacheHit.toFixed(0) + '% cache';
+  if (ctxPct != null && ctxPct > 0) meta += ' \u00b7 ' + ctxPct.toFixed(0) + '% ctx';
+  entry.statusSpan.textContent = meta;
   // Show response preview as tooltip only (CSS ::after removed to avoid layout thrash)
   if (data.preview) {
     entry.element.title = data.preview;
@@ -525,7 +533,10 @@ function handleStreamEvent(data) {
     entry.fill.style.width = '100%';
     const tps = data.tokensPerSec ? data.tokensPerSec.toFixed(0) + ' tok/s' : '';
     const latency = data.latencyMs >= 1000 ? (data.latencyMs / 1000).toFixed(1) + 's' : data.latencyMs + 'ms';
-    entry.statusSpan.textContent = (data.outputTokens || 0) + ' tok \u00b7 ' + tps + ' \u00b7 ' + latency;
+    let finalMeta = (data.outputTokens || 0) + ' tok \u00b7 ' + tps + ' \u00b7 ' + latency;
+    if (data.cacheHitRate != null && data.cacheHitRate > 0) finalMeta += ' \u00b7 ' + data.cacheHitRate.toFixed(0) + '% cache';
+    if (data.contextPercent != null && data.contextPercent > 0) finalMeta += ' \u00b7 ' + data.contextPercent.toFixed(0) + '% ctx';
+    entry.statusSpan.textContent = finalMeta;
     // Dismiss track immediately so it fades together with the fill
     setTimeout(() => {
       entry.element.classList.add('dismissing');

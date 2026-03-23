@@ -66,6 +66,8 @@ export interface RequestMetrics {
   tokensPerSec: number;
   timestamp: number;
   fallbackMode?: "sequential" | "race";
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
 }
 
 export interface MetricsSummary {
@@ -74,6 +76,9 @@ export interface MetricsSummary {
   totalInputTokens: number;
   totalOutputTokens: number;
   avgTokensPerSec: number;
+  totalCacheReadTokens: number;
+  totalCacheCreationTokens: number;
+  avgCacheHitRate: number;
   activeModels: { model: string; actualModel?: string; count: number; lastSeen: number }[];
   providerDistribution: { provider: string; count: number }[];
   recentRequests: RequestMetrics[];
@@ -97,4 +102,9 @@ export interface StreamEvent {
   tokensPerSec?: number;
   message?: string;
   preview?: string;
+  cacheReadTokens?: number;
+  cacheCreationTokens?: number;
+  cacheHitRate?: number;
+  contextPercent?: number;
+  contextWindowSize?: number;
 }

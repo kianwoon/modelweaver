@@ -1,3 +1,4 @@
+use tauri::Manager;
 use tauri::command;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -11,6 +12,9 @@ struct MetricsResult {
     active_models: Option<Vec<serde_json::Value>>,
     provider_distribution: Option<Vec<serde_json::Value>>,
     recent_requests: Option<Vec<serde_json::Value>>,
+    total_cache_read_tokens: Option<u64>,
+    total_cache_creation_tokens: Option<u64>,
+    avg_cache_hit_rate: Option<f64>,
 }
 
 #[command]
@@ -45,6 +49,9 @@ async fn fetch_metrics(port: u16) -> Result<MetricsResult, String> {
         active_models: data["activeModels"].as_array().cloned(),
         provider_distribution: data["providerDistribution"].as_array().cloned(),
         recent_requests: data["recentRequests"].as_array().cloned(),
+        total_cache_read_tokens: data["totalCacheReadTokens"].as_u64(),
+        total_cache_creation_tokens: data["totalCacheCreationTokens"].as_u64(),
+        avg_cache_hit_rate: data["avgCacheHitRate"].as_f64(),
     })
 }
 
@@ -63,9 +70,19 @@ async fn check_daemon(port: u16) -> Result<bool, String> {
 }
 
 pub fn run() {
+    let version = env!("PACKAGE_VERSION");
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![fetch_metrics, check_daemon])
+        .setup(move |app| {
+            let window = app.get_webview_window("main").unwrap();
+            window.set_title(&format!("ModelWeaver v{}", version)).unwrap();
+            let _ = window.eval(&format!(
+                "const t=document.querySelector('.titlebar .title');if(t)t.textContent='ModelWeaver v{}'",
+                version
+            ));
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

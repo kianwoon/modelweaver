@@ -13,6 +13,37 @@ import type { MetricsStore } from "./metrics.js";
 import { broadcastStreamEvent } from "./ws.js";
 import type { StreamEvent } from "./types.js";
 
+const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
+  'claude-opus-4-6': 200000,
+  'claude-sonnet-4-6': 200000,
+  'claude-haiku-4-5-20251001': 200000,
+  'claude-3-5-sonnet': 200000,
+  'claude-3-5-haiku': 200000,
+  'glm-4.7': 128000,
+  'glm-5-turbo': 128000,
+};
+
+function getContextWindow(model: string): number {
+  // Exact match first, then prefix match
+  if (MODEL_CONTEXT_WINDOWS[model]) return MODEL_CONTEXT_WINDOWS[model];
+  for (const [key, size] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+    if (model.startsWith(key)) return size;
+  }
+  return 0;
+}
+
+function computeCacheHitRate(cacheRead: number, cacheCreation: number, input: number): number {
+  const totalInput = input + cacheRead + cacheCreation;
+  if (totalInput <= 0) return 0;
+  return Math.round((cacheRead / totalInput) * 1000) / 10;
+}
+
+function computeContextPercent(input: number, cacheRead: number, cacheCreation: number, output: number, contextWindow: number): number {
+  if (contextWindow <= 0) return 0;
+  const total = input + cacheRead + cacheCreation + output;
+  return Math.round((total / contextWindow) * 1000) / 10;
+}
+
 function anthropicError(type: string, message: string, requestId: string): Response {
   return new Response(
     JSON.stringify({ type: "error", error: { type, message } }),
@@ -30,17 +61,17 @@ function anthropicError(type: string, message: string, requestId: string): Respo
  * Parse token counts from an SSE data line's JSON payload.
  * Supports both Anthropic (input_tokens/output_tokens) and OpenAI (prompt_tokens/completion_tokens) formats.
  */
-function parseUsageFromData(data: Record<string, unknown>): { inputTokens: number; outputTokens: number } {
+function parseUsageFromData(data: Record<string, unknown>): { inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheCreationTokens: number } {
   const usage = (data.message as Record<string, unknown> | undefined)?.usage as Record<string, unknown> | undefined
     ?? data.usage as Record<string, unknown> | undefined;
-  if (!usage) return { inputTokens: 0, outputTokens: 0 };
+  if (!usage) return { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0 };
 
   const inp = (usage.input_tokens as number | undefined) ?? (usage.prompt_tokens as number | undefined) ?? 0;
   const out = (usage.output_tokens as number | undefined) ?? (usage.completion_tokens as number | undefined) ?? 0;
   const cacheRead = (usage.cache_read_input_tokens as number | undefined) ?? 0;
   const cacheCreation = (usage.cache_creation_input_tokens as number | undefined) ?? 0;
 
-  return { inputTokens: inp + cacheRead + cacheCreation, outputTokens: out };
+  return { inputTokens: inp + cacheRead + cacheCreation, outputTokens: out, cacheReadTokens: cacheRead, cacheCreationTokens: cacheCreation };
 }
 
 /**
@@ -60,7 +91,7 @@ function createMetricsTransform(
   const td = new TextDecoder();
 
   // --- SSE state ---
-  const tokens = { input: 0, output: 0 };
+  const tokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let lineBuf = "";
   let eventBuf = "";
 
@@ -97,6 +128,8 @@ function createMetricsTransform(
           const usage = parseUsageFromData(data);
           if (usage.inputTokens > tokens.input) tokens.input = usage.inputTokens;
           if (usage.outputTokens > tokens.output) tokens.output = usage.outputTokens;
+          if (usage.cacheReadTokens > tokens.cacheRead) tokens.cacheRead = usage.cacheReadTokens;
+          if (usage.cacheCreationTokens > tokens.cacheCreation) tokens.cacheCreation = usage.cacheCreationTokens;
         }
 
         // Extract text content for preview
@@ -158,7 +191,7 @@ function createMetricsTransform(
     }
   };
 
-  const recordMetrics = (inp: number, out: number) => {
+  const recordMetrics = (inp: number, out: number, cacheRead: number = 0, cacheCreation: number = 0) => {
     try {
       const latencyMs = Date.now() - ctx.startTime;
       const latencySec = latencyMs / 1000;
@@ -178,9 +211,12 @@ function createMetricsTransform(
         tokensPerSec: Math.round(tps * 10) / 10,
         timestamp: Date.now(),
         fallbackMode: ctx.fallbackMode,
+        cacheReadTokens: cacheRead,
+        cacheCreationTokens: cacheCreation,
       });
 
       // Broadcast completion event
+      const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
       setImmediate(() => {
         broadcastStreamEvent({
           requestId: ctx.requestId,
@@ -193,6 +229,11 @@ function createMetricsTransform(
           outputTokens: out,
           tokensPerSec: Math.round(tps * 10) / 10,
           timestamp: Date.now(),
+          cacheReadTokens: cacheRead,
+          cacheCreationTokens: cacheCreation,
+          cacheHitRate: computeCacheHitRate(cacheRead, cacheCreation, inp),
+          contextPercent: computeContextPercent(inp, cacheRead, cacheCreation, out, contextWindow),
+          contextWindowSize: contextWindow || undefined,
         });
       });
     } catch {
@@ -229,6 +270,7 @@ function createMetricsTransform(
       if (firstChunk || now - lastStreamEmit >= STREAM_THROTTLE_MS) {
         lastStreamEmit = now;
         firstChunk = false;
+        const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
         setImmediate(() => {
           broadcastStreamEvent({
             requestId: ctx.requestId,
@@ -238,12 +280,15 @@ function createMetricsTransform(
             outputTokens: tokens.output,
             timestamp: now,
             preview: responsePreview,
+            cacheHitRate: computeCacheHitRate(tokens.cacheRead, tokens.cacheCreation, tokens.input),
+            contextPercent: computeContextPercent(tokens.input, tokens.cacheRead, tokens.cacheCreation, tokens.output, contextWindow),
+            contextWindowSize: contextWindow || undefined,
           });
         });
       }
 
       if (isFinal) {
-        recordMetrics(tokens.input, tokens.output);
+        recordMetrics(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheCreation);
       }
     } else {
       windowBuf += decoded;
@@ -257,6 +302,7 @@ function createMetricsTransform(
       if (firstChunk || nowJson - lastStreamEmit >= STREAM_THROTTLE_MS) {
         lastStreamEmit = nowJson;
         firstChunk = false;
+        const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
         setImmediate(() => {
           broadcastStreamEvent({
             requestId: ctx.requestId,
@@ -266,13 +312,16 @@ function createMetricsTransform(
             outputTokens,
             timestamp: nowJson,
             preview: responsePreview,
+            cacheHitRate: computeCacheHitRate(cacheReadTokens, cacheCreationTokens, inputTokens),
+            contextPercent: computeContextPercent(inputTokens, cacheReadTokens, cacheCreationTokens, outputTokens, contextWindow),
+            contextWindowSize: contextWindow || undefined,
           });
         });
       }
 
       if (isFinal) {
         const totalInput = inputTokens + cacheReadTokens + cacheCreationTokens;
-        recordMetrics(totalInput, outputTokens);
+        recordMetrics(totalInput, outputTokens, cacheReadTokens, cacheCreationTokens);
       }
     }
   };
