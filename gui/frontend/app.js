@@ -415,7 +415,7 @@ function createActivityBar(requestId, model, tier) {
   activityContent.appendChild(track);
   trimBars();
 
-  return { element: track, fill, label, statusSpan, startTime: Date.now(), lastOutputTokens: 0, model, tier };
+  return { element: track, fill, label, statusSpan, startTime: Date.now(), lastOutputTokens: 0, model, tier, ttfbTimer: null };
 }
 
 function trimBars() {
@@ -428,6 +428,7 @@ function trimBars() {
 function removeActivityBar(requestId) {
   const entry = activeRequests.get(requestId);
   if (!entry) return;
+  if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
   const bar = entry.element;
   bar.remove();
   activeRequests.delete(requestId);
@@ -447,16 +448,17 @@ function handleStreamEvent(data) {
   if (data.state === 'start') {
     const bar = createActivityBar(data.requestId, data.model, data.tier);
     activeRequests.set(data.requestId, bar);
-    setTimeout(() => {
-      if (bar.fill) {
-        bar.fill.classList.remove('state-start');
-        bar.fill.classList.add('state-streaming');
-      }
-    }, 300);
+    bar.ttfbTimer = setInterval(() => {
+      const elapsed = ((Date.now() - bar.startTime) / 1000).toFixed(1);
+      bar.statusSpan.textContent = elapsed + 's';
+    }, 100);
 
   } else if (data.state === 'streaming') {
     const entry = activeRequests.get(data.requestId);
     if (!entry) return;
+    if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+    entry.fill.classList.remove('state-start');
+    entry.fill.classList.add('state-streaming');
     const elapsed = (Date.now() - entry.startTime) / 1000;
     const pct = Math.min(80, elapsed * 5);
     entry.fill.style.width = pct + '%';
@@ -466,6 +468,7 @@ function handleStreamEvent(data) {
   } else if (data.state === 'fallback') {
     const entry = activeRequests.get(data.requestId);
     if (!entry) return;
+    if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
     entry.fill.classList.remove('state-streaming');
     entry.fill.classList.add('state-fallback');
     entry.statusSpan.textContent = 'fallback \u2192 ' + (data.to || '?');
@@ -473,6 +476,7 @@ function handleStreamEvent(data) {
   } else if (data.state === 'complete') {
     const entry = activeRequests.get(data.requestId);
     if (!entry) return;
+    if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
     entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
     entry.fill.classList.add('state-complete');
     entry.fill.style.width = '100%';
@@ -486,6 +490,7 @@ function handleStreamEvent(data) {
   } else if (data.state === 'error') {
     const entry = activeRequests.get(data.requestId);
     if (!entry) return;
+    if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
     entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
     entry.fill.classList.add('state-error');
     if (!entry.fill.style.width || entry.fill.style.width === '0%') {
@@ -554,6 +559,10 @@ function connectWebSocket(port) {
   ws.addEventListener('close', () => {
     ws = null;
     console.log('[WebSocket] closed');
+    // Clean up orphaned progress bars — server won't send events for them after reconnect
+    for (const [reqId] of activeRequests) {
+      removeActivityBar(reqId);
+    }
     // Restart HTTP polling as fallback
     if (!pollTimer) {
       pollTimer = setInterval(fetchSummary, POLL_INTERVAL);

@@ -9,6 +9,7 @@ export interface ProviderConfig {
   baseUrl: string;
   apiKey: string;
   timeout: number;
+  ttfbTimeout?: number;
   authType?: "anthropic" | "bearer";
   modelLimits?: ModelLimits;
 

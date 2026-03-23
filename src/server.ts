@@ -339,19 +339,40 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
 
     // Forward with fallback chain
     let successfulProvider = "unknown";
-    const response = await forwardWithFallback(
-      config.providers,
-      ctx.providerChain,
-      ctx,
-      c.req.raw,
-      (provider, index) => {
-        logger.info("Attempting provider", { requestId, provider, index, tier: ctx.tier });
-        // Only capture first attempted provider; accurate winner tracking requires
-        // an onSuccess callback in proxy.ts (handled separately).
-        if (!successfulProvider) successfulProvider = provider;
-      },
-      logger
-    );
+    let response: Response;
+    try {
+      response = await forwardWithFallback(
+        config.providers,
+        ctx.providerChain,
+        ctx,
+        c.req.raw,
+        (provider, index) => {
+          logger.info("Attempting provider", { requestId, provider, index, tier: ctx.tier });
+          // Only capture first attempted provider; accurate winner tracking requires
+          // an onSuccess callback in proxy.ts (handled separately).
+          if (!successfulProvider) successfulProvider = provider;
+        },
+        logger
+      );
+    } catch (err) {
+      const errMsg = err instanceof Error ? err.message : String(err);
+      logger.error("Forward failed", { requestId, error: errMsg });
+      setImmediate(() => {
+        broadcastStreamEvent({
+          requestId,
+          model,
+          tier: ctx.tier,
+          state: "error",
+          status: 502,
+          message: errMsg,
+          timestamp: Date.now(),
+        });
+      });
+      return c.json(
+        { type: "error", error: { type: "api_error", message: "Upstream request failed: " + errMsg } },
+        502
+      );
+    }
 
     // Broadcast error event for non-2xx responses
     if (response.status >= 400) {

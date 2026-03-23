@@ -20,6 +20,7 @@ const providerSchema = z.object({
   ),
   apiKey: z.string().min(1, "apiKey is required"),
   timeout: z.number().default(30000),
+  ttfbTimeout: z.number().default(15000),
   authType: z.enum(["anthropic", "bearer"]).default("anthropic"),
   modelLimits: modelLimitsSchema,
   poolSize: z.number().int().min(1).max(100).optional(),
@@ -212,6 +213,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
       baseUrl: p.baseUrl,
       apiKey: p.apiKey,
       timeout: p.timeout,
+      ttfbTimeout: p.ttfbTimeout,
       authType: p.authType,
       modelLimits: p.modelLimits ? { maxOutputTokens: p.modelLimits.maxOutputTokens } : undefined,
     };

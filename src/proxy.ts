@@ -416,11 +416,25 @@ export async function forwardRequest(
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), provider.timeout);
 
+  // TTFB timeout: fail if no response headers received within ttfbTimeout ms
+  const ttfbTimeout = provider.ttfbTimeout ?? 10000;
+  let ttfbTimedOut = false;
+  let ttfbTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const ttfbPromise = new Promise<never>((_, reject) => {
+    ttfbTimer = setTimeout(() => {
+      ttfbTimedOut = true;
+      controller.abort();
+      reject(new Error(`TTFB timeout after ${ttfbTimeout}ms`));
+    }, ttfbTimeout);
+  });
+
   // Listen for external abort (from race cancellation) to abort this request
   if (externalSignal) {
     if (externalSignal.aborted) {
       // Already aborted — don't even start the request
       clearTimeout(timeout);
+      if (ttfbTimer) clearTimeout(ttfbTimer);
       const body = JSON.stringify({
           type: "error",
           error: { type: "overloaded_error", message: `Provider "${provider.name}" cancelled by race winner` },
@@ -435,18 +449,25 @@ export async function forwardRequest(
     }
     const onExternalAbort = () => {
       clearTimeout(timeout);
+      if (ttfbTimer) clearTimeout(ttfbTimer);
     };
     externalSignal.addEventListener("abort", onExternalAbort, { once: true });
   }
 
   try {
-    const undiciResponse = await undiciRequest(url, {
-      method: "POST",
-      headers,
-      body,
-      signal: controller.signal,
-      dispatcher: provider._agent,
-    });
+    const undiciResponse = await Promise.race([
+      undiciRequest(url, {
+        method: "POST",
+        headers,
+        body,
+        signal: controller.signal,
+        dispatcher: provider._agent,
+      }),
+      ttfbPromise,
+    ]);
+
+    // TTFB succeeded — cancel TTFB timer
+    if (ttfbTimer) clearTimeout(ttfbTimer);
 
     // Wrap undici response as a standard Web Response for downstream compatibility
     const response = new Response(
@@ -461,10 +482,14 @@ export async function forwardRequest(
     return response;
   } catch (error) {
     clearTimeout(timeout);
+    if (ttfbTimer) clearTimeout(ttfbTimer);
+
     // Network errors / timeouts — return a synthetic 502
-    const message = error instanceof DOMException && error.name === "AbortError"
-      ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
-      : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
+    const message = ttfbTimedOut
+      ? `Provider "${provider.name}" timed out waiting for first byte after ${ttfbTimeout}ms`
+      : error instanceof DOMException && error.name === "AbortError"
+        ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
+        : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
 
     const body = JSON.stringify({
         type: "error",
