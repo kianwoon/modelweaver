@@ -19,9 +19,9 @@ const providerSchema = z.object({
     "baseUrl must use http:// or https://"
   ),
   apiKey: z.string().min(1, "apiKey is required"),
-  timeout: z.number().default(30000),
-  ttfbTimeout: z.number().default(15000),
-  stallTimeout: z.number().default(30000),
+  timeout: z.number().positive().default(30000),
+  ttfbTimeout: z.number().positive().default(15000),
+  stallTimeout: z.number().positive().default(30000),
   authType: z.enum(["anthropic", "bearer"]).default("anthropic"),
   modelLimits: modelLimitsSchema,
   concurrentLimit: z.number().int().min(1).optional(),
@@ -230,7 +230,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
       // If baseUrl is invalid, skip caching — buildOutboundHeaders will fall back gracefully
     }
     // Create per-provider connection pool for HTTP keep-alive reuse
-    const poolSize = (p as Record<string, unknown>).poolSize as number | undefined;
+    const poolSize = p.poolSize;
     providerConfig._agent = new Agent({
       keepAliveTimeout: 30000,
       keepAliveMaxTimeout: 60000,
@@ -239,7 +239,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
     });
     providerConfig.poolSize = poolSize ?? 10;
     // Create per-provider circuit breaker
-    const cbConfig = (p as Record<string, unknown>).circuitBreaker as Record<string, number> | undefined;
+    const cbConfig = p.circuitBreaker;
     providerConfig._circuitBreaker = new CircuitBreaker(cbConfig ? {
       failureThreshold: cbConfig.failureThreshold,
       windowSeconds: cbConfig.windowSeconds,

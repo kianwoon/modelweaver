@@ -23,6 +23,7 @@ export class CircuitBreaker {
   private state: BreakerState = "closed";
   private failureTimestamps: number[] = [];
   private openedAt: number | null = null;
+  private halfOpenInProgress: boolean = false;
   private readonly config: BreakerConfig;
 
   constructor(config: Partial<BreakerConfig> = {}) {
@@ -39,11 +40,17 @@ export class CircuitBreaker {
       }
       return false;
     }
-    // half-open: allow one probe
-    return true;
+    // half-open: allow exactly one probe at a time
+    if (!this.halfOpenInProgress) {
+      this.halfOpenInProgress = true;
+      return true;
+    }
+    return false;
   }
 
   recordResult(status: number): void {
+    this.halfOpenInProgress = false;
+
     if (status >= 200 && status < 300) {
       // Success — reset to closed
       this.state = "closed";

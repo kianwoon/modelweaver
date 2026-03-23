@@ -718,6 +718,16 @@ let reconnectTimer = null;
 const WS_MAX_BACKOFF = 30000;
 const WS_CONNECT_TIMEOUT = 5000;
 
+// Set custom titlebar version from the native window title (set by Rust backend)
+if (window.__TAURI__) {
+  const titleEl = document.querySelector('.titlebar .title');
+  if (titleEl) {
+    window.__TAURI__.window.getCurrentWindow().title().then((nativeTitle) => {
+      if (nativeTitle) titleEl.textContent = nativeTitle;
+    });
+  }
+}
+
 // Initial HTTP fetch for instant data
 fetchSummary();
 // Start polling as fallback

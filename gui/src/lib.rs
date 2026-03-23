@@ -1,4 +1,5 @@
 use tauri::Manager;
+use tauri::Emitter;
 use tauri::command;
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -77,10 +78,7 @@ pub fn run() {
         .setup(move |app| {
             let window = app.get_webview_window("main").unwrap();
             window.set_title(&format!("ModelWeaver v{}", version)).unwrap();
-            let _ = window.eval(&format!(
-                "const t=document.querySelector('.titlebar .title');if(t)t.textContent='ModelWeaver v{}'",
-                version
-            ));
+            window.emit("version-update", version).unwrap();
             Ok(())
         })
         .run(tauri::generate_context!())
