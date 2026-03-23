@@ -13,12 +13,20 @@ interface LatencySample {
 export class LatencyTracker {
   private samples = new Map<string, LatencySample[]>();
   private readonly maxSize: number;
+  private readonly MAX_PROVIDERS = 50;
 
   constructor(maxSize = 20) {
     this.maxSize = maxSize;
   }
 
   record(provider: string, ttfbMs: number): void {
+    // Cap total tracked providers to prevent unbounded growth
+    if (this.samples.size >= this.MAX_PROVIDERS && !this.samples.has(provider)) {
+      // Remove the first (oldest) provider key
+      const firstKey = this.samples.keys().next().value;
+      if (firstKey !== undefined) this.samples.delete(firstKey);
+    }
+
     let window = this.samples.get(provider);
     if (!window) {
       window = [];

@@ -421,7 +421,7 @@ export async function forwardRequest(
   const timeout = setTimeout(() => controller.abort(), provider.timeout);
 
   // TTFB timeout: fail if no response headers received within ttfbTimeout ms
-  const ttfbTimeout = provider.ttfbTimeout ?? 10000;
+  const ttfbTimeout = provider.ttfbTimeout ?? 15000;
   let ttfbTimedOut = false;
   let ttfbTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -807,10 +807,6 @@ export async function forwardWithFallback(
 
     const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger);
 
-    if (provider._circuitBreaker) {
-      provider._circuitBreaker.recordResult(response.status);
-    }
-
     return response;
   }
 
@@ -875,7 +871,6 @@ export async function forwardWithFallback(
         index,
         logger,
       );
-      if (provider._circuitBreaker) provider._circuitBreaker.recordResult(response.status);
       return { response, index };
     } catch {
       if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502);
