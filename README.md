@@ -55,17 +55,17 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 ModelWeaver requires no permanent install — `npx` downloads and runs it on the fly. But if you prefer a global install:
 
 ```bash
-npm install -g modelweaver
+npm install -g @kianwoon/modelweaver
 ```
 
-After that, replace `npx modelweaver` with `modelweaver` in all commands below.
+After that, replace `npx @kianwoon/modelweaver` with `modelweaver` in all commands below.
 
 ## Quick Start
 
 ### 1. Run the setup wizard
 
 ```bash
-npx modelweaver init
+npx @kianwoon/modelweaver init
 ```
 
 The wizard guides you through:
@@ -78,10 +78,10 @@ The wizard guides you through:
 
 ```bash
 # Foreground (see logs in terminal)
-npx modelweaver
+npx @kianwoon/modelweaver
 
 # Background daemon (auto-restarts on crash)
-npx modelweaver start
+npx @kianwoon/modelweaver start
 ```
 
 ### 3. Point Claude Code to ModelWeaver
@@ -95,13 +95,13 @@ claude
 ## CLI Commands
 
 ```bash
-npx modelweaver init              # Interactive setup wizard
-npx modelweaver start             # Start as background daemon
-npx modelweaver stop              # Stop background daemon
-npx modelweaver status            # Show daemon status
-npx modelweaver remove            # Stop daemon + remove PID and log files
-npx modelweaver gui               # Launch desktop GUI (auto-downloads binary)
-npx modelweaver [options]         # Run in foreground
+npx @kianwoon/modelweaver init              # Interactive setup wizard
+npx @kianwoon/modelweaver start             # Start as background daemon
+npx @kianwoon/modelweaver stop              # Stop background daemon
+npx @kianwoon/modelweaver status            # Show daemon status
+npx @kianwoon/modelweaver remove            # Stop daemon + remove PID and log files
+npx @kianwoon/modelweaver gui               # Launch desktop GUI (auto-downloads binary)
+npx @kianwoon/modelweaver [options]         # Run in foreground
 ```
 
 ### CLI Options
@@ -118,10 +118,10 @@ npx modelweaver [options]         # Run in foreground
 Run ModelWeaver as a background process that survives terminal closure and auto-recovers from crashes.
 
 ```bash
-npx modelweaver start             # Start (forks monitor + daemon)
-npx modelweaver status            # Check if running
-npx modelweaver stop               # Graceful stop (SIGTERM → SIGKILL after 5s)
-npx modelweaver remove             # Stop + remove PID file + log file
+npx @kianwoon/modelweaver start             # Start (forks monitor + daemon)
+npx @kianwoon/modelweaver status            # Check if running
+npx @kianwoon/modelweaver stop               # Graceful stop (SIGTERM → SIGKILL after 5s)
+npx @kianwoon/modelweaver remove             # Stop + remove PID file + log file
 ```
 
 **How it works**: `start` forks a lightweight monitor process that owns the PID file. The monitor spawns the actual daemon worker. If the worker crashes, the monitor auto-restarts it after a 2-second delay (up to 5 restarts per 60-second window to prevent crash loops).
@@ -141,7 +141,7 @@ modelweaver.pid        → Monitor process (handles signals, watches child)
 ModelWeaver ships a native desktop GUI built with Tauri. No Rust toolchain needed — the binary is auto-downloaded from GitHub Releases.
 
 ```bash
-npx modelweaver gui
+npx @kianwoon/modelweaver gui
 ```
 
 First run downloads the latest binary for your platform (~10-30 MB). Subsequent launches use the cached version.
@@ -250,7 +250,7 @@ In daemon mode, ModelWeaver watches the config file for changes and reloads auto
 kill -SIGUSR1 $(cat ~/.modelweaver/modelweaver.pid)
 ```
 
-Or just re-run `npx modelweaver init` — it automatically signals the running daemon to reload.
+Or just re-run `npx @kianwoon/modelweaver init` — it automatically signals the running daemon to reload.
 
 ## API
 
