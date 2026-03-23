@@ -481,6 +481,7 @@ export async function forwardRequest(
     const passThrough = new PassThrough();
 
     let stallTimerRef = setTimeout(() => {
+      broadcastStreamEvent(requestId, { state: "error", error: `Body stalled: no data after ${stallTimeout}ms` });
       passThrough.destroy(new Error(`Body stalled: no data after ${stallTimeout}ms`));
     }, stallTimeout);
 
@@ -488,6 +489,7 @@ export async function forwardRequest(
     passThrough.on("data", () => {
       clearTimeout(stallTimerRef);
       stallTimerRef = setTimeout(() => {
+        broadcastStreamEvent(requestId, { state: "error", error: `Body stalled: no data after ${stallTimeout}ms` });
         passThrough.destroy(new Error(`Body stalled: no data after ${stallTimeout}ms`));
       }, stallTimeout);
     });
