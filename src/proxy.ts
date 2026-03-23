@@ -26,6 +26,9 @@ const MAX_TOKENS_REGEX = /"max_tokens"\s*:\s*(\d+)/;
 /** Module-level TextEncoder — avoids per-request allocation */
 const textEncoder = new TextEncoder();
 
+/** Delay (ms) before starting backup providers in staggered race */
+const SPECULATIVE_DELAY = 3000;
+
 export function isRetriable(status: number): boolean {
   return status === 429 || status >= 500;
 }
@@ -663,10 +666,9 @@ export async function forwardWithFallback(
   onAttempt?: (provider: string, index: number) => void,
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
 ): Promise<Response> {
-  let lastResponse: Response | null = null;
-
-  for (let i = 0; i < chain.length; i++) {
-    const entry = chain[i];
+  // Single provider — no racing needed
+  if (chain.length <= 1) {
+    const entry = chain[0];
     const provider = providers.get(entry.provider);
 
     if (!provider) {
@@ -674,88 +676,225 @@ export async function forwardWithFallback(
           type: "error",
           error: { type: "api_error", message: `Unknown provider: ${entry.provider}` },
         });
-      lastResponse = new Response(errBody, {
+      return new Response(errBody, {
         status: 502,
         headers: {
           "content-type": "application/json",
           "content-length": textEncoder.encode(errBody).byteLength.toString(),
         },
       });
-      continue;
     }
 
-    // Check circuit breaker before attempting provider
     if (provider._circuitBreaker && !provider._circuitBreaker.canProceed()) {
       logger?.warn("Provider skipped by circuit breaker", { requestId: ctx.requestId, provider: entry.provider });
-      continue;
+      const errBody = JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
+        });
+      return new Response(errBody, {
+        status: 502,
+        headers: {
+          "content-type": "application/json",
+          "content-length": textEncoder.encode(errBody).byteLength.toString(),
+        },
+      });
     }
 
-    onAttempt?.(entry.provider, i);
+    onAttempt?.(entry.provider, 0);
 
-    // forwardRequest uses ctx.rawBody, so body can be re-read on each attempt
-    const response = await forwardRequest(provider, entry, ctx, incomingRequest, undefined, i);
-    lastResponse = response;
+    const response = await forwardRequest(provider, entry, ctx, incomingRequest, undefined, 0);
 
-    // Record result for circuit breaker
     if (provider._circuitBreaker) {
       provider._circuitBreaker.recordResult(response.status);
     }
 
-    // Success — return immediately
-    if (response.status >= 200 && response.status < 300) {
-      return response;
-    }
-
-    // Non-retriable error — check for context window limit before passing through
-    if (!isRetriable(response.status)) {
-      if (response.status === 400 && response.body) {
-        try {
-          const errBody = await response.text();
-          const handled = handleContextWindowError(response.status, errBody);
-          if (handled) return handled;
-          // Not a context error — re-create response with buffered body
-          return new Response(errBody, {
-            status: response.status,
-            statusText: response.statusText,
-            headers: response.headers,
-          });
-        } catch {
-          return response;
-        }
-      }
-      return response;
-    }
-
-    // Retriable error — if there are more providers, drain body and try next
-    if (i < chain.length - 1) {
-      await response.body?.cancel();
-
-      // On 429: race remaining providers simultaneously
-      if (response.status === 429 && i + 1 < chain.length) {
-        ctx.fallbackMode = "race";
-        const remaining = chain.slice(i + 1);
-        return raceProviders(remaining, providers, ctx, incomingRequest, onAttempt, logger, i + 1);
-      }
-      continue;
-    }
-    // Last provider in chain — return the error as-is (body still readable)
     return response;
   }
 
-  // All providers exhausted — return the last real error response if available
-  if (lastResponse) {
-    return lastResponse;
+  // Multiple providers — staggered race
+  const sharedController = new AbortController();
+  const completed = new Set<number>();
+  const failures: { response: Response; index: number }[] = [];
+
+  async function attemptProvider(
+    index: number,
+  ): Promise<{ response: Response; index: number }> {
+    const entry = chain[index];
+    const provider = providers.get(entry.provider);
+
+    if (!provider) {
+      const errBody = JSON.stringify({
+        type: "error",
+        error: { type: "api_error", message: `Unknown provider: ${entry.provider}` },
+      });
+      return {
+        response: new Response(errBody, {
+          status: 502,
+          headers: {
+            "content-type": "application/json",
+            "content-length": textEncoder.encode(errBody).byteLength.toString(),
+          },
+        }),
+        index,
+      };
+    }
+
+    if (provider._circuitBreaker && !provider._circuitBreaker.canProceed()) {
+      logger?.warn("Provider skipped by circuit breaker", {
+        requestId: ctx.requestId,
+        provider: entry.provider,
+      });
+      const errBody = JSON.stringify({
+        type: "error",
+        error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
+      });
+      return {
+        response: new Response(errBody, {
+          status: 502,
+          headers: {
+            "content-type": "application/json",
+            "content-length": textEncoder.encode(errBody).byteLength.toString(),
+          },
+        }),
+        index,
+      };
+    }
+
+    onAttempt?.(entry.provider, index);
+
+    try {
+      const response = await forwardRequest(
+        provider,
+        entry,
+        ctx,
+        incomingRequest,
+        sharedController.signal,
+        index,
+      );
+      if (provider._circuitBreaker) provider._circuitBreaker.recordResult(response.status);
+      return { response, index };
+    } catch {
+      if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502);
+      const errBody = JSON.stringify({
+        type: "error",
+        error: { type: "api_error", message: `Provider "${entry.provider}" failed` },
+      });
+      return {
+        response: new Response(errBody, {
+          status: 502,
+          headers: {
+            "content-type": "application/json",
+            "content-length": textEncoder.encode(errBody).byteLength.toString(),
+          },
+        }),
+        index,
+      };
+    }
   }
 
-  const fallbackBody = JSON.stringify({
-    type: "error",
-    error: { type: "overloaded_error", message: "All providers exhausted" },
-  });
-  return new Response(fallbackBody, {
-    status: 502,
-    headers: {
-      "content-type": "application/json",
-      "content-length": textEncoder.encode(fallbackBody).byteLength.toString(),
-    },
-  });
+  // Build staggered race promises:
+  //   Provider 0 starts immediately
+  //   Provider 1+ start after SPECULATIVE_DELAY (if race not already won)
+  const races: Promise<{ response: Response; index: number }>[] = [];
+
+  for (let i = 0; i < chain.length; i++) {
+    if (i === 0) {
+      races.push(attemptProvider(0));
+    } else {
+      races.push(
+        new Promise<{ response: Response; index: number }>((resolve) => {
+          setTimeout(() => {
+            if (sharedController.signal.aborted) {
+              // Race already won — resolve with a cancelled placeholder
+              const errBody = JSON.stringify({
+                type: "error",
+                error: { type: "api_error", message: "Cancelled by race winner" },
+              });
+              resolve({
+                response: new Response(errBody, {
+                  status: 502,
+                  headers: { "content-type": "application/json" },
+                }),
+                index: i,
+              });
+              return;
+            }
+            attemptProvider(i).then(resolve);
+          }, SPECULATIVE_DELAY);
+        }),
+      );
+    }
+  }
+
+  // Pick winner — same logic as raceProviders
+  try {
+    while (completed.size < races.length) {
+      const pending = races.filter((_, idx) => !completed.has(idx));
+      if (pending.length === 0) break;
+
+      const winner = await Promise.race(pending);
+      completed.add(winner.index);
+
+      if (winner.response.status >= 200 && winner.response.status < 300) {
+        sharedController.abort();
+        for (const f of failures) {
+          try {
+            f.response.body?.cancel();
+          } catch {
+            /* ignore */
+          }
+        }
+        return winner.response;
+      }
+
+      if (!isRetriable(winner.response.status)) {
+        sharedController.abort();
+        if (winner.response.status === 400 && winner.response.body) {
+          try {
+            const errBody = await winner.response.text();
+            const handled = handleContextWindowError(winner.response.status, errBody);
+            if (handled) return handled;
+            return new Response(errBody, {
+              status: winner.response.status,
+              statusText: winner.response.statusText,
+              headers: winner.response.headers,
+            });
+          } catch {
+            return winner.response;
+          }
+        }
+        return winner.response;
+      }
+
+      failures.push(winner);
+    }
+
+    sharedController.abort();
+    if (failures.length > 0) return failures[0].response;
+
+    const errBody = JSON.stringify({
+      type: "error",
+      error: { type: "overloaded_error", message: "All providers failed" },
+    });
+    return new Response(errBody, {
+      status: 502,
+      headers: {
+        "content-type": "application/json",
+        "content-length": textEncoder.encode(errBody).byteLength.toString(),
+      },
+    });
+  } catch {
+    sharedController.abort();
+    const errBody = JSON.stringify({
+      type: "error",
+      error: { type: "overloaded_error", message: "All providers failed" },
+    });
+    return new Response(errBody, {
+      status: 502,
+      headers: {
+        "content-type": "application/json",
+        "content-length": textEncoder.encode(errBody).byteLength.toString(),
+      },
+    });
+  }
 }
