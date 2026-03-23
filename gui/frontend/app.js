@@ -431,7 +431,9 @@ function trimBars() {
 function removeActivityBar(requestId) {
   const entry = activeRequests.get(requestId);
   if (!entry) return;
-  if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+  if (entry) entry.ttfbCleared = true;
+  if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
+  if (entry) entry.ttfbTimer = null;
   const bar = entry.element;
   bar.remove();
   activeRequests.delete(requestId);
@@ -451,6 +453,13 @@ function removeActivityBar(requestId) {
 const pendingStreamUpdates = new Map();
 let rafScheduled = false;
 
+// Throttle updateSummary to prevent DOM destruction/reconstruction freeze
+let lastSummaryUpdate = 0;
+const SUMMARY_THROTTLE_MS = 1000;
+let summaryDirty = false;
+let summaryData = null;
+let summaryThrottleTimer = null;
+
 function flushStreamUpdates() {
   rafScheduled = false;
   for (const [requestId, data] of pendingStreamUpdates) {
@@ -462,7 +471,9 @@ function flushStreamUpdates() {
 function applyStreamingUpdate(requestId, data) {
   const entry = activeRequests.get(requestId);
   if (!entry) return;
-  if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+  if (entry) entry.ttfbCleared = true;
+  if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
+  if (entry) entry.ttfbTimer = null;
   entry.fill.classList.remove('state-start');
   entry.fill.classList.add('state-streaming');
   const elapsed = (Date.now() - entry.startTime) / 1000;
@@ -497,20 +508,42 @@ function applyStreamingUpdate(requestId, data) {
   }
 }
 
+function scheduleSummaryUpdate(data) {
+  summaryData = data;
+  summaryDirty = true;
+  const now = Date.now();
+  const elapsed = now - lastSummaryUpdate;
+  if (elapsed >= SUMMARY_THROTTLE_MS) {
+    flushSummaryUpdate();
+  } else if (!summaryThrottleTimer) {
+    summaryThrottleTimer = setTimeout(flushSummaryUpdate, SUMMARY_THROTTLE_MS - elapsed);
+  }
+}
+
+function flushSummaryUpdate() {
+  if (summaryThrottleTimer) { clearTimeout(summaryThrottleTimer); summaryThrottleTimer = null; }
+  if (!summaryDirty || !summaryData) return;
+  summaryDirty = false;
+  lastSummaryUpdate = Date.now();
+  updateSummary(summaryData);
+  summaryData = null;
+}
+
 function handleStreamEvent(data) {
   if (data.state === 'start') {
     const bar = createActivityBar(data.requestId, data.model, data.tier);
     activeRequests.set(data.requestId, bar);
     bar.provider = data.provider || '';
-    bar.ttfbTimer = setInterval(() => {
-      const elapsed = ((Date.now() - bar.startTime) / 1000).toFixed(1);
-      bar.statusSpan.textContent = (bar.provider || '') + ' ' + elapsed + 's';
-    }, 100);
+    bar.statusSpan.textContent = (bar.provider || '') + ' connecting...';
+    bar.ttfbTimer = null;
+    bar.ttfbCleared = true;
 
   } else if (data.state === 'ttfb') {
     const entry = activeRequests.get(data.requestId);
     if (!entry) return;
-    if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+    if (entry) entry.ttfbCleared = true;
+    if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
+    if (entry) entry.ttfbTimer = null;
     entry.fill.classList.remove('state-start');
     entry.fill.classList.add('state-streaming');
     const secs = ((Date.now() - entry.startTime) / 1000).toFixed(1);
@@ -519,6 +552,7 @@ function handleStreamEvent(data) {
     entry.headerInfo = hdr + 'B hdr';
 
   } else if (data.state === 'streaming') {
+    if (activeRequests.size >= 2) return;
     if (!activeRequests.has(data.requestId)) return;
     // Batch streaming DOM updates via rAF — coalesces multiple events per frame
     pendingStreamUpdates.set(data.requestId, data);
@@ -530,7 +564,9 @@ function handleStreamEvent(data) {
   } else if (data.state === 'fallback') {
     const entry = activeRequests.get(data.requestId);
     if (!entry) return;
-    if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+    if (entry) entry.ttfbCleared = true;
+    if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
+    if (entry) entry.ttfbTimer = null;
     entry.fill.classList.remove('state-streaming');
     entry.fill.classList.add('state-fallback');
     entry.statusSpan.textContent = 'fallback \u2192 ' + (data.to || '?');
@@ -538,7 +574,9 @@ function handleStreamEvent(data) {
   } else if (data.state === 'complete') {
     const entry = activeRequests.get(data.requestId);
     if (!entry) return;
-    if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+    if (entry) entry.ttfbCleared = true;
+    if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
+    if (entry) entry.ttfbTimer = null;
     entry.element.removeAttribute('data-preview');
     entry.element.style.marginBottom = '';
     entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
@@ -559,7 +597,9 @@ function handleStreamEvent(data) {
   } else if (data.state === 'error') {
     const entry = activeRequests.get(data.requestId);
     if (!entry) return;
-    if (entry.ttfbTimer) { clearInterval(entry.ttfbTimer); entry.ttfbTimer = null; }
+    if (entry) entry.ttfbCleared = true;
+    if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
+    if (entry) entry.ttfbTimer = null;
     entry.element.removeAttribute('data-preview');
     entry.element.style.marginBottom = '';
     entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
@@ -615,10 +655,15 @@ function connectWebSocket(port) {
   });
 
   ws.addEventListener('message', (event) => {
+    // Allow start/complete/error/ttfb for bar lifecycle, skip summary/request/streaming
+    if (activeRequests.size >= 2) {
+      const raw = typeof event.data === 'string' ? event.data : '';
+      if (!raw.includes('"complete"') && !raw.includes('"error"')) return;
+    }
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === 'summary') {
-        updateSummary(msg.data);
+        scheduleSummaryUpdate(msg.data);
       } else if (msg.type === 'request') {
         appendRequestMetric(msg.data);
       } else if (msg.type === 'stream') {
@@ -656,7 +701,7 @@ function connectWebSocket(port) {
 async function fetchSummary() {
   try {
     const data = await invoke('fetch_metrics', { port: DEFAULT_PORT });
-    updateSummary(data);
+    scheduleSummaryUpdate(data);
     // Don't overwrite status if WebSocket is already live
     if (ws) setStatus('live');
   } catch (err) {

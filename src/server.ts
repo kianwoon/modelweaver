@@ -444,20 +444,23 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         },
         logger
       );
-    // Broadcast TTFB event — headers received from upstream
-    let headerSize = 0;
-    response.headers.forEach((v, k) => { headerSize += k.length + v.length + 4; });
-    setImmediate(() => {
-      broadcastStreamEvent({
-        requestId,
-        model,
-        tier: ctx.tier,
-        state: "ttfb",
-        status: response.status,
-        headerSize,
-        timestamp: Date.now(),
+    // Broadcast TTFB event — headers received from upstream (skip for error responses)
+    if (response.status < 400) {
+      let headerSize = 17; // approximate HTTP status line: "HTTP/1.1 200 OK\r\n"
+      response.headers.forEach((v, k) => { headerSize += k.length + v.length + 4; });
+      headerSize += 2; // trailing CRLF
+      setImmediate(() => {
+        broadcastStreamEvent({
+          requestId,
+          model,
+          tier: ctx.tier,
+          state: "ttfb",
+          status: response.status,
+          headerSize,
+          timestamp: Date.now(),
+        });
       });
-    });
+    }
 
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);

@@ -13,6 +13,8 @@ const PING_INTERVAL_MS = 30_000; // 30 seconds
 const MAX_MISSED_PONGS = 2;
 const BACKPRESSURE_THRESHOLD = 64 * 1024; // 64KB
 const SUMMARY_DEBOUNCE_MS = 500;
+const STREAM_WS_THROTTLE_MS = 500; // caps stream event delivery to ~2 Hz per client
+const clientStreamThrottle = new WeakMap<any, number>();
 
 let wssInstance: InstanceType<typeof import("ws").WebSocketServer> | null = null;
 
@@ -98,13 +100,22 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
 export function broadcastStreamEvent(data: StreamEvent): void {
   if (!wssInstance) return;
   const msg = JSON.stringify({ type: "stream", data });
+  const isStreaming = data.state === "streaming";
+  const now = Date.now();
   for (const client of wssInstance.clients) {
-    if (client.readyState === client.OPEN) {
-      setImmediate(() => {
-        if (client.readyState === client.OPEN) {
-          client.send(msg);
-        }
-      });
+    if (client.readyState !== client.OPEN) continue;
+    // Backpressure: skip if outbound buffer is too large
+    if (client.bufferedAmount > BACKPRESSURE_THRESHOLD) continue;
+    // Throttle streaming events per client (non-streaming events always pass)
+    if (isStreaming) {
+      const lastEmit = clientStreamThrottle.get(client) ?? 0;
+      if (now - lastEmit < STREAM_WS_THROTTLE_MS) continue;
+      clientStreamThrottle.set(client, now);
     }
+    setImmediate(() => {
+      if (client.readyState === client.OPEN) {
+        client.send(msg);
+      }
+    });
   }
 }

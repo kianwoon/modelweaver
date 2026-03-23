@@ -477,25 +477,26 @@ export async function forwardRequest(
     // Body stall detection: pipe through PassThrough to monitor for data without
     // interfering with undici's internal stream state (no flowing mode conflict).
     const stallTimeout = provider.stallTimeout ?? 30000;
-    let stalledBodyTimedOut = false;
     const passThrough = new PassThrough();
 
-    const stallTimer = setTimeout(() => {
-      stalledBodyTimedOut = true;
+    let stallTimerRef = setTimeout(() => {
       passThrough.destroy(new Error(`Body stalled: no data after ${stallTimeout}ms`));
     }, stallTimeout);
 
-    // Monitor OUR PassThrough for every data event — resets stall timer on each chunk
+    // Monitor OUR PassThrough for every data event — re-arms stall timer on each chunk
     passThrough.on("data", () => {
-      clearTimeout(stallTimer);
+      clearTimeout(stallTimerRef);
+      stallTimerRef = setTimeout(() => {
+        passThrough.destroy(new Error(`Body stalled: no data after ${stallTimeout}ms`));
+      }, stallTimeout);
     });
 
     passThrough.on("end", () => {
-      clearTimeout(stallTimer);
+      clearTimeout(stallTimerRef);
     });
 
     passThrough.on("error", () => {
-      clearTimeout(stallTimer);
+      clearTimeout(stallTimerRef);
     });
 
     // Pipe undici body → PassThrough. Data flows through without mode conflicts.
@@ -519,11 +520,9 @@ export async function forwardRequest(
     // Network errors / timeouts — return a synthetic 502
     const message = ttfbTimedOut
       ? `Provider "${provider.name}" timed out waiting for first byte after ${ttfbTimeout}ms`
-      : stalledBodyTimedOut
-        ? `Provider "${provider.name}" stalled: headers received but no body data after ${stallTimeout}ms`
-        : error instanceof DOMException && error.name === "AbortError"
-          ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
-          : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
+      : error instanceof DOMException && error.name === "AbortError"
+        ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
+        : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
 
     const body = JSON.stringify({
         type: "error",
