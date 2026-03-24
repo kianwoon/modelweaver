@@ -171,7 +171,7 @@ export async function getConfigPort(configPath?: string | null): Promise<number 
   if (_configPortOverride !== null) return _configPortOverride;
   try {
     const { loadConfig } = await import("./config.js");
-    const { config } = loadConfig(configPath ?? undefined);
+    const { config } = await loadConfig(configPath ?? undefined);
     return config.server.port;
   } catch {
     // Config file missing or invalid — fall back to default

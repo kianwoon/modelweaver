@@ -1,5 +1,6 @@
 // src/config.ts
-import { readFileSync, existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { readFile, stat, access } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
@@ -141,22 +142,19 @@ export function peekConfig(
 
 // --- Load & validate ---
 
-export function loadConfig(configPath?: string, cwd?: string): { config: AppConfig; configPath: string } {
+export async function loadConfig(configPath?: string, cwd?: string): Promise<{ config: AppConfig; configPath: string }> {
   let path: string | null = null;
   if (configPath) {
     // If configPath is a directory, search for config file within it
-    if (existsSync(configPath)) {
-      try {
-        const stat = statSync(configPath);
-        if (stat.isDirectory()) {
-          path = findConfigFile(configPath);
-        } else {
-          path = configPath;
-        }
-      } catch {
+    try {
+      await access(configPath);
+      const fileStat = await stat(configPath);
+      if (fileStat.isDirectory()) {
+        path = findConfigFile(configPath);
+      } else {
         path = configPath;
       }
-    } else {
+    } catch {
       path = configPath;
     }
   }
@@ -169,7 +167,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
     );
   }
 
-  const raw = readFileSync(path, "utf-8");
+  const raw = await readFile(path, "utf-8");
   const parsed = parseYaml(raw, { customTags: [] });
 
   // Resolve ${VAR} references in all string values
@@ -276,7 +274,7 @@ export function loadConfig(configPath?: string, cwd?: string): { config: AppConf
 
 // --- Reload helper ---
 
-export function reloadConfig(configPath: string): AppConfig {
-  const { config } = loadConfig(configPath);
+export async function reloadConfig(configPath: string): Promise<AppConfig> {
+  const { config } = await loadConfig(configPath);
   return config;
 }

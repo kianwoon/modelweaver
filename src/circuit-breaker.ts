@@ -24,32 +24,47 @@ export class CircuitBreaker {
   private failureTimestamps: number[] = [];
   private openedAt: number | null = null;
   private halfOpenInProgress: boolean = false;
+  private halfOpenProbeId: number | null = null;
+  private nextProbeId: number = 0;
   private readonly config: BreakerConfig;
 
   constructor(config: Partial<BreakerConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
 
-  canProceed(): boolean {
-    if (this.state === "closed") return true;
+  /**
+   * Returns a probe ID if the caller is allowed to proceed in half-open state,
+   * or null if blocked. For closed state, always returns 0 (no probe tracking needed).
+   */
+  canProceed(): { allowed: boolean; probeId: number } {
+    if (this.state === "closed") return { allowed: true, probeId: 0 };
     if (this.state === "open") {
       // Check if cooldown has elapsed
       if (this.openedAt && Date.now() - this.openedAt >= this.config.cooldownSeconds * 1000) {
         this.state = "half-open";
-        return true; // Allow one probe request
+        const probeId = this.nextProbeId++;
+        this.halfOpenInProgress = true;
+        this.halfOpenProbeId = probeId;
+        return { allowed: true, probeId };
       }
-      return false;
+      return { allowed: false, probeId: 0 };
     }
     // half-open: allow exactly one probe at a time
     if (!this.halfOpenInProgress) {
+      const probeId = this.nextProbeId++;
       this.halfOpenInProgress = true;
-      return true;
+      this.halfOpenProbeId = probeId;
+      return { allowed: true, probeId };
     }
-    return false;
+    return { allowed: false, probeId: 0 };
   }
 
-  recordResult(status: number): void {
-    this.halfOpenInProgress = false;
+  recordResult(status: number, probeId?: number): void {
+    // Only reset half-open flag if this is the probe that triggered it
+    if (this.halfOpenInProgress && (probeId === undefined || probeId === this.halfOpenProbeId)) {
+      this.halfOpenInProgress = false;
+      this.halfOpenProbeId = null;
+    }
 
     if (status >= 200 && status < 300) {
       // Success — reset to closed

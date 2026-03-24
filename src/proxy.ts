@@ -6,6 +6,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { latencyTracker, inFlightCounter, computeHedgingCount } from './hedging.js';
+import { broadcastStreamEvent } from './ws.js';
 
 /** Headers forwarded as-is to upstream */
 const FORWARD_HEADERS = new Set([
@@ -150,97 +151,65 @@ export function buildOutboundHeaders(
  *
  * A tool_result is orphaned if its tool_use_id references a tool_use not in any assistant content block.
  * A tool_use is orphaned if its id has no matching tool_result in any user content block.
+ *
+ * Single-pass: collects all IDs, computes orphans, then filters once.
  */
 function cleanOrphanedToolMessages(body: Record<string, unknown>): void {
   const messages = body.messages;
   if (!Array.isArray(messages)) return;
 
-  // Pass 1: Collect tool_use IDs and tool_result IDs in a single pass,
-  // and record which message indices have orphaned blocks
-  const toolUseIds = new Set<string>();
-  const toolResultIds = new Set<string>();
-  const needsFiltering = new Map<number, "user" | "assistant">();
+  const allToolUseIds = new Set<string>();
+  const allToolResultIds = new Set<string>();
 
+  // Single collection pass — gather every tool_use and tool_result ID
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (!Array.isArray(msg.content)) continue;
 
-    if (msg.role === "assistant") {
-      let hasOrphan = false;
-      for (const block of msg.content) {
-        if (block.type === "tool_use" && block.id) {
-          toolUseIds.add(String(block.id));
-          if (!toolResultIds.has(String(block.id))) hasOrphan = true;
-        }
+    for (const block of msg.content) {
+      if (block.type === "tool_use" && block.id) {
+        allToolUseIds.add(String(block.id));
+      } else if (block.type === "tool_result" && block.tool_use_id) {
+        allToolResultIds.add(String(block.tool_use_id));
       }
-      // Note: toolResultIds may not be fully populated yet, so we defer judgment
-      // on assistant orphans to after the full pass.
-    } else if (msg.role === "user") {
-      let hasOrphan = false;
-      for (const block of msg.content) {
-        if (block.type === "tool_result" && block.tool_use_id) {
-          toolResultIds.add(String(block.tool_use_id));
-          if (!toolUseIds.has(String(block.tool_use_id))) hasOrphan = true;
-        }
-      }
-      if (hasOrphan) needsFiltering.set(i, "user");
     }
   }
 
-  // Check assistant messages for orphans now that toolResultIds is complete
-  for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
-    if (msg.role === "assistant" && Array.isArray(msg.content)) {
-      const hasOrphan = msg.content.some(
-        (block: Record<string, unknown>) => block.type === "tool_use" && !toolResultIds.has(String(block.id))
-      );
-      if (hasOrphan) needsFiltering.set(i, "assistant");
-    }
+  // Compute orphaned IDs: tool_use without a matching tool_result, and vice versa.
+  // A tool_use is kept if ANY tool_result references it (even if that tool_result
+  // itself is orphaned — we only strip truly dangling references).
+  const orphanedToolUseIds = new Set<string>();
+  const orphanedToolResultIds = new Set<string>();
+  for (const id of allToolUseIds) {
+    if (!allToolResultIds.has(id)) orphanedToolUseIds.add(id);
+  }
+  for (const id of allToolResultIds) {
+    if (!allToolUseIds.has(id)) orphanedToolResultIds.add(id);
   }
 
-  if (needsFiltering.size === 0) return;
+  if (orphanedToolUseIds.size === 0 && orphanedToolResultIds.size === 0) return;
 
-  // Pass 2: Filter out orphaned tool references from content arrays
-  body.messages = messages.map((msg: Record<string, unknown>, i: number) => {
-    const filterType = needsFiltering.get(i);
-    if (filterType && Array.isArray(msg.content)) {
-      const filtered = msg.content.filter((block: Record<string, unknown>) => {
-        if (filterType === "user") {
-          return !(block.type === "tool_result" && !toolUseIds.has(String(block.tool_use_id)));
-        }
-        return !(block.type === "tool_use" && !toolResultIds.has(String(block.id)));
-      });
-      if (filtered.length === msg.content.length) return msg; // nothing was actually filtered
+  // Single filter pass — remove orphaned blocks from content arrays
+  let changed = false;
+  const cleaned = messages.map((msg: Record<string, unknown>) => {
+    if (!Array.isArray(msg.content)) return msg;
+
+    const filtered = msg.content.filter((block: Record<string, unknown>) => {
+      if (block.type === "tool_use" && orphanedToolUseIds.has(String(block.id))) return false;
+      if (block.type === "tool_result" && orphanedToolResultIds.has(String(block.tool_use_id))) return false;
+      return true;
+    });
+
+    if (filtered.length < msg.content.length) {
+      changed = true;
       return { ...msg, content: filtered };
     }
     return msg;
   });
 
-  // Pass 3: Re-check user messages after assistant cleanup.
-  // After Pass 2 removed orphaned tool_use blocks from assistant messages, some
-  // user tool_result blocks may now reference tool_use IDs that no longer exist.
-  // Rebuild valid IDs from the cleaned messages and strip dangling user tool_results.
-  const validToolUseIds = new Set<string>();
-  for (const msg of body.messages as Record<string, unknown>[]) {
-    if (!Array.isArray(msg.content)) continue;
-    if (msg.role === "assistant") {
-      for (const block of msg.content as Record<string, unknown>[]) {
-        if (block.type === "tool_use" && block.id) validToolUseIds.add(String(block.id));
-      }
-    }
+  if (changed) {
+    body.messages = cleaned;
   }
-
-  body.messages = (body.messages as Record<string, unknown>[]).map((msg) => {
-    if (msg.role === "user" && Array.isArray(msg.content)) {
-      const filtered = msg.content.filter(
-        (block: Record<string, unknown>) =>
-          !(block.type === "tool_result" && !validToolUseIds.has(String(block.tool_use_id)))
-      );
-      if (filtered.length === msg.content.length) return msg;
-      return { ...msg, content: filtered };
-    }
-    return msg;
-  });
 }
 
 /**
@@ -272,40 +241,62 @@ function applyTargetedReplacements(
     return JSON.stringify(mutable);
   }
 
-  // Targeted replacement path -- only model override and/or max_tokens clamping
-  let body = rawBody;
-
-  // Model override via regex (no JSON.parse/stringify)
-  if (entry.model && (parsed.model as string | undefined) !== entry.model) {
-    const modelMatch = MODEL_KEY_REGEX.exec(body);
-    if (modelMatch) {
-      body = body.replace(MODEL_KEY_REGEX, `"model":"${entry.model}"`);
-      console.warn(
-        `Routing override: ${modelMatch[1]} -> ${entry.model} via ${provider.name}`
-      );
-    }
-  }
-
-  // max_tokens clamping
+  // Targeted replacement path -- only model override and/or max_tokens clamping.
+  // Single-pass: build a combined regex with alternation so the entire raw body
+  // string is scanned and replaced in one call instead of per-pattern copies.
+  const needsModel = !!(entry.model && (parsed.model as string | undefined) !== entry.model);
+  let needsMaxTokensClamp = false;
+  let needsMaxTokensAdd = false;
+  let maxOutputTokens = 0;
   if (provider.modelLimits) {
-    const { maxOutputTokens } = provider.modelLimits;
-    const maxTokensMatch = MAX_TOKENS_REGEX.exec(body);
-    if (maxTokensMatch) {
-      const current = parseInt(maxTokensMatch[1], 10);
-      if (current > maxOutputTokens) {
-        body = body.replace(MAX_TOKENS_REGEX, `"max_tokens":${maxOutputTokens}`);
-      }
+    maxOutputTokens = provider.modelLimits.maxOutputTokens;
+    const m = MAX_TOKENS_REGEX.exec(rawBody);
+    if (m) {
+      needsMaxTokensClamp = parseInt(m[1], 10) > maxOutputTokens;
     } else if (typeof parsed.max_tokens !== "number") {
-      // max_tokens not present in body -- need to add it. Shallow clone suffices
-      // since only top-level properties (model, max_tokens) are mutated.
-      const mutable = { ...parsed };
-      if (entry.model) mutable.model = entry.model;
-      mutable.max_tokens = maxOutputTokens;
-      return JSON.stringify(mutable);
+      needsMaxTokensAdd = true;
     }
   }
 
-  return body;
+  if (!needsModel && !needsMaxTokensClamp && !needsMaxTokensAdd) return rawBody;
+
+  // max_tokens not in body at all — must add via JSON parse (structural change)
+  if (needsMaxTokensAdd) {
+    const mutable = { ...parsed };
+    if (entry.model) mutable.model = entry.model;
+    mutable.max_tokens = maxOutputTokens;
+    return JSON.stringify(mutable);
+  }
+
+  // Build combined regex for single-pass replacement
+  const patterns: string[] = [];
+  if (needsModel) patterns.push(MODEL_KEY_REGEX.source);
+  if (needsMaxTokensClamp) patterns.push(MAX_TOKENS_REGEX.source);
+  const combinedRegex = new RegExp(patterns.join("|"), "g");
+
+  // Capture values for the replacer (avoid repeated property access)
+  const modelRepl = needsModel ? `"model":"${entry.model}"` : null;
+  const tokensRepl = needsMaxTokensClamp ? `"max_tokens":${maxOutputTokens}` : null;
+  const origModel = parsed.model as string | undefined;
+  let modelLogged = false;
+
+  const result = rawBody.replace(combinedRegex, (match: string) => {
+    if (modelRepl && MODEL_KEY_REGEX.test(match)) {
+      MODEL_KEY_REGEX.lastIndex = 0;
+      if (!modelLogged && origModel) {
+        console.warn(`Routing override: ${origModel} -> ${entry.model} via ${provider.name}`);
+        modelLogged = true;
+      }
+      return modelRepl;
+    }
+    if (tokensRepl && MAX_TOKENS_REGEX.test(match)) {
+      MAX_TOKENS_REGEX.lastIndex = 0;
+      return tokensRepl;
+    }
+    return match;
+  });
+
+  return result;
 }
 
 /**
@@ -480,17 +471,32 @@ export async function forwardRequest(
     const stallTimeout = provider.stallTimeout ?? 30000;
     const passThrough = new PassThrough();
 
+    const stallMsg = `Body stalled: no data after ${stallTimeout}ms`;
     let stallTimerRef = setTimeout(() => {
-      broadcastStreamEvent(requestId, { state: "error", error: `Body stalled: no data after ${stallTimeout}ms` });
-      passThrough.destroy(new Error(`Body stalled: no data after ${stallTimeout}ms`));
+      broadcastStreamEvent({
+        requestId: ctx.requestId,
+        model: String(ctx.actualModel ?? entry.model ?? ""),
+        tier: "",
+        state: "error",
+        message: stallMsg,
+        timestamp: Date.now(),
+      });
+      passThrough.destroy(new Error(stallMsg));
     }, stallTimeout);
 
     // Monitor OUR PassThrough for every data event — re-arms stall timer on each chunk
     passThrough.on("data", () => {
       clearTimeout(stallTimerRef);
       stallTimerRef = setTimeout(() => {
-        broadcastStreamEvent(requestId, { state: "error", error: `Body stalled: no data after ${stallTimeout}ms` });
-        passThrough.destroy(new Error(`Body stalled: no data after ${stallTimeout}ms`));
+        broadcastStreamEvent({
+          requestId: ctx.requestId,
+          model: String(ctx.actualModel ?? entry.model ?? ""),
+          tier: "",
+          state: "error",
+          message: stallMsg,
+          timestamp: Date.now(),
+        });
+        passThrough.destroy(new Error(stallMsg));
       }, stallTimeout);
     });
 
@@ -575,18 +581,23 @@ async function raceProviders(
     }
 
     // Check circuit breaker
-    if (provider._circuitBreaker && !provider._circuitBreaker.canProceed()) {
-      const errBody = JSON.stringify({
-          type: "error",
-          error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
-        });
-      return {
-        response: new Response(errBody, {
-          status: 502,
-          headers: { "content-type": "application/json" },
-        }),
-        index,
-      };
+    let cbProbeId: number | undefined;
+    if (provider._circuitBreaker) {
+      const cb = provider._circuitBreaker.canProceed();
+      if (!cb.allowed) {
+        const errBody = JSON.stringify({
+            type: "error",
+            error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
+          });
+        return {
+          response: new Response(errBody, {
+            status: 502,
+            headers: { "content-type": "application/json" },
+          }),
+          index,
+        };
+      }
+      cbProbeId = cb.probeId;
     }
 
     onAttempt?.(entry.provider, index);
@@ -595,12 +606,12 @@ async function raceProviders(
       const response = await forwardRequest(provider, entry, ctx, incomingRequest, sharedController.signal, index + chainOffset);
       // Record for circuit breaker
       if (provider._circuitBreaker) {
-        provider._circuitBreaker.recordResult(response.status);
+        provider._circuitBreaker.recordResult(response.status, cbProbeId);
       }
       return { response, index };
     } catch {
       if (provider._circuitBreaker) {
-        provider._circuitBreaker.recordResult(502);
+        provider._circuitBreaker.recordResult(502, cbProbeId);
       }
       const errBody = JSON.stringify({
           type: "error",
@@ -629,6 +640,17 @@ async function raceProviders(
       completed.add(races[winner.index] ?? races[0]);
 
       if (winner.response.status >= 200 && winner.response.status < 300) {
+        // Drain/cancel in-flight loser response bodies BEFORE aborting shared controller
+        // to prevent leaked stream chunks from mid-write cancellation.
+        for (const r of pending) {
+          if (r !== races[winner.index]) {
+            r.then(({ response }) => {
+              if (response.body) {
+                try { response.body.cancel(); } catch { /* already consumed */ }
+              }
+            }).catch(() => { /* aborted */ });
+          }
+        }
         sharedController.abort();
         // Cancel bodies of already-completed losing responses to free resources
         for (const f of failures) {
@@ -822,19 +844,22 @@ export async function forwardWithFallback(
       });
     }
 
-    if (provider._circuitBreaker && !provider._circuitBreaker.canProceed()) {
-      logger?.warn("Provider skipped by circuit breaker", { requestId: ctx.requestId, provider: entry.provider });
-      const errBody = JSON.stringify({
-          type: "error",
-          error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
+    if (provider._circuitBreaker) {
+      const cb = provider._circuitBreaker.canProceed();
+      if (!cb.allowed) {
+        logger?.warn("Provider skipped by circuit breaker", { requestId: ctx.requestId, provider: entry.provider });
+        const errBody = JSON.stringify({
+            type: "error",
+            error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
+          });
+        return new Response(errBody, {
+          status: 502,
+          headers: {
+            "content-type": "application/json",
+            "content-length": textEncoder.encode(errBody).byteLength.toString(),
+          },
         });
-      return new Response(errBody, {
-        status: 502,
-        headers: {
-          "content-type": "application/json",
-          "content-length": textEncoder.encode(errBody).byteLength.toString(),
-        },
-      });
+      }
     }
 
     onAttempt?.(entry.provider, 0);
@@ -872,25 +897,30 @@ export async function forwardWithFallback(
       };
     }
 
-    if (provider._circuitBreaker && !provider._circuitBreaker.canProceed()) {
-      logger?.warn("Provider skipped by circuit breaker", {
-        requestId: ctx.requestId,
-        provider: entry.provider,
-      });
-      const errBody = JSON.stringify({
-        type: "error",
-        error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
-      });
-      return {
-        response: new Response(errBody, {
-          status: 502,
-          headers: {
-            "content-type": "application/json",
-            "content-length": textEncoder.encode(errBody).byteLength.toString(),
-          },
-        }),
-        index,
-      };
+    let cbProbeId: number | undefined;
+    if (provider._circuitBreaker) {
+      const cb = provider._circuitBreaker.canProceed();
+      if (!cb.allowed) {
+        logger?.warn("Provider skipped by circuit breaker", {
+          requestId: ctx.requestId,
+          provider: entry.provider,
+        });
+        const errBody = JSON.stringify({
+          type: "error",
+          error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
+        });
+        return {
+          response: new Response(errBody, {
+            status: 502,
+            headers: {
+              "content-type": "application/json",
+              "content-length": textEncoder.encode(errBody).byteLength.toString(),
+            },
+          }),
+          index,
+        };
+      }
+      cbProbeId = cb.probeId;
     }
 
     onAttempt?.(entry.provider, index);
@@ -907,7 +937,7 @@ export async function forwardWithFallback(
       );
       return { response, index };
     } catch {
-      if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502);
+      if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502, cbProbeId);
       const errBody = JSON.stringify({
         type: "error",
         error: { type: "api_error", message: `Provider "${entry.provider}" failed` },

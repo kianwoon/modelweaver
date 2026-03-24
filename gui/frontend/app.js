@@ -26,6 +26,7 @@ const recentEl = document.getElementById('recent');
 const activityContent = document.getElementById('activity-content');
 const activeRequests = new Map();
 const MAX_VISIBLE_BARS = 3;
+const STALE_BAR_TIMEOUT_MS = 120_000; // 2 minutes
 
 // Title bar buttons
 document.getElementById('btn-close').addEventListener('click', () => {
@@ -415,10 +416,24 @@ function createActivityBar(requestId, model, tier) {
   const idle = activityContent.querySelector('.activity-idle');
   if (idle) idle.style.display = 'none';
 
+  track.dataset.requestId = requestId;
   activityContent.appendChild(track);
   trimBars();
 
-  return { element: track, fill, label, statusSpan, startTime: Date.now(), lastOutputTokens: 0, prevTimestamp: 0, model, tier, ttfbTimer: null };
+  const entry = { element: track, fill, label, statusSpan, startTime: Date.now(), lastOutputTokens: 0, prevTimestamp: 0, model, tier, ttfbTimer: null, staleTimer: null };
+
+  entry.staleTimer = setTimeout(() => {
+    console.warn('[Activity] Bar stale — auto-dismissing', requestId);
+    entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
+    entry.fill.classList.add('state-error');
+    entry.statusSpan.textContent = 'stalled';
+    setTimeout(() => {
+      entry.element.classList.add('dismissing');
+      setTimeout(() => removeActivityBar(requestId), 800);
+    }, 2000);
+  }, STALE_BAR_TIMEOUT_MS);
+
+  return entry;
 }
 
 function trimBars() {
@@ -431,6 +446,7 @@ function trimBars() {
 function removeActivityBar(requestId) {
   const entry = activeRequests.get(requestId);
   if (!entry) return;
+  if (entry.staleTimer) clearTimeout(entry.staleTimer);
   if (entry) entry.ttfbCleared = true;
   if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
   if (entry) entry.ttfbTimer = null;
@@ -474,6 +490,7 @@ function applyStreamingUpdate(requestId, data) {
   if (entry) entry.ttfbCleared = true;
   if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
   if (entry) entry.ttfbTimer = null;
+  resetStaleTimer(entry);
   entry.fill.classList.remove('state-start');
   entry.fill.classList.add('state-streaming');
   const elapsed = (Date.now() - entry.startTime) / 1000;
@@ -529,8 +546,25 @@ function flushSummaryUpdate() {
   summaryData = null;
 }
 
+function resetStaleTimer(entry) {
+  if (entry.staleTimer) clearTimeout(entry.staleTimer);
+  const requestId = entry.element.dataset.requestId;
+  entry.staleTimer = setTimeout(() => {
+    console.warn('[Activity] Bar stale — auto-dismissing', requestId);
+    entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
+    entry.fill.classList.add('state-error');
+    entry.statusSpan.textContent = 'stalled';
+    setTimeout(() => {
+      entry.element.classList.add('dismissing');
+      setTimeout(() => removeActivityBar(requestId), 800);
+    }, 2000);
+  }, STALE_BAR_TIMEOUT_MS);
+}
+
 function handleStreamEvent(data) {
   if (data.state === 'start') {
+    // Guard: don't create duplicate bars for the same request
+    if (activeRequests.has(data.requestId)) return;
     const bar = createActivityBar(data.requestId, data.model, data.tier);
     activeRequests.set(data.requestId, bar);
     bar.provider = data.provider || '';
@@ -550,6 +584,7 @@ function handleStreamEvent(data) {
     const hdr = data.headerSize || 0;
     entry.statusSpan.textContent = hdr + 'B hdr \u00b7 ' + secs + 's';
     entry.headerInfo = hdr + 'B hdr';
+    resetStaleTimer(entry);
 
   } else if (data.state === 'streaming') {
     if (activeRequests.size >= 2) return;
@@ -570,6 +605,7 @@ function handleStreamEvent(data) {
     entry.fill.classList.remove('state-streaming');
     entry.fill.classList.add('state-fallback');
     entry.statusSpan.textContent = 'fallback \u2192 ' + (data.to || '?');
+    resetStaleTimer(entry);
 
   } else if (data.state === 'complete') {
     const entry = activeRequests.get(data.requestId);
@@ -577,6 +613,7 @@ function handleStreamEvent(data) {
     if (entry) entry.ttfbCleared = true;
     if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
     if (entry) entry.ttfbTimer = null;
+    if (entry.staleTimer) clearTimeout(entry.staleTimer);
     entry.element.removeAttribute('data-preview');
     entry.element.style.marginBottom = '';
     entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
@@ -600,6 +637,7 @@ function handleStreamEvent(data) {
     if (entry) entry.ttfbCleared = true;
     if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
     if (entry) entry.ttfbTimer = null;
+    if (entry.staleTimer) clearTimeout(entry.staleTimer);
     entry.element.removeAttribute('data-preview');
     entry.element.style.marginBottom = '';
     entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');

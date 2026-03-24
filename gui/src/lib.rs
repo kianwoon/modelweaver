@@ -1,6 +1,17 @@
+use std::sync::OnceLock;
 use tauri::Manager;
 use tauri::Emitter;
 use tauri::command;
+
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Failed to create HTTP client")
+    })
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,12 +32,8 @@ struct MetricsResult {
 #[command]
 async fn fetch_metrics(port: u16) -> Result<MetricsResult, String> {
     let url = format!("http://localhost:{}/api/metrics/summary", port);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    let resp = client
+    let resp = shared_client()
         .get(&url)
         .send()
         .await
@@ -59,12 +66,13 @@ async fn fetch_metrics(port: u16) -> Result<MetricsResult, String> {
 #[command]
 async fn check_daemon(port: u16) -> Result<bool, String> {
     let url = format!("http://localhost:{}/api/metrics/summary", port);
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(3))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
-    match client.get(&url).send().await {
+    match shared_client()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+    {
         Ok(resp) => Ok(resp.status().is_success()),
         Err(_) => Ok(false),
     }

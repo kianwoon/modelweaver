@@ -14,9 +14,22 @@ const MAX_MISSED_PONGS = 2;
 const BACKPRESSURE_THRESHOLD = 64 * 1024; // 64KB
 const SUMMARY_DEBOUNCE_MS = 500;
 const STREAM_WS_THROTTLE_MS = 500; // caps stream event delivery to ~2 Hz per client
+const BACKPRESSURE_LOG_INTERVAL_MS = 10_000; // throttle backpressure warnings to once per 10s
 const clientStreamThrottle = new WeakMap<any, number>();
 
 let wssInstance: InstanceType<typeof import("ws").WebSocketServer> | null = null;
+
+// Module-level counters for dropped events (useful for monitoring)
+let streamDroppedCount = 0;
+let lastBackpressureWarnTime = 0;
+
+function maybeLogBackpressure(source: string): void {
+  const now = Date.now();
+  if (now - lastBackpressureWarnTime >= BACKPRESSURE_LOG_INTERVAL_MS) {
+    console.warn(`[ws] Backpressure: dropping ${source} events (total dropped stream events: ${streamDroppedCount})`);
+    lastBackpressureWarnTime = now;
+  }
+}
 
 export function attachWebSocket(server: Server, metricsStore: MetricsStore): void {
   const wss = new WebSocketServer({ server, path: "/ws" });
@@ -40,6 +53,7 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
       if (ws.bufferedAmount > BACKPRESSURE_THRESHOLD) {
         // Schedule a summary update instead so the client eventually catches up
         scheduleSummaryUpdate();
+        maybeLogBackpressure("metrics");
         return;
       }
 
@@ -101,16 +115,42 @@ export function broadcastStreamEvent(data: StreamEvent): void {
   if (!wssInstance) return;
   const msg = JSON.stringify({ type: "stream", data });
   const isStreaming = data.state === "streaming";
+  const isCritical = data.state === "complete" || data.state === "error";
   const now = Date.now();
   for (const client of wssInstance.clients) {
     if (client.readyState !== client.OPEN) continue;
-    // Backpressure: skip if outbound buffer is too large
-    if (client.bufferedAmount > BACKPRESSURE_THRESHOLD) continue;
     // Throttle streaming events per client (non-streaming events always pass)
     if (isStreaming) {
       const lastEmit = clientStreamThrottle.get(client) ?? 0;
       if (now - lastEmit < STREAM_WS_THROTTLE_MS) continue;
       clientStreamThrottle.set(client, now);
+    }
+    // Backpressure: for critical events, use a callback to wait until drain; for others, drop
+    if (client.bufferedAmount > BACKPRESSURE_THRESHOLD) {
+      if (isCritical) {
+        // Critical events (complete/error) must not be silently dropped.
+        // Wait for the drain event, then send. Use a one-time listener.
+        const sendOnDrain = () => {
+          if (client.readyState === client.OPEN) {
+            client.send(msg);
+          }
+        };
+        // If the socket already has a pending drain (bufferAmount is decreasing),
+        // the 'drain' event will fire. Otherwise send immediately on next tick.
+        client.once('drain', sendOnDrain);
+        // Safety timeout: if drain never fires within 5s, force-send anyway
+        setTimeout(() => {
+          client.removeListener('drain', sendOnDrain);
+          if (client.readyState === client.OPEN) {
+            client.send(msg);
+          }
+        }, 5_000).unref();
+        continue;
+      }
+      // Non-critical streaming event: drop and count
+      streamDroppedCount++;
+      maybeLogBackpressure("stream");
+      continue;
     }
     setImmediate(() => {
       if (client.readyState === client.OPEN) {

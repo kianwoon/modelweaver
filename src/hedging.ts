@@ -60,6 +60,16 @@ export class LatencyTracker {
   clear(provider: string): void {
     this.samples.delete(provider);
   }
+
+  /** Remove entries for providers no longer in the current config. */
+  prune(activeProviders: string[]): void {
+    const active = new Set(activeProviders);
+    for (const key of this.samples.keys()) {
+      if (!active.has(key)) {
+        this.samples.delete(key);
+      }
+    }
+  }
 }
 
 export class InFlightCounter {

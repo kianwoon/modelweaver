@@ -177,11 +177,11 @@ tierPatterns:
     - haiku
 `;
 
-  it('loads wizard-shaped config without errors', () => {
+  it('loads wizard-shaped config without errors', async () => {
     const configPath = join(tmpDir, 'modelweaver.yaml');
     writeFileSync(configPath, sampleConfig);
 
-    const { config } = loadConfig(configPath);
+    const { config } = await loadConfig(configPath);
 
     expect(config.server.port).toBe(13000);
     expect(config.server.host).toBe('localhost');
@@ -194,11 +194,11 @@ tierPatterns:
     expect(config.tierPatterns.has('haiku')).toBe(true);
   });
 
-  it('resolves provider data correctly', () => {
+  it('resolves provider data correctly', async () => {
     const configPath = join(tmpDir, 'modelweaver.yaml');
     writeFileSync(configPath, sampleConfig);
 
-    const { config } = loadConfig(configPath);
+    const { config } = await loadConfig(configPath);
     const provider = config.providers.get('test-provider')!;
 
     expect(provider.baseUrl).toBe('https://api.example.com');
@@ -206,11 +206,11 @@ tierPatterns:
     expect(provider.timeout).toBe(30000);
   });
 
-  it('resolves routing entries correctly', () => {
+  it('resolves routing entries correctly', async () => {
     const configPath = join(tmpDir, 'modelweaver.yaml');
     writeFileSync(configPath, sampleConfig);
 
-    const { config } = loadConfig(configPath);
+    const { config } = await loadConfig(configPath);
     const sonnetRouting = config.routing.get('sonnet')!;
 
     expect(sonnetRouting).toHaveLength(1);

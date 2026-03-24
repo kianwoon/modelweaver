@@ -5,6 +5,7 @@ import { createApp } from "./server.js";
 import { loadConfig } from "./config.js";
 import type { LogLevel } from "./logger.js";
 import { MetricsStore } from "./metrics.js";
+import { latencyTracker } from "./hedging.js";
 import { attachWebSocket } from "./ws.js";
 import { startMonitor } from "./monitor.js";
 
@@ -208,7 +209,7 @@ async function main() {
   let config;
   let configPath;
   try {
-    const result = loadConfig(args.config);
+    const result = await loadConfig(args.config);
     config = result.config;
     configPath = result.configPath;
   } catch (error) {
@@ -261,10 +262,11 @@ async function main() {
     // Hot-reload: watch config file for changes
     let configWatcher: ReturnType<typeof watch> | null = null;
     if (configPath) {
-      const debounced = createDebouncedReload(() => {
+      const debounced = createDebouncedReload(async () => {
         try {
-          const newConfig = reloadConfig(configPath);
+          const newConfig = await reloadConfig(configPath);
           handle.setConfig(newConfig);
+          latencyTracker.prune([...newConfig.providers.keys()]);
           logger.info("Config reloaded", { path: configPath });
         } catch (err) {
           logger.error("Config reload failed — keeping old config", { error: (err as Error).message });
@@ -289,10 +291,11 @@ async function main() {
 
     // SIGUSR1 triggers config hot-reload
     // Note: SIGUSR1 is POSIX-only; this handler is a no-op on Windows.
-    process.on('SIGUSR1', () => {
+    process.on('SIGUSR1', async () => {
       try {
-        const newConfig = reloadConfig(configPath!);
+        const newConfig = await reloadConfig(configPath!);
         handle.setConfig(newConfig);
+        latencyTracker.prune([...newConfig.providers.keys()]);
         logger.info("Config reloaded (SIGUSR1)", { path: configPath });
       } catch (err) {
         logger.error("Config reload failed (SIGUSR1)", { error: (err as Error).message });

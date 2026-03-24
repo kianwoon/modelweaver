@@ -19,7 +19,7 @@ describe("CircuitBreaker", () => {
     });
 
     it("allows requests in closed state", () => {
-      expect(breaker.canProceed()).toBe(true);
+      expect(breaker.canProceed().allowed).toBe(true);
     });
 
     it("stays closed on 2xx response", () => {
@@ -54,7 +54,7 @@ describe("CircuitBreaker", () => {
       breaker.recordResult(429);
       breaker.recordResult(429);
       breaker.recordResult(429);
-      expect(breaker.canProceed()).toBe(false);
+      expect(breaker.canProceed().allowed).toBe(false);
     });
 
     it("does not record result for skipped (non-attempted) requests", () => {
@@ -76,7 +76,7 @@ describe("CircuitBreaker", () => {
       // Wait for cooldown (1 second in test config)
       await new Promise((r) => setTimeout(r, 1100));
 
-      expect(breaker.canProceed()).toBe(true);
+      expect(breaker.canProceed().allowed).toBe(true);
       expect(breaker.getState()).toBe("half-open");
     });
 

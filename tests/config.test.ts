@@ -58,7 +58,7 @@ describe("resolveEnvVars", () => {
 });
 
 describe("loadConfig", () => {
-  it("loads and validates a correct config", () => {
+  it("loads and validates a correct config", async () => {
     process.env.ANTH_KEY = "sk-ant-123";
     process.env.OR_KEY = "sk-or-456";
 
@@ -86,7 +86,7 @@ tierPatterns:
   sonnet: ["sonnet"]
 `);
 
-    const { config } = loadConfig(TEST_DIR);
+    const { config } = await loadConfig(TEST_DIR);
     expect(config.server.port).toBe(4000);
     expect(config.server.host).toBe("localhost");
     expect(config.providers.get("anthro")?.baseUrl).toBe("https://api.anthropic.com");
@@ -98,7 +98,7 @@ tierPatterns:
     delete process.env.OR_KEY;
   });
 
-  it("throws if provider in routing does not exist in providers", () => {
+  it("throws if provider in routing does not exist in providers", async () => {
     process.env.ANTH_KEY = "sk-ant-123";
     writeTestConfig(`
 server:
@@ -114,11 +114,11 @@ tierPatterns:
   sonnet: ["sonnet"]
 `);
 
-    expect(() => loadConfig(TEST_DIR)).toThrow(/nonexistent/);
+    await expect(loadConfig(TEST_DIR)).rejects.toThrow(/nonexistent/);
     delete process.env.ANTH_KEY;
   });
 
-  it("throws if apiKey is missing from a provider", () => {
+  it("throws if apiKey is missing from a provider", async () => {
     writeTestConfig(`
 server:
   port: 4000
@@ -132,10 +132,10 @@ tierPatterns:
   sonnet: ["sonnet"]
 `);
 
-    expect(() => loadConfig(TEST_DIR)).toThrow(/apiKey/);
+    await expect(loadConfig(TEST_DIR)).rejects.toThrow(/apiKey/);
   });
 
-  it("throws if tier in routing has no tierPatterns entry", () => {
+  it("throws if tier in routing has no tierPatterns entry", async () => {
     process.env.ANTH_KEY = "sk-ant-123";
     writeTestConfig(`
 server:
@@ -151,11 +151,11 @@ tierPatterns:
   opus: ["opus"]
 `);
 
-    expect(() => loadConfig(TEST_DIR)).toThrow(/tier.*sonnet.*pattern/i);
+    await expect(loadConfig(TEST_DIR)).rejects.toThrow(/tier.*sonnet.*pattern/i);
     delete process.env.ANTH_KEY;
   });
 
-  it("applies defaults for optional server fields", () => {
+  it("applies defaults for optional server fields", async () => {
     process.env.KEY = "sk-123";
     writeTestConfig(`
 server:
@@ -171,12 +171,12 @@ tierPatterns:
   t: ["t"]
 `);
 
-    const { config } = loadConfig(TEST_DIR);
+    const { config } = await loadConfig(TEST_DIR);
     expect(config.server.host).toBe("localhost");
     delete process.env.KEY;
   });
 
-  it("defaults authType to anthropic when not specified", () => {
+  it("defaults authType to anthropic when not specified", async () => {
     process.env.KEY = "sk-123";
     writeTestConfig(`
 server:
@@ -192,12 +192,12 @@ tierPatterns:
   t: ["t"]
 `);
 
-    const { config } = loadConfig(TEST_DIR);
+    const { config } = await loadConfig(TEST_DIR);
     expect(config.providers.get("p")?.authType).toBe("anthropic");
     delete process.env.KEY;
   });
 
-  it("accepts authType bearer when specified", () => {
+  it("accepts authType bearer when specified", async () => {
     process.env.KEY = "sk-123";
     writeTestConfig(`
 server:
@@ -214,12 +214,12 @@ tierPatterns:
   t: ["t"]
 `);
 
-    const { config } = loadConfig(TEST_DIR);
+    const { config } = await loadConfig(TEST_DIR);
     expect(config.providers.get("p")?.authType).toBe("bearer");
     delete process.env.KEY;
   });
 
-  it("rejects baseUrl with non-http scheme", () => {
+  it("rejects baseUrl with non-http scheme", async () => {
     process.env.KEY = "sk-123";
     writeTestConfig(`
 server:
@@ -235,11 +235,11 @@ tierPatterns:
   t: ["t"]
 `);
 
-    expect(() => loadConfig(TEST_DIR)).toThrow(/baseUrl must use http/);
+    await expect(loadConfig(TEST_DIR)).rejects.toThrow(/baseUrl must use http/);
     delete process.env.KEY;
   });
 
-  it("rejects baseUrl with ftp scheme", () => {
+  it("rejects baseUrl with ftp scheme", async () => {
     process.env.KEY = "sk-123";
     writeTestConfig(`
 server:
@@ -255,12 +255,12 @@ tierPatterns:
   t: ["t"]
 `);
 
-    expect(() => loadConfig(TEST_DIR)).toThrow(/baseUrl must use http/);
+    await expect(loadConfig(TEST_DIR)).rejects.toThrow(/baseUrl must use http/);
     delete process.env.KEY;
   });
 
   describe("modelRouting", () => {
-    it("loads config without modelRouting (backward compatible)", () => {
+    it("loads config without modelRouting (backward compatible)", async () => {
       process.env.KEY = "sk-123";
       writeTestConfig(`
 server:
@@ -275,13 +275,13 @@ routing:
 tierPatterns:
   t: ["t"]
 `);
-      const { config } = loadConfig(TEST_DIR);
+      const { config } = await loadConfig(TEST_DIR);
       expect(config.modelRouting).toBeDefined();
       expect(config.modelRouting.size).toBe(0);
       delete process.env.KEY;
     });
 
-    it("loads config with modelRouting and valid providers", () => {
+    it("loads config with modelRouting and valid providers", async () => {
       process.env.KEY1 = "sk-1";
       process.env.KEY2 = "sk-2";
       writeTestConfig(`
@@ -305,7 +305,7 @@ modelRouting:
   "MiniMax-M2.7":
     - provider: minimax
 `);
-      const { config } = loadConfig(TEST_DIR);
+      const { config } = await loadConfig(TEST_DIR);
       expect(config.modelRouting.size).toBe(2);
       expect(config.modelRouting.get("glm-5-turbo")).toEqual([{ provider: "glm" }]);
       expect(config.modelRouting.get("MiniMax-M2.7")).toEqual([{ provider: "minimax" }]);
@@ -313,7 +313,7 @@ modelRouting:
       delete process.env.KEY2;
     });
 
-    it("throws if modelRouting references unknown provider", () => {
+    it("throws if modelRouting references unknown provider", async () => {
       process.env.KEY = "sk-123";
       writeTestConfig(`
 server:
@@ -331,11 +331,11 @@ modelRouting:
   "custom-model":
     - provider: nonexistent
 `);
-      expect(() => loadConfig(TEST_DIR)).toThrow(/nonexistent/);
+      await expect(loadConfig(TEST_DIR)).rejects.toThrow(/nonexistent/);
       delete process.env.KEY;
     });
 
-    it("loads config with empty modelRouting object", () => {
+    it("loads config with empty modelRouting object", async () => {
       process.env.KEY = "sk-123";
       writeTestConfig(`
 server:
@@ -351,7 +351,7 @@ tierPatterns:
   t: ["t"]
 modelRouting: {}
 `);
-      const { config } = loadConfig(TEST_DIR);
+      const { config } = await loadConfig(TEST_DIR);
       expect(config.modelRouting.size).toBe(0);
       delete process.env.KEY;
     });

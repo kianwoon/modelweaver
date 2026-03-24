@@ -27,14 +27,14 @@ providers:
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("creates an Agent with configured pool size", () => {
-    const { config } = loadConfig(configPath);
+  it("creates an Agent with configured pool size", async () => {
+    const { config } = await loadConfig(configPath);
     const provider = config.providers.get("test-provider");
     expect(provider?._agent).toBeDefined();
     expect(provider?.poolSize).toBe(5);
   });
 
-  it("defaults pool size to 10 when not configured", () => {
+  it("defaults pool size to 10 when not configured", async () => {
     writeFileSync(configPath, `
 server:
   port: 13000
@@ -45,7 +45,7 @@ providers:
     apiKey: test-key
     timeout: 5000
 `);
-    const { config } = loadConfig(configPath);
+    const { config } = await loadConfig(configPath);
     const provider = config.providers.get("default-pool");
     expect(provider?.poolSize).toBe(10);
   });

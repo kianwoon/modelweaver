@@ -71,7 +71,7 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
   const cacheRead = (usage.cache_read_input_tokens as number | undefined) ?? 0;
   const cacheCreation = (usage.cache_creation_input_tokens as number | undefined) ?? 0;
 
-  return { inputTokens: inp + cacheRead + cacheCreation, outputTokens: out, cacheReadTokens: cacheRead, cacheCreationTokens: cacheCreation };
+  return { inputTokens: inp, outputTokens: out, cacheReadTokens: cacheRead, cacheCreationTokens: cacheCreation };
 }
 
 /**
@@ -157,6 +157,20 @@ function createMetricsTransform(
   };
 
   const scanWindow = (text: string) => {
+    // Fast bailout: most chunks don't contain usage data
+    if (!text.includes('"usage"')) {
+      // Extract text content for preview from JSON responses even without usage
+      const anthContent = [...text.matchAll(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g)];
+      if (anthContent.length > 0) {
+        const lastText = anthContent[anthContent.length - 1][1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+        responsePreview += lastText;
+        if (responsePreview.length > PREVIEW_MAX) {
+          responsePreview = responsePreview.slice(-PREVIEW_MAX);
+        }
+      }
+      return;
+    }
+
     const inputMatches = [...text.matchAll(/"(?:input_tokens|prompt_tokens)"\s*:\s*(\d+)/g)];
     const cacheReadMatches = [...text.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g)];
     const cacheCreationMatches = [...text.matchAll(/"cache_creation_input_tokens"\s*:\s*(\d+)/g)];
@@ -320,8 +334,7 @@ function createMetricsTransform(
       }
 
       if (isFinal) {
-        const totalInput = inputTokens + cacheReadTokens + cacheCreationTokens;
-        recordMetrics(totalInput, outputTokens, cacheReadTokens, cacheCreationTokens);
+        recordMetrics(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens);
       }
     }
   };
