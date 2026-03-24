@@ -423,7 +423,7 @@ export async function forwardRequest(
       controller.abort();
       reject(new Error(`TTFB timeout after ${ttfbTimeout}ms`));
     }, ttfbTimeout);
-  }).catch(() => {}); // Swallow orphaned rejection when undiciRequest wins the race
+  });
 
   // Listen for external abort (from race cancellation) to abort this request
   let removeAbortListener: (() => void) | undefined;
@@ -448,7 +448,7 @@ export async function forwardRequest(
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
     };
-    removeAbortListener = externalSignal.addEventListener("abort", onExternalAbort, { once: true }) as () => void;
+    removeAbortListener = externalSignal.addEventListener("abort", onExternalAbort, { once: true }) as unknown as () => void;
   }
 
   try {
