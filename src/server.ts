@@ -353,7 +353,8 @@ function createMetricsTransform(
 export interface AppHandle {
   app: Hono;
   getConfig: () => AppConfig;
-  setConfig: (config: AppConfig) => void;
+  setConfig: (config: AppConfig) => Promise<void>;
+  closeAgents: () => Promise<void>;
 }
 
 function agentKey(provider: ProviderConfig): string {
@@ -582,7 +583,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   return {
     app,
     getConfig: () => config,
-    setConfig: (newConfig: AppConfig) => {
+    setConfig: async (newConfig: AppConfig) => {
       // Build key → agent map from old config for reuse lookup
       const oldAgents = new Map<string, import("undici").Agent>();
       for (const provider of config.providers.values()) {
@@ -605,14 +606,25 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       }
 
       // Close agents that are no longer needed (removed or changed origin/poolSize)
+      const closePromises: Promise<void>[] = [];
       for (const [key, agent] of oldAgents) {
         if (!reusedKeys.has(key)) {
-          agent.close();
+          closePromises.push(agent.close().catch(() => {}));
         }
       }
 
       config = newConfig;
       clearRoutingCache();
+      await Promise.all(closePromises);
+    },
+    closeAgents: async () => {
+      const closePromises: Promise<void>[] = [];
+      for (const provider of config.providers.values()) {
+        if (provider._agent) {
+          closePromises.push(provider._agent.close().catch(() => {}));
+        }
+      }
+      await Promise.all(closePromises);
     },
   };
 }

@@ -12,6 +12,8 @@ interface ModelEntry {
 }
 
 export class MetricsStore {
+  private static readonly MAX_MAP_SIZE = 200;
+
   private buffer: (RequestMetrics | null)[];
   private maxSize: number;
   private head = 0;
@@ -33,6 +35,21 @@ export class MetricsStore {
     this.maxSize = maxSize;
     this.subscribers = new Set();
     this.createdAt = Date.now();
+  }
+
+  /** Evict the entry with the lowest count when the map exceeds MAX_MAP_SIZE. */
+  private pruneMap<V>(map: Map<string, V>, getCount: (v: V) => number): void {
+    if (map.size <= MetricsStore.MAX_MAP_SIZE) return;
+    let minKey = '';
+    let minVal = Infinity;
+    for (const [k, v] of map) {
+      const val = getCount(v);
+      if (val < minVal) {
+        minVal = val;
+        minKey = k;
+      }
+    }
+    if (minKey) map.delete(minKey);
   }
 
   recordRequest(metrics: RequestMetrics): void {
@@ -80,6 +97,10 @@ export class MetricsStore {
 
     const pKey = metrics.targetProvider ?? metrics.provider;
     this._providerMap.set(pKey, (this._providerMap.get(pKey) ?? 0) + 1);
+
+    // Enforce size caps on maps
+    this.pruneMap(this._modelMap, (e) => e.count);
+    this.pruneMap(this._providerMap, (v) => v);
 
     // Ring buffer: overwrite oldest entry when full
     this.buffer[index] = metrics;

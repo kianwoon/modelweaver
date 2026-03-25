@@ -265,7 +265,7 @@ async function main() {
       const debounced = createDebouncedReload(async () => {
         try {
           const newConfig = await reloadConfig(configPath);
-          handle.setConfig(newConfig);
+          await handle.setConfig(newConfig);
           latencyTracker.prune([...newConfig.providers.keys()]);
           logger.info("Config reloaded", { path: configPath });
         } catch (err) {
@@ -294,7 +294,7 @@ async function main() {
     process.on('SIGUSR1', async () => {
       try {
         const newConfig = await reloadConfig(configPath!);
-        handle.setConfig(newConfig);
+        await handle.setConfig(newConfig);
         latencyTracker.prune([...newConfig.providers.keys()]);
         logger.info("Config reloaded (SIGUSR1)", { path: configPath });
       } catch (err) {
@@ -303,7 +303,16 @@ async function main() {
     });
 
     // Start server — register error handler BEFORE listen() so EADDRINUSE is caught
-    const server = createAdaptorServer({ fetch: handle.app.fetch, hostname: host, port });
+    const server = createAdaptorServer({
+      fetch: handle.app.fetch,
+      hostname: host,
+      port,
+      serverOptions: {
+        requestTimeout: 300_000,   // 5 min max total request time (covers long SSE streams)
+        headersTimeout: 10_000,    // 10s to receive headers
+        keepAliveTimeout: 30_000,  // 30s keep-alive (matches undici agent)
+      },
+    });
     server.on('error', (err: NodeJS.ErrnoException) => {
       if (err.code === 'EADDRINUSE') {
         logger.error(`Port ${port} already in use, exiting for monitor restart`, { port });
@@ -319,6 +328,7 @@ async function main() {
         configWatcher.close();
         configWatcher = null;
       }
+      await handle.closeAgents();
       await removeWorkerPidFile();
       logStream.end();
       process.exit(0);
@@ -358,7 +368,16 @@ async function main() {
   }
 
   // Start server — register error handler BEFORE listen() so EADDRINUSE is caught
-  const server = createAdaptorServer({ fetch: handle.app.fetch, hostname: host, port });
+  const server = createAdaptorServer({
+    fetch: handle.app.fetch,
+    hostname: host,
+    port,
+    serverOptions: {
+      requestTimeout: 300_000,   // 5 min max total request time (covers long SSE streams)
+      headersTimeout: 10_000,    // 10s to receive headers
+      keepAliveTimeout: 30_000,  // 30s keep-alive (matches undici agent)
+    },
+  });
   server.on('error', (err: NodeJS.ErrnoException) => {
     if (err.code === 'EADDRINUSE') {
       console.error(`Port ${port} already in use, exiting for monitor restart`);
@@ -369,8 +388,9 @@ async function main() {
   attachWebSocket(server as any, metricsStore);
 
   // Graceful shutdown
-  const shutdown = () => {
+  const shutdown = async () => {
     console.log("\n  Shutting down...");
+    await handle.closeAgents();
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);

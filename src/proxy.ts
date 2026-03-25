@@ -8,6 +8,25 @@ import os from "node:os";
 import { latencyTracker, inFlightCounter, computeHedgingCount } from './hedging.js';
 import { broadcastStreamEvent } from './ws.js';
 
+/**
+ * Shallow-clone a parsed API request body just enough so that
+ * cleanOrphanedToolMessages() can safely reassign body.messages
+ * without affecting the original parsed object.
+ *
+ * cleanOrphanedToolMessages either:
+ *   - leaves body.messages untouched (no orphans found), or
+ *   - replaces body.messages with a new array (via .map())
+ * It never mutates individual message objects in-place.
+ * Therefore a one-level-deep clone of the messages array is sufficient.
+ */
+function shallowCloneForMutation(parsed: Record<string, unknown>): Record<string, unknown> {
+  const clone = { ...parsed };
+  if (Array.isArray(clone.messages)) {
+    clone.messages = [...clone.messages];
+  }
+  return clone;
+}
+
 /** Headers forwarded as-is to upstream */
 const FORWARD_HEADERS = new Set([
   "anthropic-version",
@@ -227,8 +246,8 @@ function applyTargetedReplacements(
 ): string {
   // If orphan cleaning is needed, we must do full JSON parse (structural changes to messages)
   if (needsOrphanClean) {
-    // deep clone required: cleanOrphanedToolMessages mutates the messages array in-place
-    const mutable = structuredClone(parsed);
+    // shallow clone: cleanOrphanedToolMessages reassigns body.messages
+    const mutable = shallowCloneForMutation(parsed);
     if (entry.model) mutable.model = entry.model;
     cleanOrphanedToolMessages(mutable);
     if (provider.modelLimits) {
@@ -367,8 +386,8 @@ export async function forwardRequest(
           body = applyTargetedReplacements(ctx.rawBody, entry, provider, parsed, false);
         } else {
           // Fallback attempts: full JSON parse/mutate/stringify (caching already broken)
-          // deep clone required: cleanOrphanedToolMessages may mutate the messages array in-place
-          const mutable = structuredClone(parsed);
+          // shallow clone: cleanOrphanedToolMessages reassigns body.messages
+          const mutable = shallowCloneForMutation(parsed);
 
           if (entry.model) {
             const originalModel = mutable.model as string | undefined;
@@ -428,6 +447,8 @@ export async function forwardRequest(
   // Listen for external abort (from race cancellation) to abort this request
   let removeAbortListener: (() => void) | undefined;
   let upstreamBody: import("node:stream").Readable | undefined;
+  let passThrough: PassThrough | undefined;
+  let stallTimerRef: ReturnType<typeof setTimeout> | undefined;
   if (externalSignal) {
     if (externalSignal.aborted) {
       // Already aborted — don't even start the request
@@ -445,19 +466,30 @@ export async function forwardRequest(
         },
       });
     }
+    // Increase max listeners to prevent Node.js warning when multiple providers race
+    // and all listen to the same sharedController.signal
+    const prevMax = (externalSignal as any).getMaxListeners?.() ?? 10;
+    (externalSignal as any).setMaxListeners?.(prevMax + 1);
     const onExternalAbort = () => {
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
-      // Destroy upstream body to free the connection back to the pool.
+      if (stallTimerRef) clearTimeout(stallTimerRef);
+      // Destroy upstream body and passThrough to free the connection back to the pool.
       // Deferred to avoid throwing inside AbortSignal event dispatch.
       setImmediate(() => {
         if (upstreamBody && !upstreamBody.destroyed && !(upstreamBody as any).readableEnded) {
           try { (upstreamBody.destroy() as any).catch?.(() => {}); } catch { /* already consumed */ }
         }
+        if (passThrough && !passThrough.destroyed) {
+          passThrough.destroy(new Error("Cancelled"));
+        }
       });
     };
     externalSignal.addEventListener("abort", onExternalAbort, { once: true });
-    removeAbortListener = () => externalSignal.removeEventListener("abort", onExternalAbort);
+    removeAbortListener = () => {
+      externalSignal.removeEventListener("abort", onExternalAbort);
+      (externalSignal as any).setMaxListeners?.((externalSignal as any).getMaxListeners?.() - 1);
+    };
   }
 
   try {
@@ -499,10 +531,10 @@ export async function forwardRequest(
     // Body stall detection: pipe through PassThrough to monitor for data without
     // interfering with undici's internal stream state (no flowing mode conflict).
     const stallTimeout = provider.stallTimeout ?? 30000;
-    const passThrough = new PassThrough();
+    passThrough = new PassThrough();
 
     const stallMsg = `Body stalled: no data after ${stallTimeout}ms`;
-    let stallTimerRef = setTimeout(() => {
+    stallTimerRef = setTimeout(() => {
       broadcastStreamEvent({
         requestId: ctx.requestId,
         model: String(ctx.actualModel ?? entry.model ?? ""),
@@ -512,11 +544,11 @@ export async function forwardRequest(
         timestamp: Date.now(),
       });
       try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
-      passThrough.destroy(new Error(stallMsg));
+      passThrough!.destroy(new Error(stallMsg));
     }, stallTimeout);
 
     // Monitor OUR PassThrough for every data event — re-arms stall timer on each chunk
-    passThrough.on("data", () => {
+    passThrough!.on("data", () => {
       clearTimeout(stallTimerRef);
       stallTimerRef = setTimeout(() => {
         broadcastStreamEvent({
@@ -528,7 +560,7 @@ export async function forwardRequest(
           timestamp: Date.now(),
         });
         try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
-        passThrough.destroy(new Error(stallMsg));
+        passThrough!.destroy(new Error(stallMsg));
       }, stallTimeout);
     });
 
@@ -538,6 +570,7 @@ export async function forwardRequest(
 
     passThrough.on("error", () => {
       clearTimeout(stallTimerRef);
+      try { passThrough!.destroy(); } catch { /* already destroyed */ }
     });
 
     // Pipe undici body → PassThrough. Data flows through without mode conflicts.
@@ -557,6 +590,7 @@ export async function forwardRequest(
   } catch (error) {
     clearTimeout(timeout);
     if (ttfbTimer) clearTimeout(ttfbTimer);
+    if (stallTimerRef) clearTimeout(stallTimerRef);
 
     // Network errors / timeouts — return a synthetic 502
     const message = ttfbTimedOut
@@ -783,11 +817,15 @@ async function hedgedForwardRequest(
 
   const start = Date.now();
   const launched: Promise<Response>[] = [];
+  const hedgeController = new AbortController();
 
   for (let h = 0; h < count; h++) {
     inFlightCounter.increment(provider.name);
+    const hedgeSignal = chainSignal
+      ? AbortSignal.any([chainSignal, hedgeController.signal])
+      : hedgeController.signal;
     launched.push(
-      forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index)
+      forwardRequest(provider, entry, ctx, incomingRequest, hedgeSignal, index)
         .finally(() => inFlightCounter.decrement(provider.name))
     );
   }
@@ -816,6 +854,9 @@ async function hedgedForwardRequest(
 
       if (winner.response.status >= 200 && winner.response.status < 300) {
         latencyTracker.record(provider.name, Date.now() - start);
+        // Abort all in-flight hedge copies — triggers onExternalAbort in each
+        // which properly destroys their PassThrough streams and clears stall timers
+        hedgeController.abort();
         // Cancel remaining — record 502 for each cancelled copy
         for (let i = 0; i < wrapped.length; i++) {
           if (!completed.has(i)) {
@@ -831,12 +872,14 @@ async function hedgedForwardRequest(
     }
 
     // All hedged copies returned errors — cancel bodies, return first failure
+    hedgeController.abort();
     for (const f of failures) { try { f.body?.cancel(); } catch {} }
     return failures[0] ?? new Response(
       JSON.stringify({ type: "error", error: { type: "api_error", message: `Provider "${provider.name}" all hedged requests failed` } }),
       { status: 502, headers: { "content-type": "application/json" } }
     );
   } catch {
+    hedgeController.abort();
     for (const f of failures) { try { f.body?.cancel(); } catch {} }
     return failures[0] ?? new Response(
       JSON.stringify({ type: "error", error: { type: "api_error", message: `Provider "${provider.name}" hedging failed` } }),
