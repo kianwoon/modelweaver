@@ -9,6 +9,8 @@
     "core:window:allow-minimize",
     "core:window:allow-close",
     "core:window:allow-set-focus",
-    "core:window:allow-show"
+    "core:window:allow-show",
+    "core:window:allow-set-size",
+    "core:window:allow-set-min-size"
   ]
 }

@@ -48,6 +48,54 @@ document.querySelectorAll('.titlebar-btn').forEach(btn => {
   btn.addEventListener('mousedown', e => e.stopPropagation());
 });
 
+// --- Compact Mode ---
+const COMPACT_HEIGHT = 320;
+const NORMAL_HEIGHT = 520;
+const COMPACT_KEY = 'modelweaver-compact-mode';
+
+function setCompactMode(enabled) {
+  const app = document.getElementById('app');
+  const btn = document.getElementById('btn-compact');
+  if (enabled) {
+    app.classList.add('compact-mode');
+    btn.textContent = '\u2193';
+    btn.title = 'Expand';
+  } else {
+    app.classList.remove('compact-mode');
+    btn.textContent = '\u2191';
+    btn.title = 'Toggle Compact Mode';
+  }
+  localStorage.setItem(COMPACT_KEY, enabled ? '1' : '0');
+
+  // Resize window via Tauri API
+  if (window.__TAURI__) {
+    try {
+      const { getCurrentWindow } = window.__TAURI__.window;
+      const win = getCurrentWindow();
+      const height = enabled ? COMPACT_HEIGHT : NORMAL_HEIGHT;
+      win.setSize({ type: 'Logical', width: 360, height: height });
+      if (enabled) {
+        win.setMinSize({ type: 'Logical', width: 360, height: COMPACT_HEIGHT });
+      } else {
+        win.setMinSize({ type: 'Logical', width: 360, height: NORMAL_HEIGHT });
+      }
+    } catch (err) {
+      console.warn('[Compact] Tauri resize failed:', err);
+    }
+  }
+}
+
+document.getElementById('btn-compact').addEventListener('click', () => {
+  const app = document.getElementById('app');
+  const isCompact = app.classList.contains('compact-mode');
+  setCompactMode(!isCompact);
+});
+
+// Restore compact state from localStorage
+if (localStorage.getItem(COMPACT_KEY) === '1') {
+  setCompactMode(true);
+}
+
 function setStatus(mode) {
   if (mode === 'live') {
     statusEl.className = 'status connected';
