@@ -42,7 +42,9 @@ interface ExistingProvider {
 // Helpers
 // ---------------------------------------------------------------------------
 
-const CANCEL = { onCancel: () => { console.log('\n  Setup cancelled. No files were changed.'); process.exit(0); } };
+class GoBackError extends Error { constructor() { super('__back__'); this.name = 'GoBackError'; } }
+
+const CANCEL = { onCancel: () => { throw new GoBackError(); } };
 
 const GREEN = '\x1B[32m';
 const RED = '\x1B[31m';
@@ -286,12 +288,20 @@ async function configureProvider(
     process.stdout.write('\r' + ' '.repeat(60) + '\r');
 
     if (result.ok) {
-      check(`${preset.name}: using existing ${effectiveEnvKey} (${detected.source})`);
-      return {
-        id, name: preset.name, baseUrl: effectiveBaseUrl,
-        envKey: effectiveEnvKey, apiKey: detected.key,
-        authType: effectiveAuthType, models: preset.models,
-      };
+      check(`${preset.name}: existing ${effectiveEnvKey} is valid (${detected.source})`);
+      const { useExisting } = await prompts(
+        { type: 'confirm', name: 'useExisting', message: `Use this key for ${preset.name}?`, initial: true },
+        CANCEL,
+      );
+      if (useExisting) {
+        return {
+          id, name: preset.name, baseUrl: effectiveBaseUrl,
+          envKey: effectiveEnvKey, apiKey: detected.key,
+          authType: effectiveAuthType, models: preset.models,
+        };
+      }
+      // User chose to change — fall through to manual prompt below
+      console.log(`  Enter a new key for ${preset.name}:`);
     }
 
     // Key found but invalid — fall through to prompt
@@ -366,59 +376,64 @@ async function configureFallbacks(
   const fallbacks = [...existingFallbacks];
 
   while (true) {
-    const { addFallback } = await prompts(
-      {
-        type: 'confirm',
-        name: 'addFallback',
-        message: fallbacks.length === 0
-          ? `Add a fallback provider for ${alias}?`
-          : `Add another fallback provider for ${alias}?`,
-        initial: false,
-      },
-      CANCEL,
-    );
+    try {
+      const { addFallback } = await prompts(
+        {
+          type: 'confirm',
+          name: 'addFallback',
+          message: fallbacks.length === 0
+            ? `Add a fallback provider for ${alias}?`
+            : `Add another fallback provider for ${alias}?`,
+          initial: false,
+        },
+        CANCEL,
+      );
 
-    if (!addFallback) break;
+      if (!addFallback) break;
 
-    const availableProviders = providers.filter(p => p.id !== primaryProviderId);
-    if (availableProviders.length === 0) {
-      console.log(`  ${RED}No other providers available for fallback.${RESET}`);
-      break;
+      const availableProviders = providers.filter(p => p.id !== primaryProviderId);
+      if (availableProviders.length === 0) {
+        console.log(`  ${RED}No other providers available for fallback.${RESET}`);
+        break;
+      }
+
+      const providerChoices = availableProviders.map((p) => ({ title: p.name, value: p.id }));
+      const { providerId } = await prompts(
+        {
+          type: 'select',
+          name: 'providerId',
+          message: `Select fallback provider for ${alias}:`,
+          choices: [
+            { title: '\u2B05  Go back', value: '__back__' },
+            ...providerChoices,
+          ],
+        },
+        CANCEL,
+      );
+
+      if (providerId === '__back__') continue;
+
+      const selectedProvider = providers.find((p) => p.id === (providerId as string))!;
+      const { modelName } = await prompts(
+        {
+          type: 'text',
+          name: 'modelName',
+          message: `[${selectedProvider.name}] Fallback model name:`,
+          initial: '',
+        },
+        CANCEL,
+      );
+
+      fallbacks.push({
+        provider: selectedProvider.id,
+        model: (modelName as string).trim(),
+      });
+
+      check(`Added fallback: ${selectedProvider.id} \u2192 ${(modelName as string).trim()}`);
+    } catch (err) {
+      if (err instanceof GoBackError) break;
+      throw err;
     }
-
-    const providerChoices = availableProviders.map((p) => ({ title: p.name, value: p.id }));
-    const { providerId } = await prompts(
-      {
-        type: 'select',
-        name: 'providerId',
-        message: `Select fallback provider for ${alias}:`,
-        choices: [
-          { title: '\u2B05  Go back', value: '__back__' },
-          ...providerChoices,
-        ],
-      },
-      CANCEL,
-    );
-
-    if (providerId === '__back__') continue;
-
-    const selectedProvider = providers.find((p) => p.id === (providerId as string))!;
-    const { modelName } = await prompts(
-      {
-        type: 'text',
-        name: 'modelName',
-        message: `[${selectedProvider.name}] Fallback model name:`,
-        initial: '',
-      },
-      CANCEL,
-    );
-
-    fallbacks.push({
-      provider: selectedProvider.id,
-      model: (modelName as string).trim(),
-    });
-
-    check(`Added fallback: ${selectedProvider.id} \u2192 ${(modelName as string).trim()}`);
   }
 
   return fallbacks;
@@ -920,37 +935,42 @@ async function configureClaudeCodeSettings(
 ): Promise<SettingsConfig | null> {
   if (models.length === 0) return null;
 
-  console.log();
+  try {
+    console.log();
 
-  const { configure } = await prompts(
-    {
-      type: 'confirm',
-      name: 'configure',
-      message: 'Configure Claude Code to use ModelWeaver automatically?',
-      initial: true,
-    },
-    CANCEL,
-  );
+    const { configure } = await prompts(
+      {
+        type: 'confirm',
+        name: 'configure',
+        message: 'Configure Claude Code to use ModelWeaver automatically?',
+        initial: true,
+      },
+      CANCEL,
+    );
 
-  if (!configure) return null;
+    if (!configure) return null;
 
-  const { defaultModel } = await prompts(
-    {
-      type: 'select',
-      name: 'defaultModel',
-      message: 'Select default model for Claude Code:',
-      choices: models.map((m) => ({
-        title: m.alias,
-        description: `${m.provider} \u2192 ${m.model}`,
-        value: m.alias,
-      })),
-    },
-    CANCEL,
-  );
+    const { defaultModel } = await prompts(
+      {
+        type: 'select',
+        name: 'defaultModel',
+        message: 'Select default model for Claude Code:',
+        choices: models.map((m) => ({
+          title: m.alias,
+          description: `${m.provider} \u2192 ${m.model}`,
+          value: m.alias,
+        })),
+      },
+      CANCEL,
+    );
 
-  const availableModels = models.map((m) => m.alias);
+    const availableModels = models.map((m) => m.alias);
 
-  return { defaultModel: defaultModel as string, availableModels };
+    return { defaultModel: defaultModel as string, availableModels };
+  } catch (err) {
+    if (err instanceof GoBackError) return null;
+    throw err;
+  }
 }
 
 function buildYamlConfig(
@@ -1077,10 +1097,13 @@ async function runQuickInit(): Promise<void> {
 
   const totalSteps = calculateTotalSteps(1, true);
 
+  let pastFirstStep = false;
+
   while (true) {
-    // Welcome
-    clearScreen();
-    console.log(`
+    try {
+      // Welcome
+      clearScreen();
+      console.log(`
 ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\u2500
 \u2502       Welcome to ModelWeaver!        \u2501 Quick Setup \u2502
 \u2502                                      \u2502
@@ -1088,52 +1111,63 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518${RESET}
 `);
 
-    // Step 1: Select single provider
-    const selectedIds = await selectProviders({ singleSelect: true });
+      // Step 1: Select single provider
+      const selectedIds = await selectProviders({ singleSelect: true });
+      pastFirstStep = true;
 
-    if (selectedIds.length === 1 && selectedIds[0] === '__back__') {
-      continue; // Go back — restart quick setup loop
-    }
-
-    // Step 2: Configure provider (auto-detects env key)
-    configured = [];
-    for (const id of selectedIds) {
-      const provider = await configureProvider(id, { current: 1, total: totalSteps });
-      if (provider) configured.push(provider);
-    }
-
-    if (configured.length === 0) {
-      console.log(`\n  ${RED}No providers configured. Exiting.${RESET}\n`);
-      process.exit(1);
-    }
-
-    // Auto-configure models from single provider's presets
-    const provider = configured[0];
-    configuredModels = [];
-    for (const [tier, modelName] of Object.entries(provider.models)) {
-      if (modelName) {
-        configuredModels.push({ alias: modelName, provider: provider.id, model: modelName, fallbacks: [] });
+      if (selectedIds.length === 1 && selectedIds[0] === '__back__') {
+        continue; // Go back — restart quick setup loop
       }
+
+      // Step 2: Configure provider (auto-detects env key)
+      configured = [];
+      for (const id of selectedIds) {
+        const provider = await configureProvider(id, { current: 1, total: totalSteps });
+        if (provider) configured.push(provider);
+      }
+
+      if (configured.length === 0) {
+        console.log(`\n  ${RED}No providers configured. Exiting.${RESET}\n`);
+        process.exit(1);
+      }
+
+      // Auto-configure models from single provider's presets
+      const provider = configured[0];
+      configuredModels = [];
+      for (const [tier, modelName] of Object.entries(provider.models)) {
+        if (modelName) {
+          configuredModels.push({ alias: modelName, provider: provider.id, model: modelName, fallbacks: [] });
+        }
+      }
+
+      // Server defaults (no prompts)
+      server = { port: 3456, host: 'localhost' };
+
+      // Step 3: Summary + Confirm
+      yaml = buildYamlConfig(configured, configuredModels, server, existingProviderMap, existingModelRouting);
+      console.log(`\n${BOLD}  Generated configuration:${RESET}\n`);
+      console.log(buildSummaryTable(configured, configuredModels, server));
+      console.log();
+      console.log(yaml.split('\n').map((l) => `  ${l}`).join('\n'));
+
+      const { confirm } = await prompts(
+        { type: 'confirm', name: 'confirm', message: `[Step 2 of ${totalSteps}] Write this configuration?`, initial: true },
+        CANCEL,
+      );
+
+      if (confirm) break;
+
+      console.log('\n  Restarting quick setup...\n');
+    } catch (err) {
+      if (err instanceof GoBackError) {
+        if (!pastFirstStep) {
+          console.log('\n  Setup cancelled. No files were changed.');
+          process.exit(0);
+        }
+        continue;
+      }
+      throw err;
     }
-
-    // Server defaults (no prompts)
-    server = { port: 3456, host: 'localhost' };
-
-    // Step 3: Summary + Confirm
-    yaml = buildYamlConfig(configured, configuredModels, server, existingProviderMap, existingModelRouting);
-    console.log(`\n${BOLD}  Generated configuration:${RESET}\n`);
-    console.log(buildSummaryTable(configured, configuredModels, server));
-    console.log();
-    console.log(yaml.split('\n').map((l) => `  ${l}`).join('\n'));
-
-    const { confirm } = await prompts(
-      { type: 'confirm', name: 'confirm', message: `[Step 2 of ${totalSteps}] Write this configuration?`, initial: true },
-      CANCEL,
-    );
-
-    if (confirm) break;
-
-    console.log('\n  Restarting quick setup...\n');
   }
 
   // Write files
@@ -1252,6 +1286,7 @@ export async function runInit(options?: { quick?: boolean }): Promise<void> {
   let phase = PHASE_PROVIDERS;
 
   while (true) {
+    try {
     // ── PHASE: Provider configuration ──
     if (phase <= PHASE_PROVIDERS) {
       // Step 1 — Welcome
@@ -1434,6 +1469,17 @@ ${BOLD}${CYAN}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
       console.log('\n  Returning to server configuration...\n');
       phase = PHASE_SERVER;
       continue;
+    }
+    } catch (err) {
+      if (err instanceof GoBackError) {
+        if (phase === PHASE_PROVIDERS) {
+          console.log('\n  Setup cancelled. No files were changed.');
+          process.exit(0);
+        }
+        phase--;
+        continue;
+      }
+      throw err;
     }
   }
 
