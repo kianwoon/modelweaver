@@ -451,8 +451,8 @@ export async function forwardRequest(
       // Destroy upstream body to free the connection back to the pool.
       // Deferred to avoid throwing inside AbortSignal event dispatch.
       setImmediate(() => {
-        if (upstreamBody && !upstreamBody.destroyed) {
-          try { upstreamBody.destroy(); } catch { /* already consumed */ }
+        if (upstreamBody && !upstreamBody.destroyed && !(upstreamBody as any).readableEnded) {
+          try { (upstreamBody.destroy() as any).catch?.(() => {}); } catch { /* already consumed */ }
         }
       });
     };
@@ -477,6 +477,12 @@ export async function forwardRequest(
 
     // Track upstream body for cleanup on error paths
     upstreamBody = undiciResponse.body;
+
+    // Guard against uncaught error events when the pipe is torn down
+    // after passThrough.destroy() fires before upstreamBody.destroy().
+    upstreamBody.on("error", () => {
+      clearTimeout(stallTimerRef);
+    });
 
     // For error status codes (4xx/5xx), consume body immediately without stall detection.
     // Rate limits (429) and server errors (5xx) return small JSON bodies that arrive instantly.
@@ -505,8 +511,8 @@ export async function forwardRequest(
         message: stallMsg,
         timestamp: Date.now(),
       });
+      try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
       passThrough.destroy(new Error(stallMsg));
-      try { upstreamBody?.destroy(new Error(stallMsg)); } catch { /* already consumed */ }
     }, stallTimeout);
 
     // Monitor OUR PassThrough for every data event — re-arms stall timer on each chunk
@@ -521,8 +527,8 @@ export async function forwardRequest(
           message: stallMsg,
           timestamp: Date.now(),
         });
+        try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
         passThrough.destroy(new Error(stallMsg));
-        try { upstreamBody?.destroy(new Error(stallMsg)); } catch { /* already consumed */ }
       }, stallTimeout);
     });
 

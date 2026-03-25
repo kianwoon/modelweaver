@@ -1,5 +1,5 @@
 // src/index.ts
-import { serve } from "@hono/node-server";
+import { createAdaptorServer } from "@hono/node-server";
 import { readFileSync } from "node:fs";
 import { createApp } from "./server.js";
 import { loadConfig } from "./config.js";
@@ -302,8 +302,15 @@ async function main() {
       }
     });
 
-    // Start server
-    const server = serve({ fetch: handle.app.fetch, hostname: host, port });
+    // Start server — register error handler BEFORE listen() so EADDRINUSE is caught
+    const server = createAdaptorServer({ fetch: handle.app.fetch, hostname: host, port });
+    server.on('error', (err: NodeJS.ErrnoException) => {
+      if (err.code === 'EADDRINUSE') {
+        logger.error(`Port ${port} already in use, exiting for monitor restart`, { port });
+        process.exit(1);
+      }
+    });
+    server.listen(port, host);
     attachWebSocket(server as any, metricsStore);
 
     // Graceful shutdown
@@ -350,8 +357,15 @@ async function main() {
     console.log();
   }
 
-  // Start server
-  const server = serve({ fetch: handle.app.fetch, hostname: host, port });
+  // Start server — register error handler BEFORE listen() so EADDRINUSE is caught
+  const server = createAdaptorServer({ fetch: handle.app.fetch, hostname: host, port });
+  server.on('error', (err: NodeJS.ErrnoException) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`Port ${port} already in use, exiting for monitor restart`);
+      process.exit(1);
+    }
+  });
+  server.listen(port, host);
   attachWebSocket(server as any, metricsStore);
 
   // Graceful shutdown
