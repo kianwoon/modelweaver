@@ -185,7 +185,13 @@ export async function getConfigPort(configPath?: string | null): Promise<number 
  */
 async function killProcessTree(pids: number[], timeoutMs: number = 5000): Promise<boolean> {
   for (const pid of pids) {
-    try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
+    try {
+      // Try process group kill first (kills all children)
+      process.kill(-pid, "SIGTERM");
+    } catch {
+      // Fall back to individual kill if process group doesn't exist
+      try { process.kill(pid, "SIGTERM"); } catch { /* already dead */ }
+    }
   }
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -201,7 +207,12 @@ async function killProcessTree(pids: number[], timeoutMs: number = 5000): Promis
         // taskkill may fail if process already exited
       }
     } else {
-      try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+      try {
+        process.kill(-pid, "SIGKILL");
+      } catch {
+        // Fall back to individual kill if process group doesn't exist
+        try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+      }
     }
   }
   return true;
@@ -395,36 +406,53 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
     return { success: false, message: "ModelWeaver is not running (stale PID file cleaned up)" };
   }
 
+  // Kill worker first (holds port + connection pool)
+  const workerPid = await readWorkerPidFile();
+  if (workerPid !== null && isProcessAlive(workerPid)) {
+    try { process.kill(workerPid, "SIGTERM"); } catch { /* already dead */ }
+  }
+  // Then kill monitor
   try {
     process.kill(pid, "SIGTERM");
   } catch {
     return { success: false, message: `Failed to stop daemon (PID ${pid})` };
   }
-
-  // Wait up to 5 seconds for graceful shutdown
+  // Wait for BOTH to die
   const deadline = Date.now() + 5000;
   while (Date.now() < deadline) {
-    if (!isProcessAlive(pid)) {
+    const monitorDead = !isProcessAlive(pid);
+    const workerDead = workerPid === null || !isProcessAlive(workerPid);
+    if (monitorDead && workerDead) {
       await removePidFile();
-      return { success: true, message: `ModelWeaver stopped (PID ${pid})` };
+      await removeWorkerPidFile();
+      return { success: true, message: `ModelWeaver stopped (monitor PID ${pid}, worker PID ${workerPid})` };
     }
     await new Promise(r => setTimeout(r, 100));
   }
 
-  // Force kill if still running
-  try {
-    if (isWindows()) {
-      execFileSync("taskkill", ["/F", "/PID", String(pid), "/T"], { stdio: "ignore" });
-    } else {
-      process.kill(pid, "SIGKILL");
-    }
-  } catch {
-    // Already dead
+  // Force kill anything still running
+  if (workerPid !== null && isProcessAlive(workerPid)) {
+    try {
+      if (isWindows()) {
+        execFileSync("taskkill", ["/F", "/PID", String(workerPid), "/T"], { stdio: "ignore" });
+      } else {
+        process.kill(workerPid, "SIGKILL");
+      }
+    } catch { /* already dead */ }
+  }
+  if (isProcessAlive(pid)) {
+    try {
+      if (isWindows()) {
+        execFileSync("taskkill", ["/F", "/PID", String(pid), "/T"], { stdio: "ignore" });
+      } else {
+        process.kill(pid, "SIGKILL");
+      }
+    } catch { /* already dead */ }
   }
 
   await removePidFile();
   await removeWorkerPidFile();
-  return { success: true, message: `ModelWeaver force-stopped (PID ${pid})` };
+  return { success: true, message: `ModelWeaver force-stopped (monitor PID ${pid}, worker PID ${workerPid})` };
 }
 
 // ---------------------------------------------------------------------------

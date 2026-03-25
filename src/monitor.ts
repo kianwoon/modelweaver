@@ -40,7 +40,20 @@ export async function startMonitor(args: {
   let reloading = false;
   let child: ReturnType<typeof spawn> | null = null;
 
-  function spawnDaemon(): void {
+  async function spawnDaemon(): Promise<void> {
+    // Don't spawn if port is already in use (prevents duplicate workers)
+    const net = await import("node:net");
+    const portInUse = await new Promise<boolean>((resolve) => {
+      const server = net.createServer();
+      server.once("error", () => resolve(true));
+      server.once("listening", () => { server.close(() => resolve(false)); });
+      server.listen(args.port ?? 3456);
+    });
+    if (portInUse) {
+      console.error(`[monitor] Port ${args.port ?? 3456} already in use, skipping worker spawn`);
+      return;
+    }
+
     const childArgs: string[] = [entryScript, "--daemon"];
     if (args.config) childArgs.push("--config", args.config);
     if (args.port) childArgs.push("--port", String(args.port));

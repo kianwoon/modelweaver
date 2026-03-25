@@ -427,28 +427,37 @@ export async function forwardRequest(
 
   // Listen for external abort (from race cancellation) to abort this request
   let removeAbortListener: (() => void) | undefined;
+  let upstreamBody: import("undici").Readable | undefined;
   if (externalSignal) {
     if (externalSignal.aborted) {
       // Already aborted — don't even start the request
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
-      const body = JSON.stringify({
+      const errBody = JSON.stringify({
           type: "error",
           error: { type: "overloaded_error", message: `Provider "${provider.name}" cancelled by race winner` },
         });
-      return new Response(body, {
+      return new Response(errBody, {
         status: 502,
         headers: {
           "content-type": "application/json",
-          "content-length": textEncoder.encode(body).byteLength.toString(),
+          "content-length": textEncoder.encode(errBody).byteLength.toString(),
         },
       });
     }
     const onExternalAbort = () => {
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
+      // Destroy upstream body to free the connection back to the pool.
+      // Deferred to avoid throwing inside AbortSignal event dispatch.
+      setImmediate(() => {
+        if (upstreamBody && !upstreamBody.destroyed) {
+          try { upstreamBody.destroy(); } catch { /* already consumed */ }
+        }
+      });
     };
-    removeAbortListener = externalSignal.addEventListener("abort", onExternalAbort, { once: true }) as unknown as () => void;
+    externalSignal.addEventListener("abort", onExternalAbort, { once: true });
+    removeAbortListener = () => externalSignal.removeEventListener("abort", onExternalAbort);
   }
 
   try {
@@ -466,6 +475,21 @@ export async function forwardRequest(
     // TTFB succeeded — cancel TTFB timer
     if (ttfbTimer) clearTimeout(ttfbTimer);
 
+    // Track upstream body for cleanup on error paths
+    upstreamBody = undiciResponse.body;
+
+    // For error status codes (4xx/5xx), consume body immediately without stall detection.
+    // Rate limits (429) and server errors (5xx) return small JSON bodies that arrive instantly.
+    if (undiciResponse.statusCode >= 400) {
+      clearTimeout(timeout);
+      const errBody = await undiciResponse.body.text();
+      return new Response(errBody, {
+        status: undiciResponse.statusCode,
+        statusText: undiciResponse.statusText,
+        headers: undiciResponse.headers as unknown as HeadersInit,
+      });
+    }
+
     // Body stall detection: pipe through PassThrough to monitor for data without
     // interfering with undici's internal stream state (no flowing mode conflict).
     const stallTimeout = provider.stallTimeout ?? 30000;
@@ -482,6 +506,7 @@ export async function forwardRequest(
         timestamp: Date.now(),
       });
       passThrough.destroy(new Error(stallMsg));
+      try { upstreamBody?.destroy(new Error(stallMsg)); } catch { /* already consumed */ }
     }, stallTimeout);
 
     // Monitor OUR PassThrough for every data event — re-arms stall timer on each chunk
@@ -497,6 +522,7 @@ export async function forwardRequest(
           timestamp: Date.now(),
         });
         passThrough.destroy(new Error(stallMsg));
+        try { upstreamBody?.destroy(new Error(stallMsg)); } catch { /* already consumed */ }
       }, stallTimeout);
     });
 
