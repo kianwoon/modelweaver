@@ -427,7 +427,7 @@ export async function forwardRequest(
 
   // Listen for external abort (from race cancellation) to abort this request
   let removeAbortListener: (() => void) | undefined;
-  let upstreamBody: import("undici").Readable | undefined;
+  let upstreamBody: import("node:stream").Readable | undefined;
   if (externalSignal) {
     if (externalSignal.aborted) {
       // Already aborted — don't even start the request
