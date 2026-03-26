@@ -48,6 +48,40 @@ const MAX_TOKENS_REGEX = /"max_tokens"\s*:\s*(\d+)/;
 /** Module-level TextEncoder — avoids per-request allocation */
 const textEncoder = new TextEncoder();
 
+// --- Pre-built error response helpers ---
+
+const ERR_HEADERS = Object.freeze({ "content-type": "application/json" });
+
+function unknownProviderErr(providerName: string): Response {
+  const body = JSON.stringify({
+    type: "error",
+    error: { type: "api_error", message: `Unknown provider: ${providerName}` },
+  });
+  return new Response(body, {
+    status: 502,
+    headers: { ...ERR_HEADERS, "content-length": String(textEncoder.encode(body).byteLength) },
+  });
+}
+
+function circuitBreakerErr(providerName: string): Response {
+  const body = JSON.stringify({
+    type: "error",
+    error: { type: "api_error", message: `Provider "${providerName}" skipped by circuit breaker` },
+  });
+  return new Response(body, {
+    status: 502,
+    headers: { ...ERR_HEADERS, "content-length": String(textEncoder.encode(body).byteLength) },
+  });
+}
+
+function providerFailedErr(providerName: string): Response {
+  const body = JSON.stringify({
+    type: "error",
+    error: { type: "api_error", message: `Provider "${providerName}" failed` },
+  });
+  return new Response(body, { status: 502, headers: ERR_HEADERS });
+}
+
 /** Delay (ms) before starting backup providers in staggered race */
 const SPECULATIVE_DELAY = 3000;
 
@@ -91,13 +125,36 @@ function handleContextWindowError(status: number, body: string): Response | null
   });
 }
 
-export function buildOutboundUrl(baseUrl: string, incomingPath: string): string {
+export function buildOutboundUrl(
+  baseUrlOrProvider: string | { baseUrl: string; _cachedOrigin?: string; _cachedPathname?: string },
+  incomingPath: string,
+): string {
+  // Extract baseUrl and cached components
+  let baseUrl: string;
+  let cachedOrigin: string | undefined;
+  let cachedPathname: string | undefined;
+
+  if (typeof baseUrlOrProvider === 'object' && baseUrlOrProvider !== null) {
+    baseUrl = baseUrlOrProvider.baseUrl;
+    cachedOrigin = baseUrlOrProvider._cachedOrigin;
+    cachedPathname = baseUrlOrProvider._cachedPathname;
+  } else {
+    baseUrl = baseUrlOrProvider;
+  }
+
   let basePath = "";
   let origin = baseUrl;
-  const slashIndex = baseUrl.indexOf('/', baseUrl.indexOf('//') + 2);
-  if (slashIndex !== -1) {
-    origin = baseUrl.substring(0, slashIndex);
-    basePath = baseUrl.substring(slashIndex);
+
+  // Use cached values when available (avoids re-parsing baseUrl on every request)
+  if (cachedOrigin && cachedPathname !== undefined) {
+    origin = cachedOrigin;
+    basePath = cachedPathname;
+  } else {
+    const slashIndex = baseUrl.indexOf('/', baseUrl.indexOf('//') + 2);
+    if (slashIndex !== -1) {
+      origin = baseUrl.substring(0, slashIndex);
+      basePath = baseUrl.substring(slashIndex);
+    }
   }
 
   let incomingQuery = "";
@@ -177,10 +234,24 @@ function cleanOrphanedToolMessages(body: Record<string, unknown>): void {
   const messages = body.messages;
   if (!Array.isArray(messages)) return;
 
-  const allToolUseIds = new Set<string>();
-  const allToolResultIds = new Set<string>();
+  // Fast exit: count tool blocks — if none exist, skip entirely
+  let hasToolBlocks = false;
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block.type === "tool_use" || block.type === "tool_result") {
+        hasToolBlocks = true;
+        break;
+      }
+    }
+    if (hasToolBlocks) break;
+  }
+  if (!hasToolBlocks) return;
 
   // Single collection pass — gather every tool_use and tool_result ID
+  const allToolUseIds = new Set<string>();
+  const allToolResultIds = new Set<string>();
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
     if (!Array.isArray(msg.content)) continue;
@@ -194,40 +265,34 @@ function cleanOrphanedToolMessages(body: Record<string, unknown>): void {
     }
   }
 
-  // Compute orphaned IDs: tool_use without a matching tool_result, and vice versa.
-  // A tool_use is kept if ANY tool_result references it (even if that tool_result
-  // itself is orphaned — we only strip truly dangling references).
-  const orphanedToolUseIds = new Set<string>();
-  const orphanedToolResultIds = new Set<string>();
+  // Check if any orphans exist before doing filter work
+  let hasOrphans = false;
   for (const id of allToolUseIds) {
-    if (!allToolResultIds.has(id)) orphanedToolUseIds.add(id);
+    if (!allToolResultIds.has(id)) { hasOrphans = true; break; }
   }
-  for (const id of allToolResultIds) {
-    if (!allToolUseIds.has(id)) orphanedToolResultIds.add(id);
-  }
-
-  if (orphanedToolUseIds.size === 0 && orphanedToolResultIds.size === 0) return;
-
-  // Single filter pass — remove orphaned blocks from content arrays
-  let changed = false;
-  const cleaned = messages.map((msg: Record<string, unknown>) => {
-    if (!Array.isArray(msg.content)) return msg;
-
-    const filtered = msg.content.filter((block: Record<string, unknown>) => {
-      if (block.type === "tool_use" && orphanedToolUseIds.has(String(block.id))) return false;
-      if (block.type === "tool_result" && orphanedToolResultIds.has(String(block.tool_use_id))) return false;
-      return true;
-    });
-
-    if (filtered.length < msg.content.length) {
-      changed = true;
-      return { ...msg, content: filtered };
+  if (!hasOrphans) {
+    for (const id of allToolResultIds) {
+      if (!allToolUseIds.has(id)) { hasOrphans = true; break; }
     }
-    return msg;
-  });
+  }
+  if (!hasOrphans) return;
 
-  if (changed) {
-    body.messages = cleaned;
+  // Filter pass — mutate messages in-place instead of creating new array
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!Array.isArray(msg.content)) continue;
+
+    let filteredCount = 0;
+    for (const block of msg.content) {
+      if (block.type === "tool_use" && !allToolResultIds.has(String(block.id))) continue;
+      if (block.type === "tool_result" && !allToolUseIds.has(String(block.tool_use_id))) continue;
+      msg.content[filteredCount] = block;
+      filteredCount++;
+    }
+
+    if (filteredCount < msg.content.length) {
+      msg.content.length = filteredCount;
+    }
   }
 }
 
@@ -341,7 +406,7 @@ export async function forwardRequest(
   }
 
   // Build outbound URL from provider base URL and request path
-  const url = buildOutboundUrl(provider.baseUrl, outgoingPath);
+  const url = buildOutboundUrl(provider, outgoingPath);
 
   // Prepare body — prefer raw passthrough to preserve upstream prompt caching.
   // Only parse and re-serialize when a modification is actually required,
@@ -448,7 +513,7 @@ export async function forwardRequest(
   let removeAbortListener: (() => void) | undefined;
   let upstreamBody: import("node:stream").Readable | undefined;
   let passThrough: PassThrough | undefined;
-  let stallTimerRef: ReturnType<typeof setTimeout> | undefined;
+  let stallTimerRef: ReturnType<typeof setInterval> | undefined;
   if (externalSignal) {
     if (externalSignal.aborted) {
       // Already aborted — don't even start the request
@@ -473,7 +538,7 @@ export async function forwardRequest(
     const onExternalAbort = () => {
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
-      if (stallTimerRef) clearTimeout(stallTimerRef);
+      if (stallTimerRef) clearInterval(stallTimerRef);
       // Destroy upstream body and passThrough to free the connection back to the pool.
       // Deferred to avoid throwing inside AbortSignal event dispatch.
       setImmediate(() => {
@@ -513,7 +578,7 @@ export async function forwardRequest(
     // Guard against uncaught error events when the pipe is torn down
     // after passThrough.destroy() fires before upstreamBody.destroy().
     upstreamBody.on("error", () => {
-      clearTimeout(stallTimerRef);
+      if (stallTimerRef) clearInterval(stallTimerRef);
     });
 
     // For error status codes (4xx/5xx), consume body immediately without stall detection.
@@ -530,11 +595,15 @@ export async function forwardRequest(
 
     // Body stall detection: pipe through PassThrough to monitor for data without
     // interfering with undici's internal stream state (no flowing mode conflict).
+    // Uses a single interval that checks a timestamp instead of per-chunk setTimeout/clearTimeout,
+    // reducing syscall-level overhead on every data event.
     const stallTimeout = provider.stallTimeout ?? 30000;
     passThrough = new PassThrough();
 
     const stallMsg = `Body stalled: no data after ${stallTimeout}ms`;
-    stallTimerRef = setTimeout(() => {
+    let lastDataTime = Date.now();
+
+    const handleStall = () => {
       broadcastStreamEvent({
         requestId: ctx.requestId,
         model: String(ctx.actualModel ?? entry.model ?? ""),
@@ -545,31 +614,27 @@ export async function forwardRequest(
       });
       try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
       passThrough!.destroy(new Error(stallMsg));
-    }, stallTimeout);
+    };
 
-    // Monitor OUR PassThrough for every data event — re-arms stall timer on each chunk
+    stallTimerRef = setInterval(() => {
+      if (Date.now() - lastDataTime >= stallTimeout) {
+        clearInterval(stallTimerRef);
+        stallTimerRef = undefined;
+        handleStall();
+      }
+    }, Math.min(stallTimeout / 4, 5000));
+
+    // Monitor PassThrough for data events — just update timestamp (no timer churn)
     passThrough!.on("data", () => {
-      clearTimeout(stallTimerRef);
-      stallTimerRef = setTimeout(() => {
-        broadcastStreamEvent({
-          requestId: ctx.requestId,
-          model: String(ctx.actualModel ?? entry.model ?? ""),
-          tier: "",
-          state: "error",
-          message: stallMsg,
-          timestamp: Date.now(),
-        });
-        try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
-        passThrough!.destroy(new Error(stallMsg));
-      }, stallTimeout);
+      lastDataTime = Date.now();
     });
 
     passThrough.on("end", () => {
-      clearTimeout(stallTimerRef);
+      if (stallTimerRef) { clearInterval(stallTimerRef); stallTimerRef = undefined; }
     });
 
     passThrough.on("error", () => {
-      clearTimeout(stallTimerRef);
+      if (stallTimerRef) { clearInterval(stallTimerRef); stallTimerRef = undefined; }
       try { passThrough!.destroy(); } catch { /* already destroyed */ }
     });
 
@@ -580,7 +645,7 @@ export async function forwardRequest(
         ? new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(String(undiciResponse.body))); controller.close(); } })
         : new ReadableStream({ start(controller) { controller.close(); } });
       passThrough.end();
-      clearTimeout(stallTimerRef);
+      if (stallTimerRef) clearInterval(stallTimerRef);
       return new Response(fallback, {
         status: undiciResponse.statusCode,
         headers: undiciResponse.headers as unknown as HeadersInit,
@@ -602,7 +667,7 @@ export async function forwardRequest(
   } catch (error) {
     clearTimeout(timeout);
     if (ttfbTimer) clearTimeout(ttfbTimer);
-    if (stallTimerRef) clearTimeout(stallTimerRef);
+    if (stallTimerRef) clearInterval(stallTimerRef);
 
     // Network errors / timeouts — return a synthetic 502
     const message = ttfbTimedOut
@@ -645,17 +710,7 @@ async function raceProviders(
   const races = chain.map(async (entry, index): Promise<{ response: Response; index: number }> => {
     const provider = providers.get(entry.provider);
     if (!provider) {
-      const errBody = JSON.stringify({
-          type: "error",
-          error: { type: "api_error", message: `Unknown provider: ${entry.provider}` },
-        });
-      return {
-        response: new Response(errBody, {
-          status: 502,
-          headers: { "content-type": "application/json" },
-        }),
-        index,
-      };
+      return { response: unknownProviderErr(entry.provider), index };
     }
 
     // Check circuit breaker
@@ -663,17 +718,7 @@ async function raceProviders(
     if (provider._circuitBreaker) {
       const cb = provider._circuitBreaker.canProceed();
       if (!cb.allowed) {
-        const errBody = JSON.stringify({
-            type: "error",
-            error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
-          });
-        return {
-          response: new Response(errBody, {
-            status: 502,
-            headers: { "content-type": "application/json" },
-          }),
-          index,
-        };
+        return { response: circuitBreakerErr(entry.provider), index };
       }
       cbProbeId = cb.probeId;
     }
@@ -691,17 +736,7 @@ async function raceProviders(
       if (provider._circuitBreaker) {
         provider._circuitBreaker.recordResult(502, cbProbeId);
       }
-      const errBody = JSON.stringify({
-          type: "error",
-          error: { type: "api_error", message: `Provider "${entry.provider}" failed` },
-        });
-      return {
-        response: new Response(errBody, {
-          status: 502,
-          headers: { "content-type": "application/json" },
-        }),
-        index,
-      };
+      return { response: providerFailedErr(entry.provider), index };
     }
   });
 
@@ -918,34 +953,14 @@ export async function forwardWithFallback(
     const provider = providers.get(entry.provider);
 
     if (!provider) {
-      const errBody = JSON.stringify({
-          type: "error",
-          error: { type: "api_error", message: `Unknown provider: ${entry.provider}` },
-        });
-      return new Response(errBody, {
-        status: 502,
-        headers: {
-          "content-type": "application/json",
-          "content-length": textEncoder.encode(errBody).byteLength.toString(),
-        },
-      });
+      return unknownProviderErr(entry.provider);
     }
 
     if (provider._circuitBreaker) {
       const cb = provider._circuitBreaker.canProceed();
       if (!cb.allowed) {
         logger?.warn("Provider skipped by circuit breaker", { requestId: ctx.requestId, provider: entry.provider });
-        const errBody = JSON.stringify({
-            type: "error",
-            error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
-          });
-        return new Response(errBody, {
-          status: 502,
-          headers: {
-            "content-type": "application/json",
-            "content-length": textEncoder.encode(errBody).byteLength.toString(),
-          },
-        });
+        return circuitBreakerErr(entry.provider);
       }
     }
 
@@ -968,20 +983,7 @@ export async function forwardWithFallback(
     const provider = providers.get(entry.provider);
 
     if (!provider) {
-      const errBody = JSON.stringify({
-        type: "error",
-        error: { type: "api_error", message: `Unknown provider: ${entry.provider}` },
-      });
-      return {
-        response: new Response(errBody, {
-          status: 502,
-          headers: {
-            "content-type": "application/json",
-            "content-length": textEncoder.encode(errBody).byteLength.toString(),
-          },
-        }),
-        index,
-      };
+      return { response: unknownProviderErr(entry.provider), index };
     }
 
     let cbProbeId: number | undefined;
@@ -992,20 +994,7 @@ export async function forwardWithFallback(
           requestId: ctx.requestId,
           provider: entry.provider,
         });
-        const errBody = JSON.stringify({
-          type: "error",
-          error: { type: "api_error", message: `Provider "${entry.provider}" skipped by circuit breaker` },
-        });
-        return {
-          response: new Response(errBody, {
-            status: 502,
-            headers: {
-              "content-type": "application/json",
-              "content-length": textEncoder.encode(errBody).byteLength.toString(),
-            },
-          }),
-          index,
-        };
+        return { response: circuitBreakerErr(entry.provider), index };
       }
       cbProbeId = cb.probeId;
     }

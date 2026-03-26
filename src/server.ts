@@ -120,35 +120,47 @@ function createMetricsTransform(
       if (!event) continue;
       const dataLine = event.split("\n").find(l => l.startsWith("data:"));
       if (!dataLine) continue;
+
+      // Fast path: skip JSON.parse entirely if the event has nothing we need.
+      // Only ~5-10 of ~100-500 SSE events contain usage/preview data.
+      const hasUsage = dataLine.indexOf('"usage"') !== -1;
+      const hasDelta = dataLine.indexOf('"delta"') !== -1;
+      const hasChoices = dataLine.indexOf('"choices"') !== -1;
+      if (!hasUsage && !hasDelta && !hasChoices) continue;
+
       try {
         const data = JSON.parse(dataLine.slice(5)) as Record<string, unknown>;
 
         // Extract usage (token counts)
-        if (dataLine.includes('"usage"')) {
+        if (hasUsage) {
           const usage = parseUsageFromData(data);
           if (usage.inputTokens > tokens.input) tokens.input = usage.inputTokens;
           if (usage.outputTokens > tokens.output) tokens.output = usage.outputTokens;
           if (usage.cacheReadTokens > tokens.cacheRead) tokens.cacheRead = usage.cacheReadTokens;
-          if (usage.cacheCreationTokens > tokens.cacheCreation) tokens.cacheCreation = usage.cacheCreationTokens;
+          if (usage.cacheCreationTokens > tokens.creationTokens) tokens.cacheCreation = usage.cacheCreationTokens;
         }
 
         // Extract text content for preview
         // Anthropic format: content_block_delta with delta.text
-        const delta = data.delta as Record<string, unknown> | undefined;
-        if (delta && typeof delta.text === "string") {
-          responsePreview += delta.text;
-          if (responsePreview.length > PREVIEW_MAX) {
-            responsePreview = responsePreview.slice(-PREVIEW_MAX);
+        if (hasDelta) {
+          const delta = data.delta as Record<string, unknown> | undefined;
+          if (delta && typeof delta.text === "string") {
+            responsePreview += delta.text;
+            if (responsePreview.length > PREVIEW_MAX) {
+              responsePreview = responsePreview.slice(-PREVIEW_MAX);
+            }
           }
         }
         // OpenAI format: choices[0].delta.content
-        const choices = data.choices as Array<Record<string, unknown>> | undefined;
-        if (choices?.[0]) {
-          const choiceDelta = choices[0].delta as Record<string, unknown> | undefined;
-          if (choiceDelta && typeof choiceDelta.content === "string") {
-            responsePreview += choiceDelta.content;
-            if (responsePreview.length > PREVIEW_MAX) {
-              responsePreview = responsePreview.slice(-PREVIEW_MAX);
+        if (hasChoices) {
+          const choices = data.choices as Array<Record<string, unknown>> | undefined;
+          if (choices?.[0]) {
+            const choiceDelta = choices[0].delta as Record<string, unknown> | undefined;
+            if (choiceDelta && typeof choiceDelta.content === "string") {
+              responsePreview += choiceDelta.content;
+              if (responsePreview.length > PREVIEW_MAX) {
+                responsePreview = responsePreview.slice(-PREVIEW_MAX);
+              }
             }
           }
         }
@@ -158,39 +170,25 @@ function createMetricsTransform(
 
   const scanWindow = (text: string) => {
     // Fast bailout: most chunks don't contain usage data
-    if (!text.includes('"usage"')) {
-      // Extract text content for preview from JSON responses even without usage
-      const anthContent = [...text.matchAll(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g)];
-      if (anthContent.length > 0) {
-        const lastText = anthContent[anthContent.length - 1][1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
-        responsePreview += lastText;
-        if (responsePreview.length > PREVIEW_MAX) {
-          responsePreview = responsePreview.slice(-PREVIEW_MAX);
+    const hasUsage = text.includes('"usage"');
+
+    // Single combined regex pass for all token fields
+    const TOKEN_RE = /"(input_tokens|prompt_tokens|cache_read_input_tokens|cache_creation_input_tokens|output_tokens|completion_tokens)"\s*:\s*(\d+)/g;
+    if (hasUsage) {
+      let m: RegExpExecArray | null;
+      while ((m = TOKEN_RE.exec(text)) !== null) {
+        const val = parseInt(m[2], 10);
+        const field = m[1];
+        if (field === "input_tokens" || field === "prompt_tokens") {
+          if (val > inputTokens) inputTokens = val;
+        } else if (field === "cache_read_input_tokens") {
+          if (val > cacheReadTokens) cacheReadTokens = val;
+        } else if (field === "cache_creation_input_tokens") {
+          if (val > cacheCreationTokens) cacheCreationTokens = val;
+        } else if (field === "output_tokens" || field === "completion_tokens") {
+          if (val > outputTokens) outputTokens = val;
         }
       }
-      return;
-    }
-
-    const inputMatches = [...text.matchAll(/"(?:input_tokens|prompt_tokens)"\s*:\s*(\d+)/g)];
-    const cacheReadMatches = [...text.matchAll(/"cache_read_input_tokens"\s*:\s*(\d+)/g)];
-    const cacheCreationMatches = [...text.matchAll(/"cache_creation_input_tokens"\s*:\s*(\d+)/g)];
-    const outputMatches = [...text.matchAll(/"(?:output_tokens|completion_tokens)"\s*:\s*(\d+)/g)];
-
-    if (inputMatches.length > 0) {
-      const val = parseInt(inputMatches[inputMatches.length - 1][1], 10);
-      if (val > inputTokens) inputTokens = val;
-    }
-    if (cacheReadMatches.length > 0) {
-      const val = parseInt(cacheReadMatches[cacheReadMatches.length - 1][1], 10);
-      if (val > cacheReadTokens) cacheReadTokens = val;
-    }
-    if (cacheCreationMatches.length > 0) {
-      const val = parseInt(cacheCreationMatches[cacheCreationMatches.length - 1][1], 10);
-      if (val > cacheCreationTokens) cacheCreationTokens = val;
-    }
-    if (outputMatches.length > 0) {
-      const val = parseInt(outputMatches[outputMatches.length - 1][1], 10);
-      if (val > outputTokens) outputTokens = val;
     }
 
     // Extract text content for preview from JSON responses
