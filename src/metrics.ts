@@ -18,6 +18,7 @@ export class MetricsStore {
   private maxSize: number;
   private head = 0;
   private count = 0;
+  private _lifetimeRequests = 0;
   private subscribers: Set<Subscriber>;
   private createdAt: number;
 
@@ -106,6 +107,7 @@ export class MetricsStore {
     this.buffer[index] = metrics;
     this.head++;
     if (this.count < this.maxSize) this.count++;
+    this._lifetimeRequests++;
 
     // Notify subscribers (catch errors to prevent breaking recording)
     for (const cb of this.subscribers) {
@@ -141,7 +143,7 @@ export class MetricsStore {
 
     // getRecentRequests() already caps at WS_RECENT_REQUESTS_CAP
     return {
-      totalRequests: this.count,
+      totalRequests: this._lifetimeRequests,
       totalInputTokens: this._totalInputTokens,
       totalOutputTokens: this._totalOutputTokens,
       avgTokensPerSec: this.count > 0 ? Math.round((this._totalTokensPerSec / this.count) * 10) / 10 : 0,
