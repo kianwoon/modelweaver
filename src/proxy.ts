@@ -61,7 +61,7 @@ const CONTEXT_WINDOW_PATTERNS = [
 ];
 
 function isContextWindowError(status: number, body: string): boolean {
-  if (status !== 400) return false;
+  if (status !== 400 && status !== 413) return false;
   const lower = body.toLowerCase();
   return CONTEXT_WINDOW_PATTERNS.some(p => lower.includes(p));
 }
@@ -86,7 +86,7 @@ function handleContextWindowError(status: number, body: string): Response | null
     },
   });
   return new Response(enhanced, {
-    status: 400,
+    status: 413,
     headers: { "content-type": "application/json" },
   });
 }
@@ -574,6 +574,18 @@ export async function forwardRequest(
     });
 
     // Pipe undici body → PassThrough. Data flows through without mode conflicts.
+    if (!undiciResponse.body || typeof undiciResponse.body.pipe !== 'function') {
+      // Non-standard upstream response (e.g., plain text/buffer) — send as-is
+      const fallback = undiciResponse.body
+        ? new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(String(undiciResponse.body))); controller.close(); } })
+        : new ReadableStream({ start(controller) { controller.close(); } });
+      passThrough.end();
+      clearTimeout(stallTimerRef);
+      return new Response(fallback, {
+        status: undiciResponse.statusCode,
+        headers: undiciResponse.headers as unknown as HeadersInit,
+      });
+    }
     undiciResponse.body.pipe(passThrough);
 
     // Wrap undici response as a standard Web Response for downstream compatibility
@@ -728,7 +740,7 @@ async function raceProviders(
       // Non-retriable error — check for context window limit before propagating
       if (!isRetriable(winner.response.status)) {
         sharedController.abort();
-        if (winner.response.status === 400 && winner.response.body) {
+        if ((winner.response.status === 400 || winner.response.status === 413) && winner.response.body) {
           try {
             const errBody = await winner.response.text();
             const handled = handleContextWindowError(winner.response.status, errBody);
@@ -1087,7 +1099,7 @@ export async function forwardWithFallback(
 
       if (!isRetriable(winner.response.status)) {
         sharedController.abort();
-        if (winner.response.status === 400 && winner.response.body) {
+        if ((winner.response.status === 400 || winner.response.status === 413) && winner.response.body) {
           try {
             const errBody = await winner.response.text();
             const handled = handleContextWindowError(winner.response.status, errBody);

@@ -42,6 +42,7 @@ export class CircuitBreaker {
       // Check if cooldown has elapsed
       if (this.openedAt && Date.now() - this.openedAt >= this.config.cooldownSeconds * 1000) {
         this.state = "half-open";
+        console.warn('[circuit-breaker] HALF-OPEN — cooldown elapsed, allowing probe');
         const probeId = this.nextProbeId++;
         this.halfOpenInProgress = true;
         this.halfOpenProbeId = probeId;
@@ -71,6 +72,7 @@ export class CircuitBreaker {
       this.state = "closed";
       this.failureTimestamps = [];
       this.openedAt = null;
+      console.warn('[circuit-breaker] CLOSED — recovered after successful request');
       return;
     }
 
@@ -85,6 +87,7 @@ export class CircuitBreaker {
       // Any failure in half-open → back to open
       this.state = "open";
       this.openedAt = now;
+      console.warn('[circuit-breaker] back to OPEN — probe failed');
       return;
     }
 
@@ -92,6 +95,7 @@ export class CircuitBreaker {
     if (this.failureTimestamps.length >= this.config.failureThreshold) {
       this.state = "open";
       this.openedAt = now;
+      console.warn(`[circuit-breaker] OPENED — ${this.failureTimestamps.length} failures in ${this.config.windowSeconds}s window`);
     }
   }
 
