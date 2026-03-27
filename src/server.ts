@@ -480,6 +480,9 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     if (result.actualModel) {
       ctx.actualModel = result.actualModel;
     }
+    if (result.actualProvider) {
+      successfulProvider = result.actualProvider;
+    }
     const response = result.response;
 
     // Broadcast TTFB event — headers received from upstream (skip for error responses)
@@ -518,7 +521,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     // Extract tokens via inline TransformStream for successful responses
     let responseBody: ReadableStream<Uint8Array> | null = response.body;
     if (response.body && response.status >= 200 && response.status < 300 && metricsStore) {
-      const targetProvider = ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider;
+      const targetProvider = result.actualProvider || (ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider);
       const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, metricsStore, response.status, response.headers.get("content-type") || "");
       responseBody = response.body.pipeThrough(transform) as typeof responseBody;
     }

@@ -644,7 +644,7 @@ function buildExistingModelsTable(
 
 async function configureModels(
   providers: ConfiguredProvider[],
-  existingModels?: Map<string, { provider: string; model: string }[]>,
+  existingModels?: Map<string, { provider: string; model: string; weight?: number }[]>,
 ): Promise<ConfiguredModel[]> {
   const models: ConfiguredModel[] = [];
   const hasExisting = existingModels && existingModels.size > 0;
@@ -1223,22 +1223,28 @@ function buildYamlConfig(
   models: ConfiguredModel[],
   server: { port: number; host: string },
   existingProviders?: Map<string, ExistingProvider>,
-  existingModelRouting?: Map<string, { provider: string; model: string }[]>,
+  existingModelRouting?: Map<string, { provider: string; model: string; weight?: number }[]>,
 ): string {
-  // Build modelRouting from configured models (primary + fallbacks)
-  const modelRouting: Record<string, { provider: string; model: string }[]> = {};
+  // Build modelRouting from configured models (primary + fallbacks or distribution entries)
+  const modelRouting: Record<string, { provider: string; model: string; weight?: number }[]> = {};
   for (const m of models) {
-    modelRouting[m.alias] = [
-      { provider: m.provider, model: m.model },
-      ...m.fallbacks,
-    ];
+    if (m.entries && m.entries.length > 0) {
+      // Distribution mode: use entries with weights
+      modelRouting[m.alias] = m.entries;
+    } else {
+      // Fallback mode: primary + fallbacks
+      modelRouting[m.alias] = [
+        { provider: m.provider, model: m.model },
+        ...m.fallbacks,
+      ];
+    }
   }
   // For any models in existing routing that are NOT in the current models list,
   // preserve them as-is (backward compatibility)
   if (existingModelRouting) {
     for (const [alias, chain] of existingModelRouting.entries()) {
       if (!modelRouting[alias]) {
-        modelRouting[alias] = chain.map(e => ({ provider: e.provider, model: e.model }));
+        modelRouting[alias] = chain;
       }
     }
   }
@@ -1246,7 +1252,7 @@ function buildYamlConfig(
   const configObj: {
     server: { port: number; host: string };
     providers: Record<string, Record<string, unknown>>;
-    modelRouting: Record<string, { provider: string; model: string }[]>;
+    modelRouting: Record<string, { provider: string; model: string; weight?: number }[]>;
   } = {
     server,
     providers: {},

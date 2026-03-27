@@ -939,6 +939,7 @@ async function hedgedForwardRequest(
 export interface FallbackResult {
   response: Response;
   actualModel?: string;
+  actualProvider?: string;
 }
 
 /**
@@ -960,14 +961,14 @@ export async function forwardWithFallback(
     const provider = providers.get(entry.provider);
 
     if (!provider) {
-      return { response: unknownProviderErr(entry.provider), actualModel: entry.model };
+      return { response: unknownProviderErr(entry.provider), actualModel: entry.model, actualProvider: entry.provider };
     }
 
     if (provider._circuitBreaker) {
       const cb = provider._circuitBreaker.canProceed();
       if (!cb.allowed) {
         logger?.warn("Provider skipped by circuit breaker", { requestId: ctx.requestId, provider: entry.provider });
-        return { response: circuitBreakerErr(entry.provider), actualModel: entry.model };
+        return { response: circuitBreakerErr(entry.provider), actualModel: entry.model, actualProvider: entry.provider };
       }
     }
 
@@ -975,10 +976,108 @@ export async function forwardWithFallback(
 
     const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger);
 
-    return { response, actualModel: entry.model };
+    return { response, actualModel: entry.model, actualProvider: entry.provider };
   }
 
-  // Multiple providers — staggered race
+  // Multiple providers
+  if (ctx.hasDistribution) {
+    // Distribution mode: sequential fallback only (no racing).
+    // The selected provider (chain[0]) should handle the request;
+    // only fall back to chain[1+] on retriable errors.
+    for (let i = 0; i < chain.length; i++) {
+      const entry = chain[i];
+      const provider = providers.get(entry.provider);
+
+      if (!provider) {
+        const err = unknownProviderErr(entry.provider);
+        if (i === chain.length - 1) return { response: err, actualModel: entry.model, actualProvider: entry.provider };
+        continue;
+      }
+
+      let cbProbeId: number | undefined;
+      if (provider._circuitBreaker) {
+        const cb = provider._circuitBreaker.canProceed();
+        if (!cb.allowed) {
+          logger?.warn("Provider skipped by circuit breaker", {
+            requestId: ctx.requestId,
+            provider: entry.provider,
+          });
+          if (i === chain.length - 1) return { response: circuitBreakerErr(entry.provider), actualModel: entry.model, actualProvider: entry.provider };
+          continue;
+        }
+        cbProbeId = cb.probeId;
+      }
+
+      onAttempt?.(entry.provider, i);
+
+      try {
+        const response = await hedgedForwardRequest(
+          provider, entry, ctx, incomingRequest, undefined, i, logger,
+        );
+
+        if (provider._circuitBreaker) provider._circuitBreaker.recordResult(response.status, cbProbeId);
+
+        if (response.status >= 200 && response.status < 300) {
+          return { response, actualModel: entry.model, actualProvider: entry.provider };
+        }
+
+        if (!isRetriable(response.status)) {
+          // Non-retriable error — return immediately
+          if ((response.status === 400 || response.status === 413) && response.body) {
+            try {
+              const errBody = await response.text();
+              const handled = handleContextWindowError(response.status, errBody);
+              if (handled) return { response: handled, actualModel: entry.model, actualProvider: entry.provider };
+              return {
+                response: new Response(errBody, {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers,
+                }),
+                actualModel: entry.model,
+                actualProvider: entry.provider,
+              };
+            } catch {
+              return { response, actualModel: entry.model, actualProvider: entry.provider };
+            }
+          }
+          return { response, actualModel: entry.model, actualProvider: entry.provider };
+        }
+
+        // Retriable error — continue to next provider
+        logger?.warn("Provider failed with retriable status, falling back", {
+          requestId: ctx.requestId,
+          provider: entry.provider,
+          status: response.status,
+          index: i,
+        });
+        // continue loop
+      } catch {
+        if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502, cbProbeId);
+        logger?.warn("Provider failed with exception, falling back", {
+          requestId: ctx.requestId,
+          provider: entry.provider,
+          index: i,
+        });
+        // continue loop
+      }
+    }
+
+    // All providers failed
+    return {
+      response: new Response(JSON.stringify({
+        type: "error",
+        error: { type: "api_error", message: "All providers failed" },
+      }), {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      }),
+      actualModel: chain[chain.length - 1]?.model,
+      actualProvider: chain[chain.length - 1]?.provider,
+    };
+  }
+
+  // Non-distribution: staggered race
   const sharedController = new AbortController();
   const completed = new Set<number>();
   const failures: { response: Response; index: number }[] = [];
@@ -1092,7 +1191,7 @@ export async function forwardWithFallback(
         }
         // Return the winning entry's model, not ctx.actualModel which may be overwritten
         const winningEntry = chain[winner.index];
-        return { response: winner.response, actualModel: winningEntry?.model };
+        return { response: winner.response, actualModel: winningEntry?.model, actualProvider: winningEntry?.provider };
       }
 
       if (!isRetriable(winner.response.status)) {
@@ -1102,7 +1201,7 @@ export async function forwardWithFallback(
           try {
             const errBody = await winner.response.text();
             const handled = handleContextWindowError(winner.response.status, errBody);
-            if (handled) return { response: handled, actualModel: winnerEntry?.model };
+            if (handled) return { response: handled, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
             return {
               response: new Response(errBody, {
                 status: winner.response.status,
@@ -1110,12 +1209,13 @@ export async function forwardWithFallback(
                 headers: winner.response.headers,
               }),
               actualModel: winnerEntry?.model,
+              actualProvider: winnerEntry?.provider,
             };
           } catch {
-            return { response: winner.response, actualModel: winnerEntry?.model };
+            return { response: winner.response, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
           }
         }
-        return { response: winner.response, actualModel: winnerEntry?.model };
+        return { response: winner.response, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
       }
 
       failures.push(winner);
@@ -1124,7 +1224,7 @@ export async function forwardWithFallback(
     sharedController.abort();
     if (failures.length > 0) {
       const failedEntry = chain[failures[0].index];
-      return { response: failures[0].response, actualModel: failedEntry?.model };
+      return { response: failures[0].response, actualModel: failedEntry?.model, actualProvider: failedEntry?.provider };
     }
 
     const errBody = JSON.stringify({
