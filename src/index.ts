@@ -99,7 +99,7 @@ async function main() {
     ];
     for (const p of paths) {
       if (existsSync(p)) {
-        dotenv.config({ path: p, quiet: true });
+        dotenv.config({ path: p, quiet: true, override: true });
         break;
       }
     }
