@@ -149,6 +149,16 @@ function updateSummary(data) {
   } else {
     const maxLatency = Math.max(...modelStats.map(m => m.avgLatencyMs), 1);
     modelsEl.textContent = '';
+    // Column headers
+    const header = document.createElement('div');
+    header.className = 'perf-row perf-header';
+    const cols = ['Model', 'Reqs', 'Latency', '', 'Success', 'T/s', '%'];
+    for (const col of cols) {
+      const span = document.createElement('span');
+      span.textContent = col;
+      header.appendChild(span);
+    }
+    modelsEl.appendChild(header);
     for (const m of modelStats) {
       const row = document.createElement('div');
       row.className = 'perf-row';
