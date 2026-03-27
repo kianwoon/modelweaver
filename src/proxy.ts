@@ -837,7 +837,7 @@ async function hedgedForwardRequest(
   index: number,
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
 ): Promise<Response> {
-  const count = computeHedgingCount(provider);
+  const count = ctx.hasDistribution ? 1 : computeHedgingCount(provider);
 
   if (count <= 1) {
     // No hedging — single request
