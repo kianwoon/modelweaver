@@ -153,6 +153,60 @@ describe("resolveRequest", () => {
     const ctx = resolveRequest("claude-sonnet-4", "req-6", config, "{}");
     expect(ctx!.tier).toBe("sonnet");
   });
+
+  it("activates distribution mode when routing entries have weights", () => {
+    const config: AppConfig = {
+      ...baseConfig,
+      modelRouting: new Map([
+        ["dist-model", [
+          { provider: "glm", weight: 50 },
+          { provider: "minimax", weight: 30 },
+          { provider: "openrouter", weight: 20 },
+        ]],
+      ]),
+    };
+    const ctx = resolveRequest("dist-model", "req-dist-1", config, "{}");
+    expect(ctx).not.toBeNull();
+    expect(ctx!.hasDistribution).toBe(true);
+    expect(ctx!.fallbackMode).toBe("sequential");
+    expect(["glm", "minimax", "openrouter"]).toContain(ctx!.providerChain[0].provider);
+    expect(ctx!.providerChain).toHaveLength(3);
+  });
+
+  it("distribution selects from all providers over many requests", () => {
+    const config: AppConfig = {
+      ...baseConfig,
+      modelRouting: new Map([
+        ["dist-model", [
+          { provider: "primary", weight: 80 },
+          { provider: "secondary", weight: 20 },
+        ]],
+      ]),
+    };
+    const selected = new Set<string>();
+    for (let i = 0; i < 200; i++) {
+      const ctx = resolveRequest("dist-model", `req-${i}`, config, "{}");
+      selected.add(ctx!.providerChain[0].provider);
+    }
+    expect(selected.has("primary")).toBe(true);
+    expect(selected.has("secondary")).toBe(true);
+  });
+
+  it("non-distribution modelRouting still works unchanged", () => {
+    const config: AppConfig = {
+      ...baseConfig,
+      modelRouting: new Map([
+        ["static-model", [
+          { provider: "primary" },
+          { provider: "fallback" },
+        ]],
+      ]),
+    };
+    const ctx = resolveRequest("static-model", "req-static", config, "{}");
+    expect(ctx!.hasDistribution).toBeFalsy();
+    expect(ctx!.providerChain[0].provider).toBe("primary");
+    expect(ctx!.providerChain[1].provider).toBe("fallback");
+  });
 });
 
 describe("selectByWeight", () => {
