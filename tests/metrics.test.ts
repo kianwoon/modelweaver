@@ -45,7 +45,8 @@ describe("MetricsStore", () => {
       expect(store.getSummary().totalRequests).toBe(3);
 
       store.recordRequest(createMockMetrics({ requestId: "4" }));
-      expect(store.getSummary().totalRequests).toBe(3);
+      // totalRequests is a lifetime counter — it tracks all requests ever, not buffer size
+      expect(store.getSummary().totalRequests).toBe(4);
 
       // The first request should be evicted — check recent requests
       const recent = store.getSummary().recentRequests;

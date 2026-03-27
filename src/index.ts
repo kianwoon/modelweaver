@@ -109,9 +109,8 @@ async function main() {
 
   // Handle 'init' subcommand — dynamic import to avoid loading prompts for normal startup
   if (process.argv[2] === 'init') {
-    const quick = process.argv.includes('--quick') || process.argv.includes('-q');
     const { runInit } = await import('./init.js');
-    await runInit({ quick });
+    await runInit();
     process.exit(0);
   }
 
@@ -273,19 +272,38 @@ async function main() {
         }
       }, 300);
 
+      let usingPollingFallback = false;
       try {
         configWatcher = watch(configPath, () => {
           debounced.reload();
         });
-        configWatcher.on('error', () => {
-          // fs.watch failed — silently disable hot-reload
+        configWatcher.on('error', (err) => {
+          // fs.watch failed — fall back to polling
+          logger.warn("fs.watch error, falling back to config polling", { error: err.message });
           if (configWatcher) {
             configWatcher.close();
             configWatcher = null;
           }
+          // Fall back to polling every 5 seconds
+          (handle as any)._configPollInterval = setInterval(() => {
+            debounced.reload();
+          }, 5000);
+          usingPollingFallback = true;
         });
-      } catch {
-        // fs.watch not available — hot-reload disabled
+      } catch (err) {
+        // fs.watch setup failed — fall back to polling
+        logger.warn("fs.watch unavailable, falling back to config polling", { error: (err as Error).message });
+        (handle as any)._configPollInterval = setInterval(() => {
+          debounced.reload();
+        }, 5000);
+        usingPollingFallback = true;
+      }
+
+      // Startup logging
+      if (usingPollingFallback) {
+        logger.info("Config polling fallback active (fs.watch unavailable)", { path: configPath });
+      } else {
+        logger.info("Hot-reload active — edit config.yaml to reload", { path: configPath });
       }
     }
 
@@ -327,6 +345,9 @@ async function main() {
       if (configWatcher) {
         configWatcher.close();
         configWatcher = null;
+      }
+      if ((handle as any)._configPollInterval) {
+        clearInterval((handle as any)._configPollInterval);
       }
       closeWebSocket();
       await handle.closeAgents();
