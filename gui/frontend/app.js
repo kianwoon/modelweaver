@@ -141,53 +141,85 @@ function updateSummary(data) {
   const uptimeEl = document.getElementById('last-refresh');
   if (uptimeEl) uptimeEl.textContent = formatUptime(data.uptimeSeconds || 0);
 
-  // Active models
-  const activeModels = data.activeModels || [];
-  if (activeModels.length === 0) {
+  // Active models — performance indicators
+  const modelStats = data.modelStats || [];
+  if (modelStats.length === 0) {
     modelsEl.textContent = '';
     modelsEl.appendChild(createEmptyEl('No requests yet'));
   } else {
-    const maxCount = Math.max(...activeModels.map(m => m.count));
+    const maxLatency = Math.max(...modelStats.map(m => m.avgLatencyMs), 1);
     modelsEl.textContent = '';
-    for (const m of activeModels) {
-      const pct = maxCount > 0 ? (m.count / maxCount * 100) : 0;
-      const cls = (m.actualModel || m.model || '').toLowerCase();
-      let barClass = '';
-      if (cls.includes('sonnet')) barClass = 'sonnet';
-      else if (cls.includes('haiku')) barClass = 'haiku';
-      else if (cls.includes('opus')) barClass = 'opus';
+    for (const m of modelStats) {
+      const row = document.createElement('div');
+      row.className = 'perf-row';
+      row.setAttribute('data-model', m.model || '');
 
-      const bar = document.createElement('div');
-      bar.className = 'model-bar';
-      bar.setAttribute('data-model', m.actualModel || m.model || '');
+      // Model name
+      const nameEl = document.createElement('span');
+      nameEl.className = 'model-name';
+      nameEl.textContent = shortModel(m.model);
+      nameEl.title = m.model;
+      row.appendChild(nameEl);
 
-      const name = document.createElement('span');
-      name.className = 'model-name';
-      const actualModel = m.actualModel || m.model || 'unknown';
-      const requestedModel = m.model || 'unknown';
-      const displayModel = actualModel;
-      const showAlias = actualModel !== requestedModel;
-      name.title = showAlias ? `${actualModel} (via ${requestedModel})` : displayModel;
-      name.textContent = showAlias
-        ? `${shortModel(actualModel)} (${shortModel(requestedModel)})`
-        : shortModel(displayModel);
+      // Request count
+      const countEl = document.createElement('span');
+      countEl.className = 'perf-count';
+      countEl.textContent = m.count + ' reqs';
+      row.appendChild(countEl);
 
-      const track = document.createElement('div');
-      track.className = 'model-bar-track';
+      // Latency bar + value
+      const latencyWrap = document.createElement('span');
+      latencyWrap.className = 'perf-latency';
+      const barTrack = document.createElement('span');
+      barTrack.className = 'perf-bar';
+      const barFill = document.createElement('span');
+      barFill.className = 'perf-bar-fill';
+      const pct = maxLatency > 0 ? (m.avgLatencyMs / maxLatency * 100) : 0;
+      barFill.style.width = Math.max(pct, 2) + '%';
+      if (m.avgLatencyMs < 500) barFill.classList.add('perf-fast');
+      else if (m.avgLatencyMs < 1500) barFill.classList.add('perf-medium');
+      else barFill.classList.add('perf-slow');
+      barTrack.appendChild(barFill);
+      const latencyVal = document.createElement('span');
+      latencyVal.className = 'perf-latency-val';
+      if (m.avgLatencyMs < 500) latencyVal.classList.add('perf-fast');
+      else if (m.avgLatencyMs < 1500) latencyVal.classList.add('perf-medium');
+      else latencyVal.classList.add('perf-slow');
+      latencyVal.textContent = m.avgLatencyMs >= 1000
+        ? (m.avgLatencyMs / 1000).toFixed(1) + 's'
+        : m.avgLatencyMs + 'ms';
+      latencyWrap.appendChild(barTrack);
+      latencyWrap.appendChild(latencyVal);
+      row.appendChild(latencyWrap);
 
-      const fill = document.createElement('div');
-      fill.className = 'model-bar-fill ' + barClass;
-      fill.style.width = pct + '%';
+      // Success rate
+      const successEl = document.createElement('span');
+      successEl.className = 'perf-success';
+      if (m.successRate >= 95) {
+        successEl.classList.add('perf-good');
+        successEl.textContent = '\u2713 ' + m.successRate.toFixed(0) + '%';
+      } else if (m.successRate >= 80) {
+        successEl.classList.add('perf-warn');
+        successEl.textContent = '\u26A0 ' + m.successRate.toFixed(0) + '%';
+      } else {
+        successEl.classList.add('perf-bad');
+        successEl.textContent = '\u26A0 ' + m.successRate.toFixed(0) + '%';
+      }
+      row.appendChild(successEl);
 
-      const count = document.createElement('span');
-      count.className = 'model-count';
-      count.textContent = m.count;
+      // Tokens/sec
+      const tokensEl = document.createElement('span');
+      tokensEl.className = 'perf-tokens';
+      tokensEl.textContent = m.avgTokensPerSec > 0 ? m.avgTokensPerSec.toFixed(0) + ' t/s' : '\u2014';
+      row.appendChild(tokensEl);
 
-      track.appendChild(fill);
-      bar.appendChild(name);
-      bar.appendChild(track);
-      bar.appendChild(count);
-      modelsEl.appendChild(bar);
+      // Cache hit %
+      const cacheEl = document.createElement('span');
+      cacheEl.className = 'perf-cache';
+      cacheEl.textContent = m.avgCacheHitRate > 0 ? m.avgCacheHitRate.toFixed(0) + '%' : '\u2014';
+      row.appendChild(cacheEl);
+
+      modelsEl.appendChild(row);
     }
   }
 
@@ -342,65 +374,8 @@ function appendRequestMetric(r) {
     recentEl.removeChild(recentEl.lastChild);
   }
 
-  // Update active models list
-  const actualKey = r.actualModel || r.model || 'unknown';
-  const modelKey = r.model || 'unknown';
-  let modelBar = modelsEl.querySelector(`[data-model="${CSS.escape(actualKey)}"]`);
-  if (modelBar) {
-    const countEl = modelBar.querySelector('.model-count');
-    countEl.textContent = (parseInt(countEl.textContent, 10) || 0) + 1;
-  } else {
-    const emptyEl = modelsEl.querySelector('.empty');
-    if (emptyEl) emptyEl.remove();
-
-    const barClass = actualKey.toLowerCase().includes('sonnet') ? 'sonnet'
-      : actualKey.toLowerCase().includes('haiku') ? 'haiku'
-      : actualKey.toLowerCase().includes('opus') ? 'opus'
-      : '';
-
-    modelBar = document.createElement('div');
-    modelBar.className = 'model-bar';
-    modelBar.setAttribute('data-model', actualKey);
-
-    const name = document.createElement('span');
-    name.className = 'model-name';
-    const showModelAlias = actualKey !== modelKey;
-    name.title = showModelAlias ? `${actualKey} (via ${modelKey})` : actualKey;
-    name.textContent = showModelAlias
-      ? `${shortModel(actualKey)} (${shortModel(modelKey)})`
-      : shortModel(actualKey);
-
-    const track = document.createElement('div');
-    track.className = 'model-bar-track';
-
-    const fill = document.createElement('div');
-    fill.className = 'model-bar-fill ' + barClass;
-
-    const count = document.createElement('span');
-    count.className = 'model-count';
-    count.textContent = '1';
-
-    track.appendChild(fill);
-    modelBar.appendChild(name);
-    modelBar.appendChild(track);
-    modelBar.appendChild(count);
-    modelsEl.appendChild(modelBar);
-  }
-
-  // Re-sort model bars by count (descending)
-  const modelBars = Array.from(modelsEl.querySelectorAll('.model-bar'));
-  modelBars.sort((a, b) => {
-    return (parseInt(b.querySelector('.model-count').textContent, 10) || 0)
-         - (parseInt(a.querySelector('.model-count').textContent, 10) || 0);
-  });
-  modelBars.forEach(bar => modelsEl.appendChild(bar));
-
-  // Recalculate model bar widths
-  const maxModelCount = Math.max(1, ...modelBars.map(b => parseInt(b.querySelector('.model-count').textContent, 10) || 0));
-  modelBars.forEach(bar => {
-    const cnt = parseInt(bar.querySelector('.model-count').textContent, 10) || 0;
-    bar.querySelector('.model-bar-fill').style.width = (cnt / maxModelCount * 100) + '%';
-  });
+  // Update active models list — model bar UI is now replaced by perf-row from modelStats;
+  // appendRequestMetric no longer updates the models section since updateSummary handles it
 
   // Update providers list
   const providerKey = r.targetProvider || r.provider || '';

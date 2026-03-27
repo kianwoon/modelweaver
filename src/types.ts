@@ -73,6 +73,24 @@ export interface RequestMetrics {
   cacheCreationTokens?: number;
 }
 
+export interface ModelPerformanceStats {
+  model: string;
+  count: number;
+  avgLatencyMs: number;
+  p50LatencyMs: number;
+  p95LatencyMs: number;
+  successRate: number;
+  avgTokensPerSec: number;
+  avgCacheHitRate: number;
+  errorCount: number;
+  providerBreakdown: {
+    provider: string;
+    count: number;
+    avgLatencyMs: number;
+    errorCount: number;
+  }[];
+}
+
 export interface MetricsSummary {
   uptimeSeconds: number;
   totalRequests: number;
@@ -85,6 +103,7 @@ export interface MetricsSummary {
   activeModels: { model: string; actualModel?: string; count: number; lastSeen: number }[];
   providerDistribution: { provider: string; count: number }[];
   recentRequests: RequestMetrics[];
+  modelStats: ModelPerformanceStats[];
 }
 
 export type StreamState = "start" | "ttfb" | "streaming" | "fallback" | "complete" | "error";

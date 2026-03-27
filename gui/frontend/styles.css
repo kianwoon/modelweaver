@@ -411,6 +411,86 @@ body {
   flex-shrink: 0;
 }
 
+/* Performance indicator rows */
+.perf-row {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr auto auto auto;
+  gap: 6px;
+  align-items: center;
+  margin-bottom: 5px;
+  font-size: 11px;
+}
+
+.perf-row:last-child {
+  margin-bottom: 0;
+}
+
+.perf-count {
+  color: var(--text-dim);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.perf-latency {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.perf-bar {
+  flex: 1;
+  height: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 2px;
+  overflow: hidden;
+  min-width: 30px;
+}
+
+.perf-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.perf-bar-fill.perf-fast { background: var(--green); }
+.perf-bar-fill.perf-medium { background: var(--yellow); }
+.perf-bar-fill.perf-slow { background: var(--accent); }
+
+.perf-latency-val {
+  font-size: 10px;
+  white-space: nowrap;
+  min-width: 32px;
+  text-align: right;
+}
+
+.perf-latency-val.perf-fast { color: var(--green); }
+.perf-latency-val.perf-medium { color: var(--yellow); }
+.perf-latency-val.perf-slow { color: var(--accent); }
+
+.perf-success {
+  font-size: 10px;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.perf-success.perf-good { color: var(--green); }
+.perf-success.perf-warn { color: var(--yellow); }
+.perf-success.perf-bad { color: var(--accent); }
+
+.perf-tokens {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.perf-cache {
+  font-size: 10px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
 /* Provider list */
 .provider-row {
   display: flex;
