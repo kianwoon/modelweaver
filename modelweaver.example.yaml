@@ -20,6 +20,12 @@ modelRouting:
     - provider: anthropic
   "MiniMax-M2.7":
     - provider: openrouter
+  # Distribution example: spread traffic across providers by weight
+  # "claude-sonnet-4":
+  #   - provider: anthropic
+  #     weight: 70
+  #   - provider: openrouter
+  #     weight: 30
 
 # Tier-based routing (fallback)
 routing:
