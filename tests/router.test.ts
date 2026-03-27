@@ -1,6 +1,6 @@
 // tests/router.test.ts
 import { describe, it, expect, beforeEach } from "vitest";
-import { matchTier, buildRoutingChain, resolveRequest, clearRoutingCache } from "../src/router.js";
+import { matchTier, buildRoutingChain, resolveRequest, clearRoutingCache, selectByWeight } from "../src/router.js";
 import type { RoutingEntry, AppConfig } from "../src/types.js";
 
 describe("matchTier", () => {
@@ -152,5 +152,86 @@ describe("resolveRequest", () => {
     // Empty chain should be skipped, fall through to tier pattern
     const ctx = resolveRequest("claude-sonnet-4", "req-6", config, "{}");
     expect(ctx!.tier).toBe("sonnet");
+  });
+});
+
+describe("selectByWeight", () => {
+  it("selects a provider and puts it first with rest as fallback", () => {
+    const entries: RoutingEntry[] = [
+      { provider: "a", weight: 50 },
+      { provider: "b", weight: 30 },
+      { provider: "c", weight: 20 },
+    ];
+    const result = selectByWeight(entries, []);
+    expect(result).toHaveLength(3);
+    expect(["a", "b", "c"]).toContain(result[0].provider);
+    const remaining = result.slice(1).map(e => e.provider);
+    expect(remaining).toHaveLength(2);
+    expect(remaining).not.toContain(result[0].provider);
+  });
+
+  it("respects weight distribution over many iterations", () => {
+    const entries: RoutingEntry[] = [
+      { provider: "a", weight: 70 },
+      { provider: "b", weight: 30 },
+    ];
+    const counts = { a: 0, b: 0 };
+    const iterations = 10000;
+    for (let i = 0; i < iterations; i++) {
+      const result = selectByWeight(entries, []);
+      counts[result[0].provider as "a" | "b"]++;
+    }
+    const aPct = counts.a / iterations;
+    expect(aPct).toBeGreaterThan(0.65);
+    expect(aPct).toBeLessThan(0.75);
+  });
+
+  it("auto-normalizes weights that don't sum to 100", () => {
+    const entries: RoutingEntry[] = [
+      { provider: "a", weight: 3 },
+      { provider: "b", weight: 7 },
+    ];
+    const counts = { a: 0, b: 0 };
+    for (let i = 0; i < 5000; i++) {
+      const result = selectByWeight(entries, []);
+      counts[result[0].provider as "a" | "b"]++;
+    }
+    const aPct = counts.a / 5000;
+    expect(aPct).toBeGreaterThan(0.25);
+    expect(aPct).toBeLessThan(0.35);
+  });
+
+  it("excludes circuit-opened providers and re-normalizes", () => {
+    const entries: RoutingEntry[] = [
+      { provider: "a", weight: 50 },
+      { provider: "b", weight: 50 },
+    ];
+    const openCircuits = ["a"];
+    const counts = { a: 0, b: 0 };
+    for (let i = 0; i < 1000; i++) {
+      const result = selectByWeight(entries, openCircuits);
+      counts[result[0].provider as "a" | "b"]++;
+    }
+    expect(counts.a).toBe(0);
+    expect(counts.b).toBe(1000);
+  });
+
+  it("falls back to original chain when all providers circuit-opened", () => {
+    const entries: RoutingEntry[] = [
+      { provider: "a", weight: 50 },
+      { provider: "b", weight: 50 },
+    ];
+    const result = selectByWeight(entries, ["a", "b"]);
+    expect(result[0].provider).toBe("a");
+    expect(result[1].provider).toBe("b");
+  });
+
+  it("returns original chain when no weights present", () => {
+    const entries: RoutingEntry[] = [
+      { provider: "a" },
+      { provider: "b" },
+    ];
+    const result = selectByWeight(entries, []);
+    expect(result).toEqual(entries);
   });
 });

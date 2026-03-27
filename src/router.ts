@@ -50,6 +50,55 @@ export function buildRoutingChain(
 }
 
 /**
+ * Select a provider by weight for distribution routing.
+ * Returns a reordered array: [selected, ...remaining as fallback].
+ * Excludes circuit-opened providers and re-normalizes weights.
+ * Falls back to original chain if all providers are circuit-opened.
+ */
+export function selectByWeight(
+  entries: RoutingEntry[],
+  openCircuitProviders: string[]
+): RoutingEntry[] {
+  // If no weights present, return original chain unchanged
+  if (!entries.some(e => e.weight !== undefined)) {
+    return entries;
+  }
+
+  // Filter out circuit-opened providers
+  const available = entries.filter(
+    e => !openCircuitProviders.includes(e.provider)
+  );
+
+  // If all providers are circuit-opened, return original chain
+  if (available.length === 0) {
+    return entries;
+  }
+
+  // Calculate total weight of available providers
+  const totalWeight = available.reduce((sum, e) => sum + (e.weight ?? 0), 0);
+  if (totalWeight <= 0) return entries;
+
+  // Weighted random selection
+  const rand = Math.random() * totalWeight;
+  let cumulative = 0;
+  let selectedIndex = 0;
+
+  for (let i = 0; i < available.length; i++) {
+    cumulative += available[i].weight ?? 0;
+    if (rand < cumulative) {
+      selectedIndex = i;
+      break;
+    }
+  }
+
+  // Build result: [selected, ...remaining as fallback]
+  const selected = available[selectedIndex];
+  const fallback = available.filter((_, i) => i !== selectedIndex);
+
+  return [selected, ...fallback];
+}
+
+/**
  * Build a RequestContext from an incoming model name and raw body.
  * Priority 1: exact model name match in modelRouting.
  * Priority 2: substring match via tierPatterns.
