@@ -41,17 +41,62 @@ export async function startMonitor(args: {
   let child: ReturnType<typeof spawn> | null = null;
 
   async function spawnDaemon(): Promise<void> {
-    // Don't spawn if port is already in use (prevents duplicate workers)
     const net = await import("node:net");
-    const portInUse = await new Promise<boolean>((resolve) => {
-      const server = net.createServer();
-      server.once("error", () => resolve(true));
-      server.once("listening", () => { server.close(() => resolve(false)); });
-      server.listen(args.port ?? 3456);
-    });
-    if (portInUse) {
-      console.error(`[monitor] Port ${args.port ?? 3456} already in use, skipping worker spawn`);
-      return;
+    const { execFileSync } = await import("child_process");
+    const port = args.port ?? 3456;
+
+    const checkPort = (): Promise<boolean> =>
+      new Promise<boolean>((resolve) => {
+        const server = net.createServer();
+        server.once("error", () => resolve(true));
+        server.once("listening", () => { server.close(() => resolve(false)); });
+        server.listen(port);
+      });
+
+    if (await checkPort()) {
+      // Port in use — find and kill the orphaned process
+      console.warn(`[monitor] Port ${port} in use by orphaned process — cleaning up`);
+      try {
+        const lsofOutput = execFileSync("lsof", ["-ti", `:${port}`], { encoding: "utf8" }).trim();
+        if (lsofOutput) {
+          const pids = lsofOutput.split("\n").map(Number).filter(Boolean);
+          for (const pid of pids) {
+            try {
+              process.kill(pid, "SIGTERM");
+              console.warn(`[monitor] Sent SIGTERM to orphaned process ${pid}`);
+            } catch {
+              // Process may have already exited
+            }
+          }
+          // Wait for port to free up (max 5 seconds)
+          for (let i = 0; i < 10; i++) {
+            await new Promise((r) => setTimeout(r, 500));
+            if (!(await checkPort())) {
+              console.warn(`[monitor] Port ${port} freed — spawning new daemon`);
+              break;
+            }
+          }
+          // If port still in use after timeout, force kill
+          if (await checkPort()) {
+            for (const pid of pids) {
+              try { process.kill(pid, "SIGKILL"); } catch { /* already dead */ }
+            }
+            await new Promise((r) => setTimeout(r, 500));
+          }
+        }
+      } catch {
+        // lsof not available or other error — try pkill as fallback
+        try {
+          execFileSync("pkill", ["-f", "modelweaver.*dist/index.*--daemon"], { stdio: "ignore" });
+          await new Promise((r) => setTimeout(r, 1000));
+        } catch { /* pkill also failed */ }
+      }
+
+      // Final check — if port is still in use, give up
+      if (await checkPort()) {
+        console.error(`[monitor] Port ${port} still in use after cleanup — skipping worker spawn`);
+        return;
+      }
     }
 
     const childArgs: string[] = [entryScript, "--daemon"];

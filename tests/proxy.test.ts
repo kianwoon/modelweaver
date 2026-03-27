@@ -251,8 +251,8 @@ describe("forwardWithFallback race mode", () => {
       body: ctx.rawBody,
     });
 
-    const response = await forwardWithFallback(providers, chain, ctx, incoming);
-    expect(response.status).toBe(200);
+    const result = await forwardWithFallback(providers, chain, ctx, incoming);
+    expect(result.response.status).toBe(200);
 
     await mock1.close();
     await mock2.close();
@@ -301,8 +301,8 @@ describe("forwardWithFallback race mode", () => {
       body: ctx.rawBody,
     });
 
-    const response = await forwardWithFallback(providers, chain, ctx, incoming);
-    expect(response.status).toBe(200);
+    const result = await forwardWithFallback(providers, chain, ctx, incoming);
+    expect(result.response.status).toBe(200);
 
     await mock1.close();
     await mock2.close();

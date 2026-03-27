@@ -376,7 +376,8 @@ body {
 
 .model-name {
   font-size: 12px;
-  width: 70px;
+  min-width: 70px;
+  max-width: 130px;
   flex-shrink: 0;
   overflow: hidden;
   text-overflow: ellipsis;

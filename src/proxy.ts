@@ -935,9 +935,16 @@ async function hedgedForwardRequest(
   }
 }
 
+/** Result from forwardWithFallback including response and actual model used. */
+export interface FallbackResult {
+  response: Response;
+  actualModel?: string;
+}
+
 /**
  * Try forwarding through a chain of providers.
  * Returns the first successful response, or 502 if all fail.
+ * Also returns the actualModel from the winning entry for accurate metrics.
  */
 export async function forwardWithFallback(
   providers: Map<string, ProviderConfig>,
@@ -946,21 +953,21 @@ export async function forwardWithFallback(
   incomingRequest: Request,
   onAttempt?: (provider: string, index: number) => void,
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
-): Promise<Response> {
+): Promise<FallbackResult> {
   // Single provider — no racing needed
   if (chain.length <= 1) {
     const entry = chain[0];
     const provider = providers.get(entry.provider);
 
     if (!provider) {
-      return unknownProviderErr(entry.provider);
+      return { response: unknownProviderErr(entry.provider), actualModel: entry.model };
     }
 
     if (provider._circuitBreaker) {
       const cb = provider._circuitBreaker.canProceed();
       if (!cb.allowed) {
         logger?.warn("Provider skipped by circuit breaker", { requestId: ctx.requestId, provider: entry.provider });
-        return circuitBreakerErr(entry.provider);
+        return { response: circuitBreakerErr(entry.provider), actualModel: entry.model };
       }
     }
 
@@ -968,7 +975,7 @@ export async function forwardWithFallback(
 
     const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger);
 
-    return response;
+    return { response, actualModel: entry.model };
   }
 
   // Multiple providers — staggered race
@@ -1083,57 +1090,72 @@ export async function forwardWithFallback(
             /* ignore */
           }
         }
-        return winner.response;
+        // Return the winning entry's model, not ctx.actualModel which may be overwritten
+        const winningEntry = chain[winner.index];
+        return { response: winner.response, actualModel: winningEntry?.model };
       }
 
       if (!isRetriable(winner.response.status)) {
         sharedController.abort();
+        const winnerEntry = chain[winner.index];
         if ((winner.response.status === 400 || winner.response.status === 413) && winner.response.body) {
           try {
             const errBody = await winner.response.text();
             const handled = handleContextWindowError(winner.response.status, errBody);
-            if (handled) return handled;
-            return new Response(errBody, {
-              status: winner.response.status,
-              statusText: winner.response.statusText,
-              headers: winner.response.headers,
-            });
+            if (handled) return { response: handled, actualModel: winnerEntry?.model };
+            return {
+              response: new Response(errBody, {
+                status: winner.response.status,
+                statusText: winner.response.statusText,
+                headers: winner.response.headers,
+              }),
+              actualModel: winnerEntry?.model,
+            };
           } catch {
-            return winner.response;
+            return { response: winner.response, actualModel: winnerEntry?.model };
           }
         }
-        return winner.response;
+        return { response: winner.response, actualModel: winnerEntry?.model };
       }
 
       failures.push(winner);
     }
 
     sharedController.abort();
-    if (failures.length > 0) return failures[0].response;
+    if (failures.length > 0) {
+      const failedEntry = chain[failures[0].index];
+      return { response: failures[0].response, actualModel: failedEntry?.model };
+    }
 
     const errBody = JSON.stringify({
       type: "error",
       error: { type: "overloaded_error", message: "All providers failed" },
     });
-    return new Response(errBody, {
-      status: 502,
-      headers: {
-        "content-type": "application/json",
-        "content-length": textEncoder.encode(errBody).byteLength.toString(),
-      },
-    });
+    return {
+      response: new Response(errBody, {
+        status: 502,
+        headers: {
+          "content-type": "application/json",
+          "content-length": textEncoder.encode(errBody).byteLength.toString(),
+        },
+      }),
+      actualModel: undefined,
+    };
   } catch {
     sharedController.abort();
     const errBody = JSON.stringify({
       type: "error",
       error: { type: "overloaded_error", message: "All providers failed" },
     });
-    return new Response(errBody, {
-      status: 502,
-      headers: {
-        "content-type": "application/json",
-        "content-length": textEncoder.encode(errBody).byteLength.toString(),
-      },
-    });
+    return {
+      response: new Response(errBody, {
+        status: 502,
+        headers: {
+          "content-type": "application/json",
+          "content-length": textEncoder.encode(errBody).byteLength.toString(),
+        },
+      }),
+      actualModel: undefined,
+    };
   }
 }

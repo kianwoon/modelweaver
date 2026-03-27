@@ -163,9 +163,14 @@ function updateSummary(data) {
 
       const name = document.createElement('span');
       name.className = 'model-name';
-      const displayModel = m.model || 'unknown';
-      name.title = displayModel;
-      name.textContent = shortModel(displayModel);
+      const actualModel = m.actualModel || m.model || 'unknown';
+      const requestedModel = m.model || 'unknown';
+      const displayModel = actualModel;
+      const showAlias = actualModel !== requestedModel;
+      name.title = showAlias ? `${actualModel} (via ${requestedModel})` : displayModel;
+      name.textContent = showAlias
+        ? `${shortModel(actualModel)} (${shortModel(requestedModel)})`
+        : shortModel(displayModel);
 
       const track = document.createElement('div');
       track.className = 'model-bar-track';
@@ -231,9 +236,13 @@ function updateSummary(data) {
 
       const model = document.createElement('span');
       model.className = 'recent-model';
-      const displayModel = r.model || 'unknown';
-      model.title = displayModel;
-      model.textContent = shortModel(displayModel);
+      const actualModel = r.actualModel || r.model || 'unknown';
+      const requestedModel = r.model || 'unknown';
+      const showAlias = actualModel !== requestedModel;
+      model.title = showAlias ? `${actualModel} (via ${requestedModel})` : actualModel;
+      model.textContent = showAlias
+        ? `${shortModel(actualModel)} (${shortModel(requestedModel)})`
+        : shortModel(actualModel);
 
       const provider = document.createElement('span');
       provider.className = 'recent-provider';
@@ -307,9 +316,13 @@ function appendRequestMetric(r) {
 
   const model = document.createElement('span');
   model.className = 'recent-model';
-  const displayModel = r.model || 'unknown';
-  model.title = displayModel;
-  model.textContent = shortModel(displayModel);
+  const actualModel = r.actualModel || r.model || 'unknown';
+  const requestedModel = r.model || 'unknown';
+  const showAlias = actualModel !== requestedModel;
+  model.title = showAlias ? `${actualModel} (via ${requestedModel})` : actualModel;
+  model.textContent = showAlias
+    ? `${shortModel(actualModel)} (${shortModel(requestedModel)})`
+    : shortModel(actualModel);
 
   const provider = document.createElement('span');
   provider.className = 'recent-provider';
@@ -339,9 +352,10 @@ function appendRequestMetric(r) {
     const emptyEl = modelsEl.querySelector('.empty');
     if (emptyEl) emptyEl.remove();
 
-    const barClass = modelKey.toLowerCase().includes('sonnet') ? 'sonnet'
-      : modelKey.toLowerCase().includes('haiku') ? 'haiku'
-      : modelKey.toLowerCase().includes('opus') ? 'opus'
+    const actualKey = r.actualModel || r.model || 'unknown';
+    const barClass = actualKey.toLowerCase().includes('sonnet') ? 'sonnet'
+      : actualKey.toLowerCase().includes('haiku') ? 'haiku'
+      : actualKey.toLowerCase().includes('opus') ? 'opus'
       : '';
 
     modelBar = document.createElement('div');
@@ -350,8 +364,11 @@ function appendRequestMetric(r) {
 
     const name = document.createElement('span');
     name.className = 'model-name';
-    name.title = modelKey;
-    name.textContent = shortModel(modelKey);
+    const showModelAlias = actualKey !== modelKey;
+    name.title = showModelAlias ? `${actualKey} (via ${modelKey})` : actualKey;
+    name.textContent = showModelAlias
+      ? `${shortModel(actualKey)} (${shortModel(modelKey)})`
+      : shortModel(actualKey);
 
     const track = document.createElement('div');
     track.className = 'model-bar-track';
