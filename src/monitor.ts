@@ -18,8 +18,7 @@ export async function startMonitor(args: {
   }
   await writePidFile(process.pid);
 
-  const entryScript =
-    process.argv[1] || pathJoin(dirname(fileURLToPath(import.meta.url)), "index.js");
+  const entryScript = pathJoin(dirname(fileURLToPath(import.meta.url)), "index.js");
 
   // Prevent monitor from crashing on unexpected errors
   process.on("uncaughtException", (err) => {
