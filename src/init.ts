@@ -21,11 +21,19 @@ interface ConfiguredProvider {
   models: Record<string, string>;
 }
 
+interface DistributionEntry {
+  provider: string;
+  model: string;
+  weight: number;
+}
+
 interface ConfiguredModel {
   alias: string;       // user-facing name for /model and availableModels
-  provider: string;    // provider ID
-  model: string;       // actual model name sent to provider API
+  provider: string;    // provider ID (primary for fallback mode)
+  model: string;       // actual model name sent to provider API (primary for fallback mode)
   fallbacks: { provider: string; model: string }[];
+  // Distribution mode: if entries is set, use weighted distribution instead of fallback
+  entries?: DistributionEntry[];
 }
 
 /** Lightweight representation of a provider found in existing config.yaml.
@@ -363,6 +371,151 @@ async function configureProvider(
 }
 
 // ---------------------------------------------------------------------------
+// Distribution configuration helper
+// ---------------------------------------------------------------------------
+
+/** Build a formatted preview table for distribution entries. */
+function buildDistributionPreviewTable(entries: DistributionEntry[]): string {
+  const lines: string[] = [];
+  const W = 56;
+
+  const totalWeight = entries.reduce((sum, e) => sum + e.weight, 0);
+
+  lines.push(`${CYAN}\u250c${'\u2500'.repeat(W)}\u2510${RESET}`);
+  lines.push(`${CYAN}\u2502${RESET}${BOLD}  Distribution Preview${''.padEnd(W - 22)}${CYAN}\u2502${RESET}`);
+  lines.push(`${CYAN}\u251c${'\u2500'.repeat(W)}\u2524${RESET}`);
+  lines.push(`${CYAN}\u2502${RESET}  Provider         Model               Weight   %    ${CYAN}\u2502${RESET}`);
+  lines.push(`${CYAN}\u2502${RESET}  ${'\u2500'.repeat(51)}${CYAN}\u2502${RESET}`);
+
+  for (const entry of entries) {
+    const pct = totalWeight > 0 ? Math.round((entry.weight / totalWeight) * 100) : 0;
+    const providerStr = entry.provider.slice(0, 16).padEnd(16);
+    const modelStr = entry.model.slice(0, 18).padEnd(18);
+    const weightStr = String(entry.weight).padStart(6);
+    const pctStr = String(pct).padStart(3);
+    lines.push(`${CYAN}\u2502${RESET}  ${providerStr} ${modelStr} ${weightStr}   ${pctStr}%${CYAN}\u2502${RESET}`);
+  }
+
+  lines.push(`${CYAN}\u2502${RESET}  ${'\u2500'.repeat(51)}${CYAN}\u2502${RESET}`);
+  lines.push(`${CYAN}\u2502${RESET}  ${'Total:'.padEnd(37)}${String(totalWeight).padStart(6)}        ${CYAN}\u2502${RESET}`);
+  lines.push(`${CYAN}\u2514${'\u2500'.repeat(W)}\u2518${RESET}`);
+
+  return lines.join('\n');
+}
+
+/** Configure distribution entries with weights for a model.
+ *  Returns array of {provider, model, weight} entries. */
+async function configureDistribution(
+  primaryProvider: string,
+  primaryModel: string,
+  providers: ConfiguredProvider[],
+  onCancel: () => never,
+): Promise<DistributionEntry[]> {
+  const entries: DistributionEntry[] = [];
+
+  // Collect weight for primary provider
+  const primaryProviderObj = providers.find(p => p.id === primaryProvider);
+  const primaryName = primaryProviderObj?.name ?? primaryProvider;
+
+  const { primaryWeight } = await prompts(
+    {
+      type: 'number',
+      name: 'primaryWeight',
+      message: `[${primaryName}] Weight for this provider:`,
+      initial: 1,
+      min: 1,
+    },
+    onCancel,
+  );
+
+  entries.push({
+    provider: primaryProvider,
+    model: primaryModel,
+    weight: primaryWeight as number,
+  });
+
+  // Loop to collect additional providers with weights
+  while (true) {
+    console.log();
+    console.log(buildDistributionPreviewTable(entries));
+    console.log();
+
+    const { addAnother } = await prompts(
+      {
+        type: 'confirm',
+        name: 'addAnother',
+        message: 'Add another provider to distribution?',
+        initial: false,
+      },
+      onCancel,
+    );
+
+    if (!addAnother) break;
+
+    const availableProviders = providers.filter(p => !entries.some(e => e.provider === p.id));
+    if (availableProviders.length === 0) {
+      console.log(`  ${RED}No other providers available for distribution.${RESET}`);
+      break;
+    }
+
+    const providerChoices = availableProviders.map((p) => ({ title: p.name, value: p.id }));
+    const { providerId } = await prompts(
+      {
+        type: 'select',
+        name: 'providerId',
+        message: 'Select provider to add:',
+        choices: [
+          { title: '\u2B05  Go back', value: '__back__' },
+          ...providerChoices,
+        ],
+      },
+      onCancel,
+    );
+
+    if (providerId === '__back__') continue;
+
+    const selectedProvider = providers.find((p) => p.id === (providerId as string))!;
+
+    const { modelName } = await prompts(
+      {
+        type: 'text',
+        name: 'modelName',
+        message: `[${selectedProvider.name}] Model name:`,
+        initial: primaryModel,
+      },
+      onCancel,
+    );
+
+    const { weight } = await prompts(
+      {
+        type: 'number',
+        name: 'weight',
+        message: `[${selectedProvider.name}] Weight:`,
+        initial: 1,
+        min: 1,
+      },
+      onCancel,
+    );
+
+    entries.push({
+      provider: selectedProvider.id,
+      model: (modelName as string).trim(),
+      weight: weight as number,
+    });
+
+    check(`Added to distribution: ${selectedProvider.name} (weight: ${weight})`);
+  }
+
+  // Validate minimum 2 providers
+  if (entries.length < 2) {
+    console.log(`  ${RED}Distribution requires at least 2 providers. Converting to fallback mode.${RESET}`);
+    return [];
+  }
+
+  return entries;
+}
+
+// ---------------------------------------------------------------------------
 // Fallback configuration helper
 // ---------------------------------------------------------------------------
 
@@ -445,7 +598,7 @@ async function configureFallbacks(
 
 /** Build a formatted table showing existing modelRouting entries. */
 function buildExistingModelsTable(
-  modelRouting: Map<string, { provider: string; model: string }[]>,
+  modelRouting: Map<string, { provider: string; model: string; weight?: number }[]>,
 ): string {
   const lines: string[] = [];
   const W = 56;
@@ -460,11 +613,27 @@ function buildExistingModelsTable(
   } else {
     for (const [alias, chain] of entries) {
       const primary = chain[0];
-      const info = `${alias.padEnd(20)} ${primary.provider} \u2192 ${primary.model}`;
-      lines.push(`${CYAN}\u2502${RESET}  ${info}${''.padEnd(Math.max(0, W - info.length - 2))}${CYAN}\u2502${RESET}`);
-      for (let i = 1; i < chain.length; i++) {
-        const fbInfo = `                    fallback: ${chain[i].provider} \u2192 ${chain[i].model}`;
-        lines.push(`${CYAN}\u2502${RESET}  ${fbInfo}${''.padEnd(Math.max(0, W - fbInfo.length - 2))}${CYAN}\u2502${RESET}`);
+      const hasWeights = chain.some(e => e.weight !== undefined);
+
+      if (hasWeights) {
+        // Distribution mode: show all entries with weights
+        const totalWeight = chain.reduce((sum, e) => sum + (e.weight ?? 0), 0);
+        const pct = totalWeight > 0 ? Math.round(((primary.weight ?? 0) / totalWeight) * 100) : 0;
+        const info = `${alias.padEnd(16)} [dist] ${primary.provider} (${pct}%)`;
+        lines.push(`${CYAN}\u2502${RESET}  ${info}${''.padEnd(Math.max(0, W - info.length - 2))}${CYAN}\u2502${RESET}`);
+        for (let i = 1; i < chain.length; i++) {
+          const entryPct = totalWeight > 0 ? Math.round(((chain[i].weight ?? 0) / totalWeight) * 100) : 0;
+          const distInfo = `                      ${chain[i].provider} (${entryPct}%)`;
+          lines.push(`${CYAN}\u2502${RESET}  ${distInfo}${''.padEnd(Math.max(0, W - distInfo.length - 2))}${CYAN}\u2502${RESET}`);
+        }
+      } else {
+        // Fallback mode: show primary with fallbacks
+        const info = `${alias.padEnd(20)} ${primary.provider} \u2192 ${primary.model}`;
+        lines.push(`${CYAN}\u2502${RESET}  ${info}${''.padEnd(Math.max(0, W - info.length - 2))}${CYAN}\u2502${RESET}`);
+        for (let i = 1; i < chain.length; i++) {
+          const fbInfo = `                    fallback: ${chain[i].provider} \u2192 ${chain[i].model}`;
+          lines.push(`${CYAN}\u2502${RESET}  ${fbInfo}${''.padEnd(Math.max(0, W - fbInfo.length - 2))}${CYAN}\u2502${RESET}`);
+        }
       }
     }
   }
@@ -563,18 +732,54 @@ async function configureModels(
           fallbacks: [],
         };
 
-        // Configure fallbacks for this model
-        newModel.fallbacks = await configureFallbacks(
-          newModel.alias, newModel.provider, providers, newModel.fallbacks,
-        );
+        // Ask about distribution vs fallback
+        const { enableDistribution } = await prompts({
+          type: 'confirm',
+          name: 'enableDistribution',
+          message: 'Enable traffic distribution across multiple providers?',
+          initial: false,
+        }, CANCEL);
+
+        if (enableDistribution) {
+          // Distribution mode
+          const entries = await configureDistribution(
+            selectedProvider.id,
+            (modelName as string).trim(),
+            providers,
+            () => { throw new GoBackError(); },
+          );
+
+          if (entries.length >= 2) {
+            newModel.entries = entries;
+            // For distribution, set primary from first entry
+            newModel.provider = entries[0].provider;
+            newModel.model = entries[0].model;
+            check(`Added model with distribution: ${newModel.alias} (${entries.length} providers)`);
+          } else {
+            // Not enough providers, fall back to normal fallback flow
+            newModel.fallbacks = await configureFallbacks(
+              newModel.alias, newModel.provider, providers, newModel.fallbacks,
+            );
+            check(`Added model: ${newModel.alias}`);
+          }
+        } else {
+          // Fallback mode
+          newModel.fallbacks = await configureFallbacks(
+            newModel.alias, newModel.provider, providers, newModel.fallbacks,
+          );
+          check(`Added model: ${newModel.alias}`);
+        }
 
         models.push(newModel);
-        // Update the existing map so the table stays current (including fallbacks)
-        existingModels!.set(newModel.alias, [
-          { provider: newModel.provider, model: newModel.model },
-          ...newModel.fallbacks,
-        ]);
-        check(`Added model: ${newModel.alias}`);
+        // Update the existing map so the table stays current
+        if (newModel.entries && newModel.entries.length > 0) {
+          existingModels!.set(newModel.alias, newModel.entries);
+        } else {
+          existingModels!.set(newModel.alias, [
+            { provider: newModel.provider, model: newModel.model },
+            ...newModel.fallbacks,
+          ]);
+        }
       }
 
       if (action === 'edit') {
