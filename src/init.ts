@@ -698,11 +698,33 @@ async function configureModels(
           { title: 'Add new model', value: 'add', description: 'Add a model alias routed to a provider' },
           ...(models.length > 0 ? [{ title: 'Edit existing model', value: 'edit', description: 'Change alias, provider, or model name' }] : []),
           ...(models.length > 0 ? [{ title: 'Delete model', value: 'delete', description: 'Remove a model alias' }] : []),
-          { title: 'Done', value: 'done', description: 'Continue to server configuration' },
+          { title: 'Continue to server configuration', value: 'next', description: 'Configure port and host' },
+          { title: 'Save and exit now', value: 'save', description: 'Write config and exit' },
+          { title: 'Go back to provider configuration', value: 'back', description: 'Reconfigure providers' },
         ],
       }, CANCEL);
 
-      if (action === 'done') break;
+      if (action === 'next') break;
+
+      if (action === 'save') {
+        // server already has the correct values (from existingPeek or defaults)
+        yaml = buildYamlConfig(allProviders, models, server, existingProviderMap, existingModelRouting);
+        const totalSteps = calculateTotalSteps(configured.length, false);
+        await writeConfigAndSettings(allProviders, models, server, yaml, totalSteps, false, hasExisting);
+        console.log(`
+${BOLD}${CYAN}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557
+\u2551  Configuration saved!                    \u2551
+\u2551                                                \u2551
+\u2551  Run 'npx modelweaver start' to start the daemon.  \u2551
+\u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D${RESET}
+`);
+        process.exit(0);
+      }
+
+      if (action === 'back') {
+        phase--;
+        break;
+      }
 
       if (action === 'add') {
         const providerChoices = providers.map((p) => ({ title: p.name, value: p.id }));
@@ -1559,7 +1581,7 @@ export async function runInit(options?: { quick?: boolean }): Promise<void> {
   let configured: ConfiguredProvider[] = [];
   let configuredModels: ConfiguredModel[] = [];
   let allProviders: ConfiguredProvider[] = [];
-  let server: { port: number; host: string } = { port: 3456, host: 'localhost' };
+  let server: { port: number; host: string } = existingPeek?.server ?? { port: 3456, host: 'localhost' };
   let yaml: string;
   let settingsConfig: SettingsConfig | null = null;
   let useExistingModels = hasExisting;
