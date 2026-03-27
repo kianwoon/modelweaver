@@ -159,7 +159,7 @@ function updateSummary(data) {
 
       const bar = document.createElement('div');
       bar.className = 'model-bar';
-      bar.setAttribute('data-model', m.model || '');
+      bar.setAttribute('data-model', m.actualModel || m.model || '');
 
       const name = document.createElement('span');
       name.className = 'model-name';
@@ -343,8 +343,9 @@ function appendRequestMetric(r) {
   }
 
   // Update active models list
+  const actualKey = r.actualModel || r.model || 'unknown';
   const modelKey = r.model || 'unknown';
-  let modelBar = modelsEl.querySelector(`[data-model="${CSS.escape(modelKey)}"]`);
+  let modelBar = modelsEl.querySelector(`[data-model="${CSS.escape(actualKey)}"]`);
   if (modelBar) {
     const countEl = modelBar.querySelector('.model-count');
     countEl.textContent = (parseInt(countEl.textContent, 10) || 0) + 1;
@@ -352,7 +353,6 @@ function appendRequestMetric(r) {
     const emptyEl = modelsEl.querySelector('.empty');
     if (emptyEl) emptyEl.remove();
 
-    const actualKey = r.actualModel || r.model || 'unknown';
     const barClass = actualKey.toLowerCase().includes('sonnet') ? 'sonnet'
       : actualKey.toLowerCase().includes('haiku') ? 'haiku'
       : actualKey.toLowerCase().includes('opus') ? 'opus'
@@ -360,7 +360,7 @@ function appendRequestMetric(r) {
 
     modelBar = document.createElement('div');
     modelBar.className = 'model-bar';
-    modelBar.setAttribute('data-model', modelKey);
+    modelBar.setAttribute('data-model', actualKey);
 
     const name = document.createElement('span');
     name.className = 'model-name';

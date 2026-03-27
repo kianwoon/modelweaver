@@ -65,7 +65,7 @@ export class MetricsStore {
       this._totalCacheReadTokens -= evicted.cacheReadTokens ?? 0;
       this._totalCacheCreationTokens -= evicted.cacheCreationTokens ?? 0;
 
-      const mKey = evicted.model;
+      const mKey = evicted.actualModel || evicted.model;
       const mEntry = this._modelMap.get(mKey);
       if (mEntry) {
         mEntry.count--;
@@ -85,7 +85,7 @@ export class MetricsStore {
     this._totalCacheReadTokens += metrics.cacheReadTokens ?? 0;
     this._totalCacheCreationTokens += metrics.cacheCreationTokens ?? 0;
 
-    const mKey = metrics.model;
+    const mKey = metrics.actualModel || metrics.model;
     const existing = this._modelMap.get(mKey);
     if (existing) {
       existing.count++;
