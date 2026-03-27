@@ -27,6 +27,7 @@ export interface ProviderConfig {
 export interface RoutingEntry {
   provider: string;
   model?: string;
+  weight?: number;
 }
 
 export interface ServerConfig {
@@ -51,6 +52,7 @@ export interface RequestContext {
   startTime: number;
   rawBody: string;
   fallbackMode?: "sequential" | "race";
+  hasDistribution?: boolean;
 }
 
 export interface RequestMetrics {

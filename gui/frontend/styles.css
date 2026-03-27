@@ -60,7 +60,7 @@ body {
 .title {
   font-size: 13px;
   font-weight: 600;
-  color: var(--accent);
+  color: #ffffff;
 }
 
 .titlebar-buttons {
@@ -376,7 +376,8 @@ body {
 
 .model-name {
   font-size: 12px;
-  width: 70px;
+  min-width: 70px;
+  max-width: 130px;
   flex-shrink: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -516,4 +517,18 @@ body {
 #providers-section,
 #recent-section {
   transition: max-height 0.3s ease, opacity 0.2s ease, padding 0.3s ease;
+}
+
+/* Distribution mode badge */
+.dist-badge {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: rgba(139, 92, 246, 0.15);
+  color: #a78bfa;
+  margin-left: 6px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  vertical-align: middle;
 }

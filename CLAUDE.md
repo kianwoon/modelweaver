@@ -19,9 +19,8 @@ After modifying `src/**/*.ts` or `gui/frontend/**`:
 npm run build
 
 # 2. Restart daemon
-pkill -f "modelweaver.*dist/index"
-sleep 1
-node dist/index.js --daemon &
+npx modelweaver stop
+npx modelweaver order
 ```
 
 After modifying `gui/frontend/**` (HTML/CSS/JS):

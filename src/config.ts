@@ -37,6 +37,7 @@ const providerSchema = z.object({
 const routingEntrySchema = z.object({
   provider: z.string(),
   model: z.string().optional(),
+  weight: z.number().positive().optional(),
 });
 
 const rawConfigSchema = z.object({
@@ -99,7 +100,7 @@ export function findConfigFile(cwd: string = process.cwd(), { skipGlobal = false
  *  Used by init wizard to show existing providers and offer add/edit. */
 export function peekConfig(
   cwd?: string,
-): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string }[]> } | null {
+): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string; weight?: number }[]> } | null {
   const configPath = findConfigFile(cwd);
   if (!configPath) return null;
 
@@ -129,11 +130,15 @@ export function peekConfig(
   } : null;
 
   // Parse modelRouting (alias -> provider chain)
-  const modelRouting = new Map<string, { provider: string; model: string }[]>();
-  const modelRoutingRaw = (parsed?.modelRouting ?? {}) as Record<string, { provider: string; model: string }[]>;
+  const modelRouting = new Map<string, { provider: string; model: string; weight?: number }[]>();
+  const modelRoutingRaw = (parsed?.modelRouting ?? {}) as Record<string, { provider: string; model: string; weight?: number }[]>;
   for (const [alias, entries] of Object.entries(modelRoutingRaw)) {
     if (Array.isArray(entries)) {
-      modelRouting.set(alias, entries.map(e => ({ provider: String(e.provider ?? ""), model: String(e.model ?? alias) })));
+      modelRouting.set(alias, entries.map(e => ({
+        provider: String(e.provider ?? ""),
+        model: String(e.model ?? alias),
+        weight: e.weight !== undefined ? Number(e.weight) : undefined,
+      })));
     }
   }
 
@@ -200,6 +205,24 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       if (!providerNames.has(entry.provider)) {
         throw new Error(
           `modelRouting for model "${modelName}" references unknown provider "${entry.provider}". Available: ${[...providerNames].join(", ")}`
+        );
+      }
+    }
+  }
+
+  // Validate distribution entries: if any entry has weight, all must have weight
+  for (const [modelName, entries] of Object.entries(validated.modelRouting)) {
+    const hasAnyWeight = entries.some(e => e.weight !== undefined);
+    if (hasAnyWeight) {
+      const allHaveWeight = entries.every(e => e.weight !== undefined);
+      if (!allHaveWeight) {
+        throw new Error(
+          `modelRouting for model "${modelName}": all entries must have a weight when distribution is enabled`
+        );
+      }
+      if (entries.length < 2) {
+        throw new Error(
+          `modelRouting for model "${modelName}": distribution requires at least 2 providers`
         );
       }
     }

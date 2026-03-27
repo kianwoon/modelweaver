@@ -50,10 +50,60 @@ export function buildRoutingChain(
 }
 
 /**
+ * Select a provider by weight for distribution routing.
+ * Returns a reordered array: [selected, ...remaining as fallback].
+ * Excludes circuit-opened providers and re-normalizes weights.
+ * Falls back to original chain if all providers are circuit-opened.
+ */
+export function selectByWeight(
+  entries: RoutingEntry[],
+  openCircuitProviders: string[]
+): RoutingEntry[] {
+  // If no weights present, return original chain unchanged
+  if (!entries.some(e => e.weight !== undefined)) {
+    return entries;
+  }
+
+  // Filter out circuit-opened providers
+  const available = entries.filter(
+    e => !openCircuitProviders.includes(e.provider)
+  );
+
+  // If all providers are circuit-opened, return original chain
+  if (available.length === 0) {
+    return entries;
+  }
+
+  // Calculate total weight of available providers
+  const totalWeight = available.reduce((sum, e) => sum + (e.weight ?? 0), 0);
+  if (totalWeight <= 0) return entries;
+
+  // Weighted random selection
+  const rand = Math.random() * totalWeight;
+  let cumulative = 0;
+  let selectedIndex = 0;
+
+  for (let i = 0; i < available.length; i++) {
+    cumulative += available[i].weight ?? 0;
+    if (rand < cumulative) {
+      selectedIndex = i;
+      break;
+    }
+  }
+
+  // Build result: [selected, ...remaining as fallback]
+  const selected = available[selectedIndex];
+  const fallback = available.filter((_, i) => i !== selectedIndex);
+
+  return [selected, ...fallback];
+}
+
+/**
  * Build a RequestContext from an incoming model name and raw body.
  * Priority 1: exact model name match in modelRouting.
  * Priority 2: substring match via tierPatterns.
  * Uses an LRU cache to skip repeated resolution for the same model.
+ * Distribution models bypass the cache (need fresh random selection).
  * Returns null if no route matches.
  */
 export function resolveRequest(
@@ -62,27 +112,32 @@ export function resolveRequest(
   config: AppConfig,
   rawBody: string
 ): RequestContext | null {
-  // Check LRU cache first
-  const cached = routingCache.get(model);
-  if (cached) {
-    // Move to most-recently-used position (delete + re-insert)
-    routingCache.delete(model);
-    routingCache.set(model, cached);
-    return {
-      requestId,
-      model,
-      tier: cached.tier,
-      providerChain: cached.providerChain,
-      startTime: Date.now(),
-      rawBody,
-    };
+  // Check if this model uses distribution — skip cache for distribution models
+  const modelChain = config.modelRouting.get(model);
+  const isDistributed = modelChain?.some(e => e.weight !== undefined) ?? false;
+
+  // Check LRU cache first (skip for distribution models — need fresh random selection)
+  if (!isDistributed) {
+    const cached = routingCache.get(model);
+    if (cached) {
+      // Move to most-recently-used position (delete + re-insert)
+      routingCache.delete(model);
+      routingCache.set(model, cached);
+      return {
+        requestId,
+        model,
+        tier: cached.tier,
+        providerChain: cached.providerChain,
+        startTime: Date.now(),
+        rawBody,
+      };
+    }
   }
 
   let tier: string;
   let providerChain: RoutingEntry[];
 
   // Priority 1: exact model name match in modelRouting
-  const modelChain = config.modelRouting.get(model);
   if (modelChain && modelChain.length > 0) {
     tier = "(modelRouting)";
     providerChain = modelChain;
@@ -94,13 +149,30 @@ export function resolveRequest(
     providerChain = buildRoutingChain(tier, config.routing);
   }
 
-  // Cache the resolved tier + providerChain
-  if (routingCache.size >= ROUTING_CACHE_MAX_SIZE) {
-    // Evict the oldest entry (first key in Map)
-    const oldestKey = routingCache.keys().next().value;
-    if (oldestKey !== undefined) routingCache.delete(oldestKey);
+  // Apply distribution if weights are present
+  let hasDistribution = false;
+  if (providerChain.some(e => e.weight !== undefined)) {
+    hasDistribution = true;
+    // Collect circuit-opened providers
+    const openCircuits: string[] = [];
+    for (const entry of providerChain) {
+      const provider = config.providers.get(entry.provider);
+      if (provider?._circuitBreaker?.canProceed()?.allowed === false) {
+        openCircuits.push(entry.provider);
+      }
+    }
+    providerChain = selectByWeight(providerChain, openCircuits);
   }
-  routingCache.set(model, { tier, providerChain });
+
+  // Cache the resolved tier + providerChain (only for non-distribution)
+  if (!hasDistribution) {
+    if (routingCache.size >= ROUTING_CACHE_MAX_SIZE) {
+      // Evict the oldest entry (first key in Map)
+      const oldestKey = routingCache.keys().next().value;
+      if (oldestKey !== undefined) routingCache.delete(oldestKey);
+    }
+    routingCache.set(model, { tier, providerChain });
+  }
 
   return {
     requestId,
@@ -109,5 +181,7 @@ export function resolveRequest(
     providerChain,
     startTime: Date.now(),
     rawBody,
+    hasDistribution,
+    fallbackMode: hasDistribution ? "sequential" : undefined,
   };
 }

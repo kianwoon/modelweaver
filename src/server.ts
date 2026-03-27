@@ -1,7 +1,7 @@
 // src/server.ts
 import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
-import { forwardWithFallback } from "./proxy.js";
+import { forwardWithFallback, type FallbackResult } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
 import type { AppConfig, ProviderConfig, RequestContext } from "./types.js";
 import { randomUUID } from "node:crypto";
@@ -137,7 +137,7 @@ function createMetricsTransform(
           if (usage.inputTokens > tokens.input) tokens.input = usage.inputTokens;
           if (usage.outputTokens > tokens.output) tokens.output = usage.outputTokens;
           if (usage.cacheReadTokens > tokens.cacheRead) tokens.cacheRead = usage.cacheReadTokens;
-          if (usage.cacheCreationTokens > tokens.creationTokens) tokens.cacheCreation = usage.cacheCreationTokens;
+          if (usage.cacheCreationTokens > tokens.cacheCreation) tokens.cacheCreation = usage.cacheCreationTokens;
         }
 
         // Extract text content for preview
@@ -441,9 +441,9 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
 
     // Forward with fallback chain
     let successfulProvider = "unknown";
-    let response: Response;
+    let result: FallbackResult;
     try {
-      response = await forwardWithFallback(
+      result = await forwardWithFallback(
         config.providers,
         ctx.providerChain,
         ctx,
@@ -456,24 +456,6 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         },
         logger
       );
-    // Broadcast TTFB event — headers received from upstream (skip for error responses)
-    if (response.status < 400) {
-      let headerSize = 17; // approximate HTTP status line: "HTTP/1.1 200 OK\r\n"
-      response.headers.forEach((v, k) => { headerSize += k.length + v.length + 4; });
-      headerSize += 2; // trailing CRLF
-      setImmediate(() => {
-        broadcastStreamEvent({
-          requestId,
-          model,
-          tier: ctx.tier,
-          state: "ttfb",
-          status: response.status,
-          headerSize,
-          timestamp: Date.now(),
-        });
-      });
-    }
-
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error("Forward failed", { requestId, error: errMsg });
@@ -494,6 +476,33 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       );
     }
 
+    // Use the actualModel from the winning entry, not ctx.actualModel
+    if (result.actualModel) {
+      ctx.actualModel = result.actualModel;
+    }
+    if (result.actualProvider) {
+      successfulProvider = result.actualProvider;
+    }
+    const response = result.response;
+
+    // Broadcast TTFB event — headers received from upstream (skip for error responses)
+    if (response.status < 400) {
+      let headerSize = 17; // approximate HTTP status line: "HTTP/1.1 200 OK\r\n"
+      response.headers.forEach((v, k) => { headerSize += k.length + v.length + 4; });
+      headerSize += 2; // trailing CRLF
+      setImmediate(() => {
+        broadcastStreamEvent({
+          requestId,
+          model,
+          tier: ctx.tier,
+          state: "ttfb",
+          status: response.status,
+          headerSize,
+          timestamp: Date.now(),
+        });
+      });
+    }
+
     // Broadcast error event for non-2xx responses
     if (response.status >= 400) {
       setImmediate(() => {
@@ -512,7 +521,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     // Extract tokens via inline TransformStream for successful responses
     let responseBody: ReadableStream<Uint8Array> | null = response.body;
     if (response.body && response.status >= 200 && response.status < 300 && metricsStore) {
-      const targetProvider = ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider;
+      const targetProvider = result.actualProvider || (ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider);
       const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, metricsStore, response.status, response.headers.get("content-type") || "");
       responseBody = response.body.pipeThrough(transform) as typeof responseBody;
     }

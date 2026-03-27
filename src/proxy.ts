@@ -837,7 +837,7 @@ async function hedgedForwardRequest(
   index: number,
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
 ): Promise<Response> {
-  const count = computeHedgingCount(provider);
+  const count = ctx.hasDistribution ? 1 : computeHedgingCount(provider);
 
   if (count <= 1) {
     // No hedging — single request
@@ -935,9 +935,17 @@ async function hedgedForwardRequest(
   }
 }
 
+/** Result from forwardWithFallback including response and actual model used. */
+export interface FallbackResult {
+  response: Response;
+  actualModel?: string;
+  actualProvider?: string;
+}
+
 /**
  * Try forwarding through a chain of providers.
  * Returns the first successful response, or 502 if all fail.
+ * Also returns the actualModel from the winning entry for accurate metrics.
  */
 export async function forwardWithFallback(
   providers: Map<string, ProviderConfig>,
@@ -946,21 +954,21 @@ export async function forwardWithFallback(
   incomingRequest: Request,
   onAttempt?: (provider: string, index: number) => void,
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
-): Promise<Response> {
+): Promise<FallbackResult> {
   // Single provider — no racing needed
   if (chain.length <= 1) {
     const entry = chain[0];
     const provider = providers.get(entry.provider);
 
     if (!provider) {
-      return unknownProviderErr(entry.provider);
+      return { response: unknownProviderErr(entry.provider), actualModel: entry.model, actualProvider: entry.provider };
     }
 
     if (provider._circuitBreaker) {
       const cb = provider._circuitBreaker.canProceed();
       if (!cb.allowed) {
         logger?.warn("Provider skipped by circuit breaker", { requestId: ctx.requestId, provider: entry.provider });
-        return circuitBreakerErr(entry.provider);
+        return { response: circuitBreakerErr(entry.provider), actualModel: entry.model, actualProvider: entry.provider };
       }
     }
 
@@ -968,10 +976,108 @@ export async function forwardWithFallback(
 
     const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger);
 
-    return response;
+    return { response, actualModel: entry.model, actualProvider: entry.provider };
   }
 
-  // Multiple providers — staggered race
+  // Multiple providers
+  if (ctx.hasDistribution) {
+    // Distribution mode: sequential fallback only (no racing).
+    // The selected provider (chain[0]) should handle the request;
+    // only fall back to chain[1+] on retriable errors.
+    for (let i = 0; i < chain.length; i++) {
+      const entry = chain[i];
+      const provider = providers.get(entry.provider);
+
+      if (!provider) {
+        const err = unknownProviderErr(entry.provider);
+        if (i === chain.length - 1) return { response: err, actualModel: entry.model, actualProvider: entry.provider };
+        continue;
+      }
+
+      let cbProbeId: number | undefined;
+      if (provider._circuitBreaker) {
+        const cb = provider._circuitBreaker.canProceed();
+        if (!cb.allowed) {
+          logger?.warn("Provider skipped by circuit breaker", {
+            requestId: ctx.requestId,
+            provider: entry.provider,
+          });
+          if (i === chain.length - 1) return { response: circuitBreakerErr(entry.provider), actualModel: entry.model, actualProvider: entry.provider };
+          continue;
+        }
+        cbProbeId = cb.probeId;
+      }
+
+      onAttempt?.(entry.provider, i);
+
+      try {
+        const response = await hedgedForwardRequest(
+          provider, entry, ctx, incomingRequest, undefined, i, logger,
+        );
+
+        if (provider._circuitBreaker) provider._circuitBreaker.recordResult(response.status, cbProbeId);
+
+        if (response.status >= 200 && response.status < 300) {
+          return { response, actualModel: entry.model, actualProvider: entry.provider };
+        }
+
+        if (!isRetriable(response.status)) {
+          // Non-retriable error — return immediately
+          if ((response.status === 400 || response.status === 413) && response.body) {
+            try {
+              const errBody = await response.text();
+              const handled = handleContextWindowError(response.status, errBody);
+              if (handled) return { response: handled, actualModel: entry.model, actualProvider: entry.provider };
+              return {
+                response: new Response(errBody, {
+                  status: response.status,
+                  statusText: response.statusText,
+                  headers: response.headers,
+                }),
+                actualModel: entry.model,
+                actualProvider: entry.provider,
+              };
+            } catch {
+              return { response, actualModel: entry.model, actualProvider: entry.provider };
+            }
+          }
+          return { response, actualModel: entry.model, actualProvider: entry.provider };
+        }
+
+        // Retriable error — continue to next provider
+        logger?.warn("Provider failed with retriable status, falling back", {
+          requestId: ctx.requestId,
+          provider: entry.provider,
+          status: response.status,
+          index: i,
+        });
+        // continue loop
+      } catch {
+        if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502, cbProbeId);
+        logger?.warn("Provider failed with exception, falling back", {
+          requestId: ctx.requestId,
+          provider: entry.provider,
+          index: i,
+        });
+        // continue loop
+      }
+    }
+
+    // All providers failed
+    return {
+      response: new Response(JSON.stringify({
+        type: "error",
+        error: { type: "api_error", message: "All providers failed" },
+      }), {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      }),
+      actualModel: chain[chain.length - 1]?.model,
+      actualProvider: chain[chain.length - 1]?.provider,
+    };
+  }
+
+  // Non-distribution: staggered race
   const sharedController = new AbortController();
   const completed = new Set<number>();
   const failures: { response: Response; index: number }[] = [];
@@ -1083,57 +1189,73 @@ export async function forwardWithFallback(
             /* ignore */
           }
         }
-        return winner.response;
+        // Return the winning entry's model, not ctx.actualModel which may be overwritten
+        const winningEntry = chain[winner.index];
+        return { response: winner.response, actualModel: winningEntry?.model, actualProvider: winningEntry?.provider };
       }
 
       if (!isRetriable(winner.response.status)) {
         sharedController.abort();
+        const winnerEntry = chain[winner.index];
         if ((winner.response.status === 400 || winner.response.status === 413) && winner.response.body) {
           try {
             const errBody = await winner.response.text();
             const handled = handleContextWindowError(winner.response.status, errBody);
-            if (handled) return handled;
-            return new Response(errBody, {
-              status: winner.response.status,
-              statusText: winner.response.statusText,
-              headers: winner.response.headers,
-            });
+            if (handled) return { response: handled, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
+            return {
+              response: new Response(errBody, {
+                status: winner.response.status,
+                statusText: winner.response.statusText,
+                headers: winner.response.headers,
+              }),
+              actualModel: winnerEntry?.model,
+              actualProvider: winnerEntry?.provider,
+            };
           } catch {
-            return winner.response;
+            return { response: winner.response, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
           }
         }
-        return winner.response;
+        return { response: winner.response, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
       }
 
       failures.push(winner);
     }
 
     sharedController.abort();
-    if (failures.length > 0) return failures[0].response;
+    if (failures.length > 0) {
+      const failedEntry = chain[failures[0].index];
+      return { response: failures[0].response, actualModel: failedEntry?.model, actualProvider: failedEntry?.provider };
+    }
 
     const errBody = JSON.stringify({
       type: "error",
       error: { type: "overloaded_error", message: "All providers failed" },
     });
-    return new Response(errBody, {
-      status: 502,
-      headers: {
-        "content-type": "application/json",
-        "content-length": textEncoder.encode(errBody).byteLength.toString(),
-      },
-    });
+    return {
+      response: new Response(errBody, {
+        status: 502,
+        headers: {
+          "content-type": "application/json",
+          "content-length": textEncoder.encode(errBody).byteLength.toString(),
+        },
+      }),
+      actualModel: undefined,
+    };
   } catch {
     sharedController.abort();
     const errBody = JSON.stringify({
       type: "error",
       error: { type: "overloaded_error", message: "All providers failed" },
     });
-    return new Response(errBody, {
-      status: 502,
-      headers: {
-        "content-type": "application/json",
-        "content-length": textEncoder.encode(errBody).byteLength.toString(),
-      },
-    });
+    return {
+      response: new Response(errBody, {
+        status: 502,
+        headers: {
+          "content-type": "application/json",
+          "content-length": textEncoder.encode(errBody).byteLength.toString(),
+        },
+      }),
+      actualModel: undefined,
+    };
   }
 }
