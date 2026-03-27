@@ -6,7 +6,7 @@ import { loadConfig } from "./config.js";
 import type { LogLevel } from "./logger.js";
 import { MetricsStore } from "./metrics.js";
 import { latencyTracker } from "./hedging.js";
-import { attachWebSocket } from "./ws.js";
+import { attachWebSocket, closeWebSocket } from "./ws.js";
 import { startMonitor } from "./monitor.js";
 
 // Read version from package.json at startup
@@ -328,6 +328,7 @@ async function main() {
         configWatcher.close();
         configWatcher = null;
       }
+      closeWebSocket();
       await handle.closeAgents();
       await removeWorkerPidFile();
       logStream.end();
@@ -390,6 +391,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     console.log("\n  Shutting down...");
+    closeWebSocket();
     await handle.closeAgents();
     process.exit(0);
   };
