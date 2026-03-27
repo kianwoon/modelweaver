@@ -749,16 +749,20 @@ async function configureModels(
           fallbacks: [],
         };
 
-        // Ask about distribution vs fallback
-        const { enableDistribution } = await prompts({
-          type: 'confirm',
-          name: 'enableDistribution',
-          message: 'Enable traffic distribution across multiple providers?',
-          initial: false,
+        // Ask about routing mode
+        const routingChoices = [
+          { title: 'No fallback (single provider)', value: 'none', description: 'Route directly, no fallback or distribution' },
+          { title: 'Traffic distribution', value: 'distribution', description: 'Weighted traffic split across providers' },
+          { title: 'Fallback chain', value: 'fallback', description: 'Sequential failover to backup providers' },
+        ];
+        const { routingMode } = await prompts({
+          type: 'select',
+          name: 'routingMode',
+          message: `Routing mode for ${newModel.alias}:`,
+          choices: routingChoices,
         }, CANCEL);
 
-        if (enableDistribution) {
-          // Distribution mode
+        if (routingMode === 'distribution') {
           const entries = await configureDistribution(
             selectedProvider.id,
             (modelName as string).trim(),
@@ -768,23 +772,21 @@ async function configureModels(
 
           if (entries.length >= 2) {
             newModel.entries = entries;
-            // For distribution, set primary from first entry
             newModel.provider = entries[0].provider;
             newModel.model = entries[0].model;
             check(`Added model with distribution: ${newModel.alias} (${entries.length} providers)`);
           } else {
-            // Not enough providers, fall back to normal fallback flow
-            newModel.fallbacks = await configureFallbacks(
-              newModel.alias, newModel.provider, providers, newModel.fallbacks,
-            );
-            check(`Added model: ${newModel.alias}`);
+            // Not enough providers — no fallback
+            check(`Added model: ${newModel.alias} (no distribution — need 2+ providers)`);
           }
-        } else {
-          // Fallback mode
+        } else if (routingMode === 'fallback') {
           newModel.fallbacks = await configureFallbacks(
             newModel.alias, newModel.provider, providers, newModel.fallbacks,
           );
           check(`Added model: ${newModel.alias}`);
+        } else {
+          // 'none' — no fallback, no distribution
+          check(`Added model: ${newModel.alias} (no fallback)`);
         }
 
         models.push(newModel);
@@ -864,16 +866,20 @@ async function configureModels(
         const newAlias = (alias as string).trim();
         const newModelName = (modelName as string).trim();
 
-        // Ask about distribution vs fallback (same as add flow)
-        const hasDistribution = current.entries?.length > 1 && current.entries?.some((e: any) => e.weight !== undefined);
-        const { enableDistribution } = await prompts({
-          type: 'confirm',
-          name: 'enableDistribution',
-          message: 'Enable traffic distribution across multiple providers?',
-          initial: hasDistribution,
+        // Ask about routing mode
+        const routingChoices = [
+          { title: 'No fallback (single provider)', value: 'none', description: 'Route directly, no fallback or distribution' },
+          { title: 'Traffic distribution', value: 'distribution', description: 'Weighted traffic split across providers' },
+          { title: 'Fallback chain', value: 'fallback', description: 'Sequential failover to backup providers' },
+        ];
+        const { routingMode } = await prompts({
+          type: 'select',
+          name: 'routingMode',
+          message: `Routing mode for ${newAlias}:`,
+          choices: routingChoices,
         }, CANCEL);
 
-        if (enableDistribution) {
+        if (routingMode === 'distribution') {
           // Distribution mode - collect entries with weights
           const entries = await configureDistribution(
             selectedProvider.id,
@@ -899,91 +905,96 @@ async function configureModels(
 
             existingModels!.set(newAlias, entries);
             check(`Updated model with distribution: ${newAlias} (${entries.length} providers)`);
-            continue; // Skip fallback management
+            continue;
           }
-          // Not enough providers, fall through to normal fallback flow
-        }
-
-        // Fallback management loop
-        while (true) {
-          // Show current fallbacks
-          if (currentFallbacks.length === 0) {
-            console.log(`  ${CYAN}No fallbacks configured.${RESET}`);
-          } else {
-            console.log(`  ${CYAN}Current fallbacks:${RESET}`);
-            for (let i = 0; i < currentFallbacks.length; i++) {
-              const fb = currentFallbacks[i];
-              const fbProvider = providers.find(p => p.id === fb.provider);
-              const fbPName = fbProvider ? fbProvider.name : fb.provider;
-              console.log(`    ${i + 1}. ${fbPName} \u2192 ${fb.model}`);
+          // Not enough providers — fall through to no-fallback
+          check(`Not enough providers for distribution — saving as single provider`);
+        } else if (routingMode === 'fallback') {
+          // Fallback management loop
+          while (true) {
+            // Show current fallbacks
+            if (currentFallbacks.length === 0) {
+              console.log(`  ${CYAN}No fallbacks configured.${RESET}`);
+            } else {
+              console.log(`  ${CYAN}Current fallbacks:${RESET}`);
+              for (let i = 0; i < currentFallbacks.length; i++) {
+                const fb = currentFallbacks[i];
+                const fbProvider = providers.find(p => p.id === fb.provider);
+                const fbPName = fbProvider ? fbProvider.name : fb.provider;
+                console.log(`    ${i + 1}. ${fbPName} \u2192 ${fb.model}`);
+              }
             }
-          }
-          console.log();
 
-          const fallbackActions = [
-            { title: 'Add fallback', value: 'add_fb' },
-            ...(currentFallbacks.length > 0 ? [{ title: 'Remove fallback', value: 'remove_fb' }] : []),
-            { title: 'Done editing fallbacks', value: 'done_fb' },
-          ];
-
-          const { fallbackAction } = await prompts({
-            type: 'select',
-            name: 'fallbackAction',
-            message: 'Manage fallbacks:',
-            choices: fallbackActions,
-          }, CANCEL);
-
-          if (fallbackAction === 'done_fb') break;
-
-          if (fallbackAction === 'add_fb') {
-            const newFb = await configureFallbacks(
-              newAlias, selectedProvider.id, providers, currentFallbacks,
-            );
-            currentFallbacks = newFb;
-          }
-
-          if (fallbackAction === 'remove_fb') {
-            const fbChoices = currentFallbacks.map((fb, i) => {
-              const fbProvider = providers.find(p => p.id === fb.provider);
-              const fbPName = fbProvider ? fbProvider.name : fb.provider;
-              return { title: `${fbPName} \u2192 ${fb.model}`, value: i };
-            });
-            const { removeIdx } = await prompts({
+            const fallbackActions = [
+              { title: 'Add fallback', value: 'add_fb' },
+              ...(currentFallbacks.length > 0 ? [{ title: 'Remove fallback', value: 'remove_fb' }] : []),
+              { title: 'Done editing fallbacks', value: 'done_fb' },
+            ];
+            const { fallbackAction } = await prompts({
               type: 'select',
-              name: 'removeIdx',
-              message: 'Select fallback to remove:',
-              choices: [
-                { title: '\u2B05  Go back', value: '__back__' },
-                ...fbChoices,
-              ],
+              name: 'fallbackAction',
+              message: 'Manage fallbacks:',
+              choices: fallbackActions,
             }, CANCEL);
 
-            if (removeIdx !== '__back__') {
+            if (fallbackAction === 'done_fb') break;
+
+            if (fallbackAction === 'add_fb') {
+              const availableProviders = providers.filter(p => p.id !== selectedProvider.id);
+              if (availableProviders.length === 0) {
+                console.log(`  ${RED}No other providers available for fallback.${RESET}`);
+                break;
+              }
+              const providerChoices = availableProviders.map((p) => ({ title: p.name, value: p.id }));
+              const { fbProviderId } = await prompts({
+                type: 'select',
+                name: 'fbProviderId',
+                message: `Select fallback provider for ${newAlias}:`,
+                choices: providerChoices,
+              }, CANCEL);
+              const fbProvider = providers.find((p) => p.id === (fbProviderId as string))!;
+              const { fbModelName } = await prompts({
+                type: 'text',
+                name: 'fbModelName',
+                message: `Fallback model name (sent to ${fbProvider.name}):`,
+                initial: newModelName,
+              }, CANCEL);
+              currentFallbacks.push({ provider: (fbProviderId as string), model: (fbModelName as string).trim() });
+              check(`Added fallback: ${fbProvider.name} \u2192 ${(fbModelName as string).trim()}`);
+            }
+
+            if (fallbackAction === 'remove_fb') {
+              const fbChoices = currentFallbacks.map((fb, i) => {
+                const fbProvider = providers.find(p => p.id === fb.provider);
+                return { title: `${i + 1}. ${fbProvider?.name ?? fb.provider} \u2192 ${fb.model}`, value: i };
+              });
+              const { removeIdx } = await prompts({
+                type: 'select',
+                name: 'removeIdx',
+                message: 'Select fallback to remove:',
+                choices: fbChoices,
+              }, CANCEL);
               const removed = currentFallbacks.splice(removeIdx as number, 1);
               check(`Removed fallback: ${removed[0].provider} \u2192 ${removed[0].model}`);
             }
           }
         }
-
+        // For both 'none' and 'fallback' modes, save the model
         // If alias changed, remove old entry from existing map
         if (newAlias !== current.alias) {
           existingModels!.delete(current.alias);
         }
-
         models[idx] = {
           alias: newAlias,
           provider: selectedProvider.id,
           model: newModelName,
           fallbacks: currentFallbacks,
         };
-
-        // Update existing map with full chain including fallbacks
         existingModels!.set(newAlias, [
           { provider: selectedProvider.id, model: newModelName },
           ...currentFallbacks,
         ]);
-
-        check(`Updated model: ${newAlias} (${selectedProvider.id} \u2192 ${newModelName})`);
+        check(`Updated model: ${newAlias}`);
       }
 
       if (action === 'delete') {
