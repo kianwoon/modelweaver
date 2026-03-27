@@ -276,6 +276,7 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
   // Main loop
   while (true) {
+    try {
     clearScreen();
     renderMain(state);
 
@@ -361,6 +362,13 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         return;
       case 'quit':
         return;
+    }
+    } catch (e) {
+      if (e instanceof GoBackError) {
+        // ESC pressed in sub-screen — return to main menu silently
+        continue;
+      }
+      throw e; // re-throw other errors
     }
   }
 }
