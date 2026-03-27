@@ -89,23 +89,40 @@ export async function testApiKey(
       : { Authorization: `Bearer ${apiKey}`, 'content-type': 'application/json' };
 
   try {
-    const res = await fetch(`${baseUrl}${preset.testPath}`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ model: preset.models.sonnet, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
-      signal: controller.signal,
-    });
+    // Try multiple models — some keys have restricted model access
+    const modelsToTry = [
+      preset.models.sonnet,
+      preset.models.haiku,
+      preset.models.opus,
+    ].filter((m): m is string => !!m);
 
-    if (res.status === 401 || res.status === 403) return { ok: false, error: 'Invalid API key' };
-    if (res.status === 200 || res.status === 400 || res.status === 429) return { ok: true };
-    // Check for "insufficient balance" — key is valid, account just has no credits
-    try {
-      const body = await res.json() as { error?: { message?: string } };
-      if (body.error?.message?.includes('insufficient balance')) {
-        return { ok: true };
-      }
-    } catch { /* ignore parse errors */ }
-    return { ok: false, error: `Unexpected status ${res.status}` };
+    let lastStatus = 0;
+    for (const model of modelsToTry) {
+      const res = await fetch(`${baseUrl}${preset.testPath}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ model, max_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+        signal: controller.signal,
+      });
+      lastStatus = res.status;
+
+      if (res.status === 401 || res.status === 403) return { ok: false, error: 'Invalid API key' };
+      if (res.status === 200 || res.status === 400 || res.status === 429) return { ok: true };
+
+      // Check for "insufficient balance" — key is valid, account just has no credits
+      try {
+        const body = await res.json() as { error?: { message?: string } };
+        if (body.error?.message?.includes('insufficient balance')) {
+          return { ok: true };
+        }
+      } catch { /* ignore parse errors */ }
+
+      // Model not found or other error — try next model
+      continue;
+    }
+
+    // All models failed
+    return { ok: false, error: `Unexpected status ${lastStatus}` };
   } catch (err: unknown) {
     if ((err as Error).name === 'AbortError') return { ok: false, error: 'Request timed out' };
     return { ok: false, error: 'Network error \u2014 endpoint unreachable' };
@@ -215,7 +232,7 @@ function buildAllProviders(
         name: preset?.name ?? id,
         baseUrl: ep.baseUrl,
         envKey: ep.envKey,
-        apiKey: "",
+        apiKey: process.env[ep.envKey] || "",
         authType: ep.authType,
         models: preset?.models ?? { sonnet: "", opus: "", haiku: "" },
       });
@@ -1391,6 +1408,8 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         }
       }
 
+      const allProvidersForEnv = buildAllProviders(configured, existingProviderMap);
+
       // Server defaults (no prompts)
       server = { port: 3456, host: 'localhost' };
 
@@ -1422,7 +1441,7 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
   }
 
   // Write files
-  await writeConfigAndSettings(configured, configuredModels, server, yaml, totalSteps, true, !!existingPeek);
+  await writeConfigAndSettings(allProvidersForEnv, configuredModels, server, yaml, totalSteps, true, !!existingPeek);
 }
 
 // ---------------------------------------------------------------------------
@@ -1736,7 +1755,7 @@ ${BOLD}${CYAN}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 
   // Write files + settings
   const finalTotalSteps = calculateTotalSteps(configured.length, false);
-  settingsConfig = await writeConfigAndSettings(configured, configuredModels, server, yaml, finalTotalSteps, false, hasExisting);
+  settingsConfig = await writeConfigAndSettings(allProviders, configuredModels, server, yaml, finalTotalSteps, false, hasExisting);
 
   // Step 8 — Success banner
   console.log(`
