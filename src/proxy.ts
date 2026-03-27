@@ -344,8 +344,25 @@ function applyTargetedReplacements(
 
   if (!needsModel && !needsMaxTokensClamp && !needsMaxTokensAdd) return rawBody;
 
-  // max_tokens not in body at all — must add via JSON parse (structural change)
+  // max_tokens not in body at all — insert via targeted replacement to preserve prompt cache.
+  // Find the last top-level closing brace and insert before it.
+  // This avoids JSON.stringify which reorders keys and breaks cache breakpoints.
   if (needsMaxTokensAdd) {
+    const insert = `"max_tokens":${maxOutputTokens}`;
+    // Check if there's a trailing value before the closing brace to determine comma placement
+    const lastBraceIdx = rawBody.lastIndexOf('}');
+    if (lastBraceIdx > 0) {
+      const beforeBrace = rawBody.substring(0, lastBraceIdx).trimEnd();
+      const needsComma = beforeBrace.length > 0 && !beforeBrace.endsWith(',');
+      let result = rawBody.substring(0, lastBraceIdx).replace(/\s*$/, '') +
+        (needsComma ? ',' : '') + insert + '}';
+      // Also apply model replacement if needed
+      if (needsModel && entry.model) {
+        result = result.replace(MODEL_KEY_REGEX, `"model":"${entry.model}"`);
+      }
+      return result;
+    }
+    // Fallback to full stringify if body structure is unexpected
     const mutable = { ...parsed };
     if (entry.model) mutable.model = entry.model;
     mutable.max_tokens = maxOutputTokens;
@@ -750,7 +767,7 @@ async function raceProviders(
       if (pending.length === 0) break;
 
       const winner = await Promise.race(pending);
-      completed.add(races[winner.index] ?? races[0]);
+      completed.add(races[winner.index]);
 
       if (winner.response.status >= 200 && winner.response.status < 300) {
         // Drain/cancel in-flight loser response bodies BEFORE aborting shared controller

@@ -87,7 +87,7 @@ export async function startMonitor(args: {
       } catch {
         // lsof not available or other error — try pkill as fallback
         try {
-          execFileSync("pkill", ["-f", "modelweaver.*dist/index.*--daemon"], { stdio: "ignore" });
+          execFileSync("pkill", ["-f", "node.*modelweaver.*--daemon"], { stdio: "ignore" });
           await new Promise((r) => setTimeout(r, 1000));
         } catch { /* pkill also failed */ }
       }

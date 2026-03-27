@@ -375,14 +375,24 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     );
   });
 
-  // CORS for GUI (Tauri WebView has origin tauri://localhost)
+  // CORS for GUI — restrict to localhost origins
+  const ALLOWED_ORIGINS = [
+    'http://localhost',
+    'http://127.0.0.1',
+    'https://localhost',
+    'tauri://localhost',
+  ];
+
   app.use("/api/*", async (c, next) => {
-    c.header("Access-Control-Allow-Origin", "*");
+    const origin = c.req.header('Origin') || '';
+    const isAllowed = !origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o));
+    c.header("Access-Control-Allow-Origin", isAllowed ? origin : '');
     await next();
   });
-  // Handle CORS preflight for API routes only (GUI needs CORS; proxy endpoint does not)
   app.options("/api/*", (c) => {
-    c.header("Access-Control-Allow-Origin", "*");
+    const origin = c.req.header('Origin') || '';
+    const isAllowed = !origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o));
+    c.header("Access-Control-Allow-Origin", isAllowed ? origin : '');
     c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     c.header("Access-Control-Allow-Headers", "Content-Type, Authorization, anthropic-version, x-api-key");
     return c.body("", 200);
@@ -392,10 +402,14 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     const requestId = randomUUID();
 
     // Read raw body once, then parse — avoids double serialization
+    const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB
     let body: { model?: string };
     let rawBody: string;
     try {
       rawBody = await c.req.text();
+      if (rawBody.length > MAX_BODY_SIZE) {
+        return anthropicError("invalid_request_error", `Request body exceeds maximum size of ${MAX_BODY_SIZE / 1024 / 1024}MB`, requestId);
+      }
       body = JSON.parse(rawBody);
     } catch {
       return anthropicError("invalid_request_error", "Invalid JSON body", requestId);
@@ -442,6 +456,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     // Forward with fallback chain
     let successfulProvider = "unknown";
     let result: FallbackResult;
+    inFlightCount++;
     try {
       result = await forwardWithFallback(
         config.providers,
@@ -474,6 +489,8 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         { type: "error", error: { type: "api_error", message: "Upstream request failed: " + errMsg } },
         502
       );
+    } finally {
+      inFlightCount--;
     }
 
     // Use the actualModel from the winning entry, not ctx.actualModel
@@ -587,9 +604,12 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     return c.json(status);
   });
 
+  let inFlightCount = 0;
+
   return {
     app,
     getConfig: () => config,
+    getInFlightCount: () => inFlightCount,
     setConfig: async (newConfig: AppConfig) => {
       // Build key → agent map from old config for reuse lookup
       const oldAgents = new Map<string, import("undici").Agent>();

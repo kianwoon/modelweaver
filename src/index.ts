@@ -350,6 +350,17 @@ async function main() {
         clearInterval((handle as any)._configPollInterval);
       }
       closeWebSocket();
+
+      // Drain in-flight requests — wait up to 10s for them to complete
+      const drainStart = Date.now();
+      const DRAIN_TIMEOUT_MS = 10_000;
+      while ((handle as any).getInFlightCount?.() > 0 && Date.now() - drainStart < DRAIN_TIMEOUT_MS) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+      if ((handle as any).getInFlightCount?.() > 0) {
+        logger.warn('Shutdown: in-flight requests still pending, closing agents anyway');
+      }
+
       await handle.closeAgents();
       await removeWorkerPidFile();
       logStream.end();
