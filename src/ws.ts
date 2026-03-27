@@ -182,3 +182,12 @@ export function broadcastStreamEvent(data: StreamEvent): void {
     });
   }
 }
+
+export function closeWebSocket(): void {
+  if (!wssInstance) return;
+  for (const client of wssInstance.clients) {
+    client.terminate();
+  }
+  wssInstance.close();
+  wssInstance = null;
+}

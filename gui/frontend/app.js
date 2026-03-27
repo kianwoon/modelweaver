@@ -750,7 +750,7 @@ function connectWebSocket(port) {
       clearInterval(pollTimer);
       pollTimer = null;
     }
-    wsBackoff = 1000;
+    wsBackoff = 3000;
     setStatus('live');
     // Defensive: fetch summary via HTTP to ensure active models/providers
     // are populated even if the initial WS summary message is missed
@@ -816,7 +816,7 @@ async function fetchSummary() {
 // WebSocket state
 let ws = null;
 let pollTimer = null;
-let wsBackoff = 1000;
+let wsBackoff = 3000;  // was 1000 — gives daemon time to restart
 let reconnectTimer = null;
 const WS_MAX_BACKOFF = 30000;
 const WS_CONNECT_TIMEOUT = 5000;

@@ -300,8 +300,16 @@ export async function startDaemon(
     };
   }
 
-  // Check if port is already in use
+  // Determine effective port for port-wait logic
   const effectivePort = port ?? await getConfigPort() ?? 3456;
+
+  // Wait for port to be fully free (old worker may linger briefly after stop)
+  for (let i = 0; i < 20; i++) {
+    if (!(await isPortInUse(effectivePort))) break;
+    await new Promise(r => setTimeout(r, 100));
+  }
+
+  // Check if port is still in use after wait
   if (await isPortInUse(effectivePort)) {
     return {
       success: false,
