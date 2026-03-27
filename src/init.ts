@@ -845,7 +845,47 @@ async function configureModels(
         );
 
         const newAlias = (alias as string).trim();
-        const newModel = (modelName as string).trim();
+        const newModelName = (modelName as string).trim();
+
+        // Ask about distribution vs fallback (same as add flow)
+        const hasDistribution = current.entries?.length > 1 && current.entries?.some((e: any) => e.weight !== undefined);
+        const { enableDistribution } = await prompts({
+          type: 'confirm',
+          name: 'enableDistribution',
+          message: 'Enable traffic distribution across multiple providers?',
+          initial: hasDistribution,
+        }, CANCEL);
+
+        if (enableDistribution) {
+          // Distribution mode - collect entries with weights
+          const entries = await configureDistribution(
+            selectedProvider.id,
+            newModelName,
+            providers,
+            () => { throw new GoBackError(); },
+          );
+
+          if (entries.length >= 2) {
+            // If alias changed, remove old entry from existing map
+            if (newAlias !== current.alias) {
+              existingModels!.delete(current.alias);
+            }
+
+            models[idx] = {
+              alias: newAlias,
+              entries,
+              provider: entries[0].provider,
+              model: entries[0].model,
+              weight: entries[0].weight,
+              fallbacks: entries.slice(1).map(e => ({ provider: e.provider, model: e.model, weight: e.weight })),
+            };
+
+            existingModels!.set(newAlias, entries);
+            check(`Updated model with distribution: ${newAlias} (${entries.length} providers)`);
+            continue; // Skip fallback management
+          }
+          // Not enough providers, fall through to normal fallback flow
+        }
 
         // Fallback management loop
         while (true) {
@@ -916,17 +956,17 @@ async function configureModels(
         models[idx] = {
           alias: newAlias,
           provider: selectedProvider.id,
-          model: newModel,
+          model: newModelName,
           fallbacks: currentFallbacks,
         };
 
         // Update existing map with full chain including fallbacks
         existingModels!.set(newAlias, [
-          { provider: selectedProvider.id, model: newModel },
+          { provider: selectedProvider.id, model: newModelName },
           ...currentFallbacks,
         ]);
 
-        check(`Updated model: ${newAlias} (${selectedProvider.id} \u2192 ${newModel})`);
+        check(`Updated model: ${newAlias} (${selectedProvider.id} \u2192 ${newModelName})`);
       }
 
       if (action === 'delete') {
