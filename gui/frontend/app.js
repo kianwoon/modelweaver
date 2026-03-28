@@ -524,6 +524,7 @@ let lastSummaryUpdate = 0;
 const SUMMARY_THROTTLE_MS = 1000;
 let summaryDirty = false;
 let summaryData = null;
+let cachedFullSummary = null;
 let summaryThrottleTimer = null;
 
 function flushStreamUpdates() {
@@ -751,7 +752,22 @@ function connectWebSocket(port) {
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === 'summary') {
+        cachedFullSummary = msg.data;
         scheduleSummaryUpdate(msg.data);
+      } else if (msg.type === 'summary_delta') {
+        // Apply delta to cached full summary
+        if (cachedFullSummary) {
+          const merged = Object.assign({}, cachedFullSummary, msg.data);
+          // Handle recentRequests delta: only new entries, append
+          if (msg.data.recentRequests && cachedFullSummary.recentRequests) {
+            const prevIds = new Set(cachedFullSummary.recentRequests.map(r => r.requestId));
+            const newOnly = msg.data.recentRequests.filter(r => !prevIds.has(r.requestId));
+            merged.recentRequests = [...newOnly, ...cachedFullSummary.recentRequests.filter(r => !new Set(msg.data.recentRequests.map(r => r.requestId)).has(r.requestId))];
+          }
+          cachedFullSummary = merged;
+          scheduleSummaryUpdate(merged);
+        }
+        // If no cached state yet, ignore — full summary will arrive soon
       } else if (msg.type === 'request') {
         appendRequestMetric(msg.data);
       } else if (msg.type === 'stream') {
@@ -789,6 +805,7 @@ function connectWebSocket(port) {
 async function fetchSummary() {
   try {
     const data = await invoke('fetch_metrics', { port: DEFAULT_PORT });
+    cachedFullSummary = data;
     scheduleSummaryUpdate(data);
     // Don't overwrite status if WebSocket is already live
     if (ws) setStatus('live');

@@ -137,9 +137,17 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
         if (!alive()) return;
         const summary = metricsStore.getSummary();
         let msg: WsMessage;
-        // TODO(#47): Re-enable delta mode once Tauri GUI is rebuilt with summary_delta support.
-        // Until then, always send full summary so legacy GUI clients keep working.
-        msg = { type: "summary", data: summary };
+        const prev = lastSummarySent.get(ws);
+        if (prev) {
+          const delta = computeSummaryDelta(prev, summary);
+          if (delta) {
+            msg = { type: "summary_delta", data: delta };
+          } else {
+            return; // Nothing changed
+          }
+        } else {
+          msg = { type: "summary", data: summary };
+        }
         ws.send(JSON.stringify(msg));
         lastSummarySent.set(ws, summary);
       }, SUMMARY_DEBOUNCE_MS);
