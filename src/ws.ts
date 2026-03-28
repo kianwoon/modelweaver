@@ -15,6 +15,7 @@ const BACKPRESSURE_THRESHOLD = 64 * 1024; // 64KB
 const SUMMARY_DEBOUNCE_MS = 500;
 const STREAM_WS_THROTTLE_MS = 500; // caps stream event delivery to ~2 Hz per client
 const BACKPRESSURE_LOG_INTERVAL_MS = 10_000; // throttle backpressure warnings to once per 10s
+const MAX_DRAIN_QUEUE = 100; // cap queue size per client to prevent unbounded growth
 const clientStreamThrottle = new Map<any, number>();
 
 interface PendingDrain {
@@ -48,13 +49,30 @@ function computeSummaryDelta(prev: MetricsSummary, next: MetricsSummary): Metric
   if (newRequests.length > 0) { delta.recentRequests = newRequests; changed = true; }
 
   // sessionStats: only include if changed
-  if ('sessionStats' in prev || 'sessionStats' in next) {
-    const prevSessions = (prev as any).sessionStats;
-    const nextSessions = (next as any).sessionStats;
-    if (JSON.stringify(prevSessions) !== JSON.stringify(nextSessions)) {
+  const prevSessions: any[] = (prev as any).sessionStats;
+  const nextSessions: any[] = (next as any).sessionStats;
+  if (prevSessions && nextSessions) {
+    if (prevSessions.length !== nextSessions.length) {
       (delta as any).sessionStats = nextSessions;
       changed = true;
+    } else {
+      let sessionsChanged = false;
+      for (let i = 0; i < nextSessions.length; i++) {
+        const p = prevSessions[i];
+        const n = nextSessions[i];
+        if (!p || !n || p.sessionId !== n.sessionId || p.requestCount !== n.requestCount || p.lastSeen !== n.lastSeen) {
+          sessionsChanged = true;
+          break;
+        }
+      }
+      if (sessionsChanged) {
+        (delta as any).sessionStats = nextSessions;
+        changed = true;
+      }
     }
+  } else if (nextSessions) {
+    (delta as any).sessionStats = nextSessions;
+    changed = true;
   }
 
   return changed ? delta : null;
@@ -64,12 +82,13 @@ let wssInstance: InstanceType<typeof import("ws").WebSocketServer> | null = null
 
 // Module-level counters for dropped events (useful for monitoring)
 let streamDroppedCount = 0;
+let droppedQueueCount = 0;
 let lastBackpressureWarnTime = 0;
 
 function maybeLogBackpressure(source: string): void {
   const now = Date.now();
   if (now - lastBackpressureWarnTime >= BACKPRESSURE_LOG_INTERVAL_MS) {
-    console.warn(`[ws] Backpressure: dropping ${source} events (total dropped stream events: ${streamDroppedCount})`);
+    console.warn(`[ws] Backpressure: dropping ${source} events (total dropped stream events: ${streamDroppedCount}, dropped queue events: ${droppedQueueCount})`);
     lastBackpressureWarnTime = now;
   }
 }
@@ -192,6 +211,12 @@ export function broadcastStreamEvent(data: StreamEvent): void {
       if (isCritical) {
         let pending = pendingDrains.get(client);
         if (pending) {
+          // Cap queue size per client to prevent unbounded growth
+          if (pending.queue.length >= MAX_DRAIN_QUEUE) {
+            pending.queue.shift(); // drop oldest
+            droppedQueueCount++;
+            maybeLogBackpressure("queue");
+          }
           pending.queue.push(msg);
         } else {
           const queue = [msg];
