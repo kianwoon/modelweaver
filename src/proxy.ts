@@ -670,14 +670,31 @@ export async function forwardRequest(
     }
     undiciResponse.body.pipe(passThrough);
 
-    // Wrap undici response as a standard Web Response for downstream compatibility
-    const response = new Response(
-      passThrough as unknown as BodyInit,
-      {
-        status: undiciResponse.statusCode,
-        headers: undiciResponse.headers as unknown as HeadersInit,
-      }
-    );
+    // Wrap in a ReadableStream to catch undici's internal double-close bug.
+    // When handleStall() destroys passThrough, undici's async GC can fire a
+    // second close on the underlying controller, throwing ERR_INVALID_STATE.
+    // The guarded controller.* calls below absorb that safely.
+    const wrappedStream = new ReadableStream({
+      start(controller) {
+        passThrough!.on("data", (chunk: Buffer) => {
+          try { controller.enqueue(new Uint8Array(chunk)); } catch { /* already closed */ }
+        });
+        passThrough!.on("end", () => {
+          try { controller.close(); } catch { /* already closed — undici bug */ }
+        });
+        passThrough!.on("error", (err: Error) => {
+          try { controller.error(err); } catch { /* already closed */ }
+        });
+      },
+      cancel() {
+        try { passThrough!.destroy(); } catch { /* already done */ }
+      },
+    });
+
+    const response = new Response(wrappedStream, {
+      status: undiciResponse.statusCode,
+      headers: undiciResponse.headers as unknown as HeadersInit,
+    });
 
     clearTimeout(timeout);
     return response;
