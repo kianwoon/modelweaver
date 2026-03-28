@@ -49,8 +49,8 @@ document.querySelectorAll('.titlebar-btn').forEach(btn => {
 });
 
 // --- Compact Mode ---
-const COMPACT_HEIGHT = 320;
-const NORMAL_HEIGHT = 520;
+const COMPACT_HEIGHT = 420;
+const NORMAL_HEIGHT = 800;
 const COMPACT_KEY = 'modelweaver-compact-mode';
 
 function setCompactMode(enabled) {

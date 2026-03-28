@@ -99,28 +99,56 @@ export function writeEnvFile(state: WizardState, envDir: string): void {
     }
   }
 
-  // Write back to file
+  // Write back to file — skip if content unchanged
   const lines = Object.entries(existingEnv).map(([key, value]) => `${key}=${value}`);
-  writeFileSync(envPath, lines.join("\n") + "\n", "utf-8");
+  const newContent = lines.join("\n") + "\n";
+  if (existsSync(envPath)) {
+    const currentContent = readFileSync(envPath, "utf-8");
+    if (currentContent === newContent) return;
+  }
+  writeFileSync(envPath, newContent, "utf-8");
 }
 
 /**
  * Writes WizardState to config files.
  * - Config dir: ~/.modelweaver/
  * - Writes config.yaml and .env
+ * - Skips writes when content is unchanged
  */
 export function writeStateToFiles(state: WizardState): void {
   const configDir = join(homedir(), ".modelweaver");
+  let changed = false;
 
   // Create directory if it doesn't exist
   if (!existsSync(configDir)) {
     mkdirSync(configDir, { recursive: true });
+    changed = true;
   }
 
-  // Write config.yaml
+  // Write config.yaml — skip if content unchanged
   const yamlContent = buildYamlConfig(state);
-  writeFileSync(join(configDir, "config.yaml"), yamlContent, "utf-8");
+  const yamlPath = join(configDir, "config.yaml");
+  if (existsSync(yamlPath)) {
+    const currentYaml = readFileSync(yamlPath, "utf-8");
+    if (currentYaml !== yamlContent) {
+      writeFileSync(yamlPath, yamlContent, "utf-8");
+      changed = true;
+    }
+  } else {
+    writeFileSync(yamlPath, yamlContent, "utf-8");
+    changed = true;
+  }
 
-  // Write .env
+  // Write .env — skip if content unchanged
+  const envPath = join(configDir, ".env");
+  const envBefore = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
   writeEnvFile(state, configDir);
+  const envAfter = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
+  if (envAfter !== envBefore) {
+    changed = true;
+  }
+
+  if (!changed) {
+    process.stdout.write("\nNo changes detected\n");
+  }
 }
