@@ -123,14 +123,17 @@ export const inFlightCounter = new InFlightCounter();
  * Calibration note: production data shows glm/minimax have CV 1.5-4.0 (extreme tail variance),
  * so hedging is warranted. CV threshold of 0.5 prevents over-hedging on stable runs.
  */
-export function computeHedgingCount(provider: ProviderConfig): number {
+export function computeHedgingCount(
+  provider: ProviderConfig,
+  config?: { cvThreshold?: number; maxHedge?: number },
+): number {
   const cv = latencyTracker.getCV(provider.name);
   const inFlight = inFlightCounter.get(provider.name);
   const maxConcurrent = provider.concurrentLimit ?? 1;
   const available = Math.max(1, maxConcurrent - inFlight);
 
-  const cvThreshold = 0.5;
-  const maxHedge = 4;
+  const cvThreshold = config?.cvThreshold ?? 0.5;
+  const maxHedge = config?.maxHedge ?? 4;
 
   if (cv < cvThreshold) return 1;
 

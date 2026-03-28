@@ -6,7 +6,7 @@ import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { Agent } from "undici";
 import { CircuitBreaker } from "./circuit-breaker.js";
-import type { AppConfig, ProviderConfig, RoutingEntry, ServerConfig } from "./types.js";
+import type { AppConfig, HedgingConfig, ProviderConfig, RoutingEntry, ServerConfig } from "./types.js";
 
 // --- Zod schemas for raw (pre-resolution) config ---
 
@@ -40,6 +40,15 @@ const routingEntrySchema = z.object({
   weight: z.number().positive().optional(),
 });
 
+const hedgingSchema = z.object({
+  /** Delay (ms) before starting backup providers in staggered race */
+  speculativeDelay: z.number().int().positive().default(1000),
+  /** Coefficient of variation threshold — hedging activates when CV >= this */
+  cvThreshold: z.number().min(0).max(10).default(0.5),
+  /** Maximum number of hedged copies per request */
+  maxHedge: z.number().int().min(1).max(10).default(4),
+});
+
 const rawConfigSchema = z.object({
   server: z
     .object({
@@ -51,6 +60,7 @@ const rawConfigSchema = z.object({
   routing: z.record(z.string(), z.array(routingEntrySchema)).default({}),
   tierPatterns: z.record(z.string(), z.array(z.string())).default({}),
   modelRouting: z.record(z.string(), z.array(routingEntrySchema)).default({}),
+  hedging: hedgingSchema.optional(),
 });
 
 // --- Env var resolution ---
@@ -291,7 +301,18 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     host: validated.server.host,
   };
 
-  const config: AppConfig = { server, providers, routing, tierPatterns, modelRouting };
+  const config: AppConfig = {
+    server,
+    providers,
+    routing,
+    tierPatterns,
+    modelRouting,
+    hedging: validated.hedging ? {
+      speculativeDelay: validated.hedging.speculativeDelay,
+      cvThreshold: validated.hedging.cvThreshold,
+      maxHedge: validated.hedging.maxHedge,
+    } : undefined,
+  };
   return { config, configPath: path };
 }
 

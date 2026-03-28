@@ -1,5 +1,5 @@
 // src/proxy.ts
-import type { ProviderConfig, RoutingEntry, RequestContext } from "./types.js";
+import type { HedgingConfig, ProviderConfig, RoutingEntry, RequestContext } from "./types.js";
 import { request as undiciRequest } from "undici";
 import { PassThrough } from "node:stream";
 import fs from "node:fs";
@@ -98,8 +98,8 @@ function providerFailedErr(providerName: string): Response {
   return new Response(body, { status: 502, headers: ERR_HEADERS });
 }
 
-/** Delay (ms) before starting backup providers in staggered race */
-const SPECULATIVE_DELAY = 2000;
+/** Default delay (ms) before starting backup providers in staggered race */
+const DEFAULT_SPECULATIVE_DELAY = 1000;
 
 export function isRetriable(status: number): boolean {
   return status === 429 || status >= 500;
@@ -854,9 +854,10 @@ async function hedgedForwardRequest(
   incomingRequest: Request,
   chainSignal: AbortSignal | undefined,
   index: number,
-  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
+  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
+  hedging?: HedgingConfig,
 ): Promise<Response> {
-  const count = ctx.hasDistribution ? 1 : computeHedgingCount(provider);
+  const count = ctx.hasDistribution ? 1 : computeHedgingCount(provider, hedging);
 
   if (count <= 1) {
     // No hedging — single request
@@ -971,7 +972,8 @@ export async function forwardWithFallback(
   ctx: RequestContext,
   incomingRequest: Request,
   onAttempt?: (provider: string, index: number) => void,
-  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
+  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
+  hedging?: HedgingConfig,
 ): Promise<FallbackResult> {
   // Guard: empty chain
   if (chain.length === 0) {
@@ -1001,7 +1003,7 @@ export async function forwardWithFallback(
 
     onAttempt?.(entry.provider, 0);
 
-    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger);
+    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging);
 
     return { response, actualModel: entry.model, actualProvider: entry.provider };
   }
@@ -1039,7 +1041,7 @@ export async function forwardWithFallback(
 
       try {
         const response = await hedgedForwardRequest(
-          provider, entry, ctx, incomingRequest, undefined, i, logger,
+          provider, entry, ctx, incomingRequest, undefined, i, logger, hedging,
         );
 
         if (provider._circuitBreaker) provider._circuitBreaker.recordResult(response.status, cbProbeId);
@@ -1137,6 +1139,7 @@ export async function forwardWithFallback(
         sharedController.signal,
         index,
         logger,
+        hedging,
       );
       return { response, index };
     } catch {
@@ -1169,7 +1172,7 @@ export async function forwardWithFallback(
               return;
             }
             attemptProvider(i).then(resolve);
-          }, SPECULATIVE_DELAY);
+          }, hedging?.speculativeDelay ?? DEFAULT_SPECULATIVE_DELAY);
         }),
       );
     }

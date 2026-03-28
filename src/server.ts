@@ -483,7 +483,8 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
           // an onSuccess callback in proxy.ts (handled separately).
           if (!successfulProvider) successfulProvider = provider;
         },
-        logger
+        logger,
+        config.hedging,
       );
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);

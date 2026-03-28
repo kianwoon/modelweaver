@@ -30,6 +30,15 @@ export interface RoutingEntry {
   weight?: number;
 }
 
+export interface HedgingConfig {
+  /** Delay (ms) before starting backup providers in staggered race */
+  speculativeDelay: number;
+  /** Coefficient of variation threshold — hedging activates when CV >= this */
+  cvThreshold: number;
+  /** Maximum number of hedged copies per request */
+  maxHedge: number;
+}
+
 export interface ServerConfig {
   port: number;
   host: string;
@@ -41,6 +50,7 @@ export interface AppConfig {
   routing: Map<string, RoutingEntry[]>;
   tierPatterns: Map<string, string[]>;
   modelRouting: Map<string, RoutingEntry[]>;
+  hedging?: HedgingConfig;
 }
 
 export interface RequestContext {
