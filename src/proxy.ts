@@ -676,18 +676,19 @@ export async function forwardRequest(
     // The guarded controller.* calls below absorb that safely.
     const wrappedStream = new ReadableStream({
       start(controller) {
-        passThrough!.on("data", (chunk: Buffer) => {
+        if (!passThrough) { controller.close(); return; }
+        passThrough.on("data", (chunk: Buffer) => {
           try { controller.enqueue(new Uint8Array(chunk)); } catch { /* already closed */ }
         });
-        passThrough!.on("end", () => {
+        passThrough.on("end", () => {
           try { controller.close(); } catch { /* already closed — undici bug */ }
         });
-        passThrough!.on("error", (err: Error) => {
+        passThrough.on("error", (err: Error) => {
           try { controller.error(err); } catch { /* already closed */ }
         });
       },
       cancel() {
-        try { passThrough!.destroy(); } catch { /* already done */ }
+        if (passThrough) { try { passThrough.destroy(); } catch { /* already done */ } }
       },
     });
 
