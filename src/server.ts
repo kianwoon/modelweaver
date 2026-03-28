@@ -193,9 +193,11 @@ function createMetricsTransform(
 
     // Extract text content for preview from JSON responses
     // Anthropic format: "content":[{"type":"text","text":"..."}]
-    const anthContent = [...text.matchAll(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g)];
-    if (anthContent.length > 0) {
-      const lastText = anthContent[anthContent.length - 1][1].replace(/\\n/g, "\n").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    const textBlockMatches = [...text.matchAll(/"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g)];
+    if (textBlockMatches.length > 0) {
+      const rawValue = textBlockMatches[textBlockMatches.length - 1][1];
+      // Use JSON.parse to correctly handle ALL escape sequences (\uXXXX, \t, \r, etc.)
+      const lastText = JSON.parse(`"${rawValue}"`);
       responsePreview += lastText;
       if (responsePreview.length > PREVIEW_MAX) {
         responsePreview = responsePreview.slice(-PREVIEW_MAX);
