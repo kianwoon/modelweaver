@@ -423,6 +423,14 @@ async function main() {
   const { watch: fsWatch } = await import('node:fs');
   const handle = createApp(config, logLevel, metricsStore);
 
+  // Prevent silent crashes — log uncaught exceptions instead of crashing silently
+  process.on('uncaughtException', (err) => {
+    console.error(`Uncaught exception: ${err.message}\n${err.stack ?? ''}`);
+  });
+  process.on('unhandledRejection', (reason) => {
+    console.error(`Unhandled rejection: ${String(reason)}`);
+  });
+
   // Print startup info
   console.log(`\n  ModelWeaver v${VERSION}`);
   console.log(`  Listening: http://${host}:${port}`);
