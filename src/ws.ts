@@ -2,11 +2,11 @@
 import { WebSocketServer } from "ws";
 import type { Server } from "node:http";
 import type { MetricsStore } from "./metrics.js";
-import type { RequestMetrics, MetricsSummary, StreamEvent } from "./types.js";
+import type { RequestMetrics, MetricsSummary, MetricsSummaryDelta, StreamEvent } from "./types.js";
 
 interface WsMessage {
-  type: "request" | "summary";
-  data: RequestMetrics | MetricsSummary;
+  type: "request" | "summary" | "summary_delta";
+  data: RequestMetrics | MetricsSummary | MetricsSummaryDelta;
 }
 
 const PING_INTERVAL_MS = 30_000; // 30 seconds
@@ -15,13 +15,50 @@ const BACKPRESSURE_THRESHOLD = 64 * 1024; // 64KB
 const SUMMARY_DEBOUNCE_MS = 500;
 const STREAM_WS_THROTTLE_MS = 500; // caps stream event delivery to ~2 Hz per client
 const BACKPRESSURE_LOG_INTERVAL_MS = 10_000; // throttle backpressure warnings to once per 10s
-const clientStreamThrottle = new WeakMap<any, number>();
+const clientStreamThrottle = new Map<any, number>();
 
 interface PendingDrain {
   timer: ReturnType<typeof setTimeout>;
   queue: string[];
 }
-const pendingDrains = new WeakMap<any, PendingDrain>();
+const pendingDrains = new Map<any, PendingDrain>();
+const lastSummarySent = new WeakMap<any, MetricsSummary>();
+
+function computeSummaryDelta(prev: MetricsSummary, next: MetricsSummary): MetricsSummaryDelta | null {
+  const delta: MetricsSummaryDelta = {};
+  let changed = false;
+
+  if (prev.totalRequests !== next.totalRequests) { delta.totalRequests = next.totalRequests; changed = true; }
+  if (prev.totalInputTokens !== next.totalInputTokens) { delta.totalInputTokens = next.totalInputTokens; changed = true; }
+  if (prev.totalOutputTokens !== next.totalOutputTokens) { delta.totalOutputTokens = next.totalOutputTokens; changed = true; }
+  if (prev.avgTokensPerSec !== next.avgTokensPerSec) { delta.avgTokensPerSec = next.avgTokensPerSec; changed = true; }
+  if (prev.totalCacheReadTokens !== next.totalCacheReadTokens) { delta.totalCacheReadTokens = next.totalCacheReadTokens; changed = true; }
+  if (prev.totalCacheCreationTokens !== next.totalCacheCreationTokens) { delta.totalCacheCreationTokens = next.totalCacheCreationTokens; changed = true; }
+  if (prev.avgCacheHitRate !== next.avgCacheHitRate) { delta.avgCacheHitRate = next.avgCacheHitRate; changed = true; }
+  if (prev.uptimeSeconds !== next.uptimeSeconds) { delta.uptimeSeconds = next.uptimeSeconds; changed = true; }
+
+  // These change frequently — always include
+  delta.activeModels = next.activeModels;
+  delta.providerDistribution = next.providerDistribution;
+  delta.modelStats = next.modelStats;
+
+  // recentRequests: only send new ones not in prev
+  const prevIds = new Set(prev.recentRequests.map(r => r.requestId));
+  const newRequests = next.recentRequests.filter(r => !prevIds.has(r.requestId));
+  if (newRequests.length > 0) { delta.recentRequests = newRequests; changed = true; }
+
+  // sessionStats: only include if changed
+  if ('sessionStats' in prev || 'sessionStats' in next) {
+    const prevSessions = (prev as any).sessionStats;
+    const nextSessions = (next as any).sessionStats;
+    if (JSON.stringify(prevSessions) !== JSON.stringify(nextSessions)) {
+      (delta as any).sessionStats = nextSessions;
+      changed = true;
+    }
+  }
+
+  return changed ? delta : null;
+}
 
 let wssInstance: InstanceType<typeof import("ws").WebSocketServer> | null = null;
 
@@ -44,6 +81,7 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
   wss.on("connection", (ws) => {
     // Send current summary as initial state
     const summary = metricsStore.getSummary();
+    lastSummarySent.set(ws, summary);
     const initialMsg: WsMessage = { type: "summary", data: summary };
     ws.send(JSON.stringify(initialMsg));
 
@@ -78,8 +116,21 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
       pendingSummaryTimer = setTimeout(() => {
         pendingSummaryTimer = undefined;
         if (!alive()) return;
-        const msg: WsMessage = { type: "summary", data: metricsStore.getSummary() };
+        const summary = metricsStore.getSummary();
+        const prev = lastSummarySent.get(ws);
+        let msg: WsMessage;
+        if (prev) {
+          const delta = computeSummaryDelta(prev, summary);
+          if (delta) {
+            msg = { type: "summary_delta", data: delta };
+          } else {
+            return; // Nothing changed
+          }
+        } else {
+          msg = { type: "summary", data: summary };
+        }
         ws.send(JSON.stringify(msg));
+        lastSummarySent.set(ws, summary);
       }, SUMMARY_DEBOUNCE_MS);
     }
 
@@ -109,6 +160,7 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
       cleanedUp = true;
       clearInterval(pingTimer);
       if (pendingSummaryTimer) clearTimeout(pendingSummaryTimer);
+      lastSummarySent.delete(ws);
       const pending = pendingDrains.get(ws);
       if (pending) {
         clearTimeout(pending.timer);
@@ -185,6 +237,12 @@ export function broadcastStreamEvent(data: StreamEvent): void {
 
 export function closeWebSocket(): void {
   if (!wssInstance) return;
+  // Clear all pending drain timers before terminating clients
+  for (const [, pending] of pendingDrains) {
+    clearTimeout(pending.timer);
+  }
+  pendingDrains.clear();
+  clientStreamThrottle.clear();
   for (const client of wssInstance.clients) {
     client.terminate();
   }

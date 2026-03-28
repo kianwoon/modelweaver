@@ -82,6 +82,86 @@ Config locations (first found wins):
 `);
 }
 
+/**
+ * Sets up config hot-reload via fs.watch with polling fallback.
+ * All Node APIs are injected so the function stays ESM-safe and testable.
+ * Returns a cleanup handle that must be called on shutdown.
+ */
+function setupConfigWatcher(opts: {
+  configPath: string;
+  watch: typeof import("node:fs")["watch"];
+  log: (msg: string, meta?: Record<string, string>) => void;
+  onError: (msg: string, meta?: Record<string, string>) => void;
+  onReload: () => Promise<void>;
+  debounceMs?: number;
+  pollMs?: number;
+}): { cleanup: () => void } {
+  const { configPath, watch, log, onError, onReload } = opts;
+  const debounceMs = opts.debounceMs ?? 300;
+  const pollMs = opts.pollMs ?? 5000;
+
+  let watcher: ReturnType<typeof watch> | null = null;
+  let pollInterval: ReturnType<typeof setInterval> | null = null;
+  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let disposed = false;
+
+  const debouncedReload = () => {
+    if (disposed) return;
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(async () => {
+      if (disposed) return;
+      try {
+        await onReload();
+        log("Config reloaded", { path: configPath });
+      } catch (err) {
+        onError("Config reload failed — keeping old config", { error: (err as Error).message });
+      }
+    }, debounceMs);
+  };
+
+  const startPolling = () => {
+    if (pollInterval) return; // already polling
+    pollInterval = setInterval(debouncedReload, pollMs);
+    log("Config polling fallback active (fs.watch unavailable)", { path: configPath });
+  };
+
+  try {
+    watcher = watch(configPath, () => {
+      debouncedReload();
+    });
+    watcher.on("error", (err) => {
+      onError("fs.watch error, falling back to config polling", { error: err.message });
+      if (watcher) {
+        watcher.close();
+        watcher = null;
+      }
+      startPolling();
+    });
+    log("Hot-reload active — edit config.yaml to reload", { path: configPath });
+  } catch (err) {
+    onError("fs.watch unavailable, falling back to config polling", { error: (err as Error).message });
+    startPolling();
+  }
+
+  return {
+    cleanup: () => {
+      disposed = true;
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+        debounceTimer = null;
+      }
+      if (watcher) {
+        watcher.close();
+        watcher = null;
+      }
+      if (pollInterval) {
+        clearInterval(pollInterval);
+        pollInterval = null;
+      }
+    },
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv);
 
@@ -232,7 +312,7 @@ async function main() {
 
   // --- Daemon mode ---
   if (args.daemon) {
-    const { removeWorkerPidFile, writeWorkerPidFile, createDebouncedReload, getLogPath } = await import('./daemon.js');
+    const { removeWorkerPidFile, writeWorkerPidFile, getLogPath } = await import('./daemon.js');
     const { reloadConfig } = await import('./config.js');
     const { createWriteStream, watch } = await import('node:fs');
     const { createLogger } = await import('./logger.js');
@@ -259,53 +339,25 @@ async function main() {
     const handle = createApp(config, logLevel, metricsStore);
 
     // Hot-reload: watch config file for changes
-    let configWatcher: ReturnType<typeof watch> | null = null;
-    if (configPath) {
-      const debounced = createDebouncedReload(async () => {
-        try {
-          const newConfig = await reloadConfig(configPath);
-          await handle.setConfig(newConfig);
-          latencyTracker.prune([...newConfig.providers.keys()]);
-          logger.info("Config reloaded", { path: configPath });
-        } catch (err) {
-          logger.error("Config reload failed — keeping old config", { error: (err as Error).message });
-        }
-      }, 300);
-
-      let usingPollingFallback = false;
-      try {
-        configWatcher = watch(configPath, () => {
-          debounced.reload();
-        });
-        configWatcher.on('error', (err) => {
-          // fs.watch failed — fall back to polling
-          logger.warn("fs.watch error, falling back to config polling", { error: err.message });
-          if (configWatcher) {
-            configWatcher.close();
-            configWatcher = null;
-          }
-          // Fall back to polling every 5 seconds
-          (handle as any)._configPollInterval = setInterval(() => {
-            debounced.reload();
-          }, 5000);
-          usingPollingFallback = true;
-        });
-      } catch (err) {
-        // fs.watch setup failed — fall back to polling
-        logger.warn("fs.watch unavailable, falling back to config polling", { error: (err as Error).message });
-        (handle as any)._configPollInterval = setInterval(() => {
-          debounced.reload();
-        }, 5000);
-        usingPollingFallback = true;
-      }
-
-      // Startup logging
-      if (usingPollingFallback) {
-        logger.info("Config polling fallback active (fs.watch unavailable)", { path: configPath });
-      } else {
-        logger.info("Hot-reload active — edit config.yaml to reload", { path: configPath });
-      }
-    }
+    const configWatcherHandle = configPath
+      ? setupConfigWatcher({
+          configPath,
+          watch,
+          log: (msg, meta) => logger.info(msg, meta),
+          onError: (msg, meta) => {
+            if (meta?.error) {
+              logger.warn(msg, meta);
+            } else {
+              logger.error(msg, meta);
+            }
+          },
+          onReload: async () => {
+            const newConfig = await reloadConfig(configPath);
+            await handle.setConfig(newConfig);
+            latencyTracker.prune([...newConfig.providers.keys()]);
+          },
+        })
+      : { cleanup: () => {} };
 
     // SIGUSR1 triggers config hot-reload
     // Note: SIGUSR1 is POSIX-only; this handler is a no-op on Windows.
@@ -342,13 +394,7 @@ async function main() {
 
     // Graceful shutdown
     const shutdown = async () => {
-      if (configWatcher) {
-        configWatcher.close();
-        configWatcher = null;
-      }
-      if ((handle as any)._configPollInterval) {
-        clearInterval((handle as any)._configPollInterval);
-      }
+      configWatcherHandle.cleanup();
       closeWebSocket();
 
       // Drain in-flight requests — wait up to 10s for them to complete
@@ -373,6 +419,8 @@ async function main() {
   }
 
   // --- Foreground mode ---
+  const { reloadConfig } = await import('./config.js');
+  const { watch: fsWatch } = await import('node:fs');
   const handle = createApp(config, logLevel, metricsStore);
 
   // Print startup info
@@ -420,9 +468,31 @@ async function main() {
   server.listen(port, host);
   attachWebSocket(server as any, metricsStore);
 
+  // Hot-reload: watch config file for changes
+  const fgConfigWatcherHandle = configPath
+    ? setupConfigWatcher({
+        configPath,
+        watch: fsWatch,
+        log: (msg, meta) => console.log(`  ${msg}` + (meta?.path ? ` (${meta.path})` : "")),
+        onError: (msg, meta) => {
+          if (meta?.error) {
+            console.warn(`  Warning: ${msg} — ${meta.error}`);
+          } else {
+            console.error(`  ${msg}`);
+          }
+        },
+        onReload: async () => {
+          const newConfig = await reloadConfig(configPath);
+          await handle.setConfig(newConfig);
+          latencyTracker.prune([...newConfig.providers.keys()]);
+        },
+      })
+    : { cleanup: () => {} };
+
   // Graceful shutdown
   const shutdown = async () => {
     console.log("\n  Shutting down...");
+    fgConfigWatcherHandle.cleanup();
     closeWebSocket();
     await handle.closeAgents();
     process.exit(0);

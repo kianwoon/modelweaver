@@ -30,6 +30,7 @@ export class MetricsStore {
   private _totalCacheCreationTokens = 0;
   private _modelMap = new Map<string, ModelEntry>();
   private _providerMap = new Map<string, number>();
+  private _sessionMap = new Map<string, { count: number; lastSeen: number }>();
 
   constructor(maxSize: number = 1000) {
     this.buffer = new Array(maxSize).fill(null);
@@ -76,6 +77,15 @@ export class MetricsStore {
       const pCount = this._providerMap.get(pKey) ?? 0;
       if (pCount <= 1) this._providerMap.delete(pKey);
       else this._providerMap.set(pKey, pCount - 1);
+
+      // Decrement session counter for evicted entry
+      if (evicted.sessionId) {
+        const sEntry = this._sessionMap.get(evicted.sessionId);
+        if (sEntry) {
+          sEntry.count--;
+          if (sEntry.count <= 0) this._sessionMap.delete(evicted.sessionId);
+        }
+      }
     }
 
     // Increment counters for new entry
@@ -98,6 +108,18 @@ export class MetricsStore {
 
     const pKey = metrics.targetProvider ?? metrics.provider;
     this._providerMap.set(pKey, (this._providerMap.get(pKey) ?? 0) + 1);
+
+    // Increment session counter
+    if (metrics.sessionId) {
+      const existing = this._sessionMap.get(metrics.sessionId);
+      if (existing) {
+        existing.count++;
+        if (metrics.timestamp > existing.lastSeen) existing.lastSeen = metrics.timestamp;
+      } else {
+        this._sessionMap.set(metrics.sessionId, { count: 1, lastSeen: metrics.timestamp });
+      }
+      this.pruneMap(this._sessionMap, (e) => e.count);
+    }
 
     // Enforce size caps on maps
     this.pruneMap(this._modelMap, (e) => e.count);
@@ -155,6 +177,10 @@ export class MetricsStore {
       recentRequests: requests,
       uptimeSeconds: Math.floor((Date.now() - this.createdAt) / 1000),
       modelStats: this.getModelStats(),
+      sessionStats: [...this._sessionMap.entries()]
+        .map(([sessionId, { count, lastSeen }]) => ({ sessionId, requestCount: count, lastSeen }))
+        .sort((a, b) => b.lastSeen - a.lastSeen)
+        .slice(0, 50),
     };
   }
 

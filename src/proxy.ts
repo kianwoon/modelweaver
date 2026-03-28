@@ -27,14 +27,6 @@ function shallowCloneForMutation(parsed: Record<string, unknown>): Record<string
   return clone;
 }
 
-/** Headers forwarded as-is to upstream */
-const FORWARD_HEADERS = new Set([
-  "anthropic-version",
-  "anthropic-beta",
-  "content-type",
-  "accept",
-]);
-
 /** Pre-compiled regex for normalizing duplicate slashes in URL paths */
 const MULTI_SLASH = /\/+/g;
 
@@ -188,10 +180,18 @@ export function buildOutboundHeaders(
 ): Headers {
   const headers = new Headers();
 
-  // Forward select headers as-is
-  for (const name of FORWARD_HEADERS) {
-    const value = incomingHeaders.get(name);
-    if (value) headers.set(name, value);
+  // Forward known headers and all x-* custom headers
+  const knownForward = new Set([
+    "anthropic-version",
+    "anthropic-beta",
+    "content-type",
+    "accept",
+  ]);
+  for (const [name, value] of incomingHeaders.entries()) {
+    const lower = name.toLowerCase();
+    if (knownForward.has(lower) || lower.startsWith("x-")) {
+      headers.set(name, value);
+    }
   }
 
   // Rewrite auth headers based on provider authType

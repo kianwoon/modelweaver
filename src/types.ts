@@ -51,6 +51,7 @@ export interface RequestContext {
   providerChain: RoutingEntry[];
   startTime: number;
   rawBody: string;
+  sessionId?: string;
   fallbackMode?: "sequential" | "race";
   hasDistribution?: boolean;
 }
@@ -71,6 +72,7 @@ export interface RequestMetrics {
   fallbackMode?: "sequential" | "race";
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
+  sessionId?: string;
 }
 
 export interface ModelPerformanceStats {
@@ -104,6 +106,22 @@ export interface MetricsSummary {
   providerDistribution: { provider: string; count: number }[];
   recentRequests: RequestMetrics[];
   modelStats: ModelPerformanceStats[];
+  sessionStats: { sessionId: string; requestCount: number; lastSeen: number }[];
+}
+
+export interface MetricsSummaryDelta {
+  totalRequests?: number;
+  totalInputTokens?: number;
+  totalOutputTokens?: number;
+  avgTokensPerSec?: number;
+  totalCacheReadTokens?: number;
+  totalCacheCreationTokens?: number;
+  avgCacheHitRate?: number;
+  uptimeSeconds?: number;
+  activeModels?: MetricsSummary["activeModels"];
+  providerDistribution?: MetricsSummary["providerDistribution"];
+  modelStats?: ModelPerformanceStats[];
+  recentRequests?: RequestMetrics[];  // Only new entries since last delta
 }
 
 export type StreamState = "start" | "ttfb" | "streaming" | "fallback" | "complete" | "error";

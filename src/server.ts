@@ -81,7 +81,7 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
  * For non-streaming JSON responses, uses a bounded sliding-window regex scan.
  */
 function createMetricsTransform(
-  ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race" },
+  ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race"; sessionId?: string },
   provider: string,
   targetProvider: string,
   metricsStore: MetricsStore,
@@ -225,6 +225,7 @@ function createMetricsTransform(
         fallbackMode: ctx.fallbackMode,
         cacheReadTokens: cacheRead,
         cacheCreationTokens: cacheCreation,
+        sessionId: ctx.sessionId,
       });
 
       // Broadcast completion event
@@ -353,6 +354,7 @@ export interface AppHandle {
   getConfig: () => AppConfig;
   setConfig: (config: AppConfig) => Promise<void>;
   closeAgents: () => Promise<void>;
+  getInFlightCount: () => number;
 }
 
 function agentKey(provider: ProviderConfig): string {
@@ -435,6 +437,10 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         requestId
       );
     }
+
+    // Extract session ID from request headers
+    const sessionId = c.req.header("x-session-id") || c.req.header("x-claude-code-session-id");
+    if (sessionId) ctx.sessionId = sessionId;
 
     logger.info("Routing request", {
       requestId,
