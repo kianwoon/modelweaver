@@ -937,6 +937,7 @@ async function hedgedForwardRequest(
       if (winner.response.status >= 200 && winner.response.status < 300) {
         latencyTracker.record(provider.name, Date.now() - start);
         recordHedgeWin(provider.name);
+        // Record losses for copies that didn't win
         const loserCount = wrapped.length - 1;
         if (loserCount > 0) recordHedgeLosses(provider.name, loserCount);
         // Abort all in-flight hedge copies — triggers onExternalAbort in each

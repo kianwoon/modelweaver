@@ -8,11 +8,12 @@ import { randomUUID } from "node:crypto";
 import { gzip } from "node:zlib";
 import { promisify } from "node:util";
 
-const gzipAsync = promisify(gzip);
 import type { MetricsStore } from "./metrics.js";
 import { latencyTracker, inFlightCounter, getHedgeStats } from "./hedging.js";
 import { broadcastStreamEvent } from "./ws.js";
 import type { StreamEvent } from "./types.js";
+
+const gzipAsync = promisify(gzip);
 
 const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'claude-opus-4-6': 200000,
