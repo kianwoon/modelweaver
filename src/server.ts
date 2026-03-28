@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 
 const gzipAsync = promisify(gzip);
 import type { MetricsStore } from "./metrics.js";
+import { latencyTracker, inFlightCounter, getHedgeStats } from "./hedging.js";
 import { broadcastStreamEvent } from "./ws.js";
 import type { StreamEvent } from "./types.js";
 
@@ -610,6 +611,33 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       }
     }
     return c.json(status);
+  });
+
+  // Hedging observability: per-provider CV, latency stats, and hedge win/loss counts
+  app.get("/api/hedging/stats", (c) => {
+    const stats: Record<string, {
+      sampleCount: number;
+      meanLatencyMs: number;
+      cv: number;
+      inFlight: number;
+      maxConcurrent: number;
+      hedgeWins: number;
+      hedgeLosses: number;
+    }> = {};
+    for (const [name, provider] of config.providers) {
+      const ls = latencyTracker.getStats(name);
+      const hs = getHedgeStats(name);
+      stats[name] = {
+        sampleCount: ls.count,
+        meanLatencyMs: ls.mean,
+        cv: ls.cv,
+        inFlight: inFlightCounter.get(name),
+        maxConcurrent: provider.concurrentLimit ?? 1,
+        hedgeWins: hs.hedgeWins,
+        hedgeLosses: hs.hedgeLosses,
+      };
+    }
+    return c.json(stats);
   });
 
   let inFlightCount = 0;

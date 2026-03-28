@@ -5,7 +5,7 @@ import { PassThrough } from "node:stream";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { latencyTracker, inFlightCounter, computeHedgingCount } from './hedging.js';
+import { latencyTracker, inFlightCounter, computeHedgingCount, recordHedgeWin, recordHedgeLosses } from './hedging.js';
 import { broadcastStreamEvent } from './ws.js';
 
 /**
@@ -75,7 +75,7 @@ function providerFailedErr(providerName: string): Response {
 }
 
 /** Delay (ms) before starting backup providers in staggered race */
-const SPECULATIVE_DELAY = 3000;
+const SPECULATIVE_DELAY = 2000;
 
 export function isRetriable(status: number): boolean {
   return status === 429 || status >= 500;
@@ -936,6 +936,9 @@ async function hedgedForwardRequest(
 
       if (winner.response.status >= 200 && winner.response.status < 300) {
         latencyTracker.record(provider.name, Date.now() - start);
+        recordHedgeWin(provider.name);
+        const loserCount = wrapped.length - 1;
+        if (loserCount > 0) recordHedgeLosses(provider.name, loserCount);
         // Abort all in-flight hedge copies — triggers onExternalAbort in each
         // which properly destroys their PassThrough streams and clears stall timers
         hedgeController.abort();
