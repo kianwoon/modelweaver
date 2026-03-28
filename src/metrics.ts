@@ -32,6 +32,10 @@ export class MetricsStore {
   private _providerMap = new Map<string, number>();
   private _sessionMap = new Map<string, { count: number; lastSeen: number }>();
 
+  // Lazy cache for getModelStats() — invalidated on every recordRequest()
+  private _modelStatsDirty = true;
+  private _cachedModelStats: ModelPerformanceStats[] = [];
+
   constructor(maxSize: number = 1000) {
     this.buffer = new Array(maxSize).fill(null);
     this.maxSize = maxSize;
@@ -139,6 +143,9 @@ export class MetricsStore {
         // Swallow subscriber errors — recording must not break
       }
     }
+
+    // Invalidate modelStats cache since buffer changed
+    this._modelStatsDirty = true;
   }
 
   getSummary(): MetricsSummary {
@@ -192,6 +199,7 @@ export class MetricsStore {
   }
 
   private getModelStats(): ModelPerformanceStats[] {
+    if (!this._modelStatsDirty) return this._cachedModelStats;
     if (this.count === 0) return [];
 
     // Group entries by actualModel || model
@@ -279,7 +287,10 @@ export class MetricsStore {
 
     // Sort by count descending
     stats.sort((a, b) => b.count - a.count);
-    return stats;
+
+    this._modelStatsDirty = false;
+    this._cachedModelStats = stats;
+    return this._cachedModelStats;
   }
 
   private getRecentRequests(): RequestMetrics[] {
