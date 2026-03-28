@@ -33,8 +33,9 @@ export class LatencyTracker {
       this.samples.set(provider, window);
     }
     window.push({ ttfbMs, timestamp: Date.now() });
-    if (window.length > this.maxSize) {
-      window.splice(0, window.length - this.maxSize);
+    const excess = window.length - this.maxSize;
+    if (excess > 0) {
+      window.splice(0, excess);
     }
   }
 
@@ -42,19 +43,33 @@ export class LatencyTracker {
   getCV(provider: string): number {
     const window = this.samples.get(provider);
     if (!window || window.length < 5) return 0;
-    const values = window.map(s => s.ttfbMs);
-    const mean = values.reduce((a, b) => a + b, 0) / values.length;
+    let sum = 0;
+    let sumSq = 0;
+    for (let i = 0; i < window.length; i++) {
+      sum += window[i].ttfbMs;
+      sumSq += window[i].ttfbMs * window[i].ttfbMs;
+    }
+    const mean = sum / window.length;
     if (mean === 0) return 0;
-    const variance = values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
-    return Math.sqrt(variance) / mean;
+    const variance = sumSq / window.length - mean * mean;
+    return Math.sqrt(Math.max(0, variance)) / mean;
   }
 
   getStats(provider: string): { count: number; mean: number; cv: number } {
     const window = this.samples.get(provider);
     if (!window || window.length === 0) return { count: 0, mean: 0, cv: 0 };
-    const values = window.map(s => s.ttfbMs);
-    const mean = values.reduce((a, b) => a + b, 0) / values.length;
-    return { count: values.length, mean: Math.round(mean), cv: Math.round(this.getCV(provider) * 100) / 100 };
+    let sum = 0;
+    for (let i = 0; i < window.length; i++) sum += window[i].ttfbMs;
+    const mean = sum / window.length;
+    // Inline CV without calling getCV (avoids second loop)
+    if (window.length < 5) {
+      return { count: window.length, mean: Math.round(mean), cv: 0 };
+    }
+    let sumSq = 0;
+    for (let i = 0; i < window.length; i++) sumSq += window[i].ttfbMs * window[i].ttfbMs;
+    const variance = sumSq / window.length - mean * mean;
+    const cv = mean > 0 ? Math.sqrt(Math.max(0, variance)) / mean : 0;
+    return { count: window.length, mean: Math.round(mean), cv: Math.round(cv * 100) / 100 };
   }
 
   clear(provider: string): void {
@@ -142,4 +157,10 @@ export function getHedgeStats(provider: string): { hedgeWins: number; hedgeLosse
     hedgeWins: hedgeWins.get(provider) ?? 0,
     hedgeLosses: hedgeLosses.get(provider) ?? 0,
   };
+}
+
+/** Clear all hedge win/loss stats. Called on config hot-reload. */
+export function clearHedgeStats(): void {
+  hedgeWins.clear();
+  hedgeLosses.clear();
 }

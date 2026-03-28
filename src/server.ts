@@ -25,10 +25,14 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'glm-5-turbo': 128000,
 };
 
+// Pre-built prefix lookup sorted longest-first for correct specificity
+const CONTEXT_WINDOW_PREFIXES: [string, number][] = Object.entries(MODEL_CONTEXT_WINDOWS)
+  .sort((a, b) => b[0].length - a[0].length);
+
 function getContextWindow(model: string): number {
-  // Exact match first, then prefix match
+  // Exact match first, then prefix match (longest prefix first)
   if (MODEL_CONTEXT_WINDOWS[model]) return MODEL_CONTEXT_WINDOWS[model];
-  for (const [key, size] of Object.entries(MODEL_CONTEXT_WINDOWS)) {
+  for (const [key, size] of CONTEXT_WINDOW_PREFIXES) {
     if (model.startsWith(key)) return size;
   }
   return 0;

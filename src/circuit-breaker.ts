@@ -115,6 +115,12 @@ export class CircuitBreaker {
 
   private pruneOldFailures(now: number): void {
     const cutoff = now - this.config.windowSeconds * 1000;
-    this.failureTimestamps = this.failureTimestamps.filter((t) => t >= cutoff);
+    let writeIdx = 0;
+    for (let i = 0; i < this.failureTimestamps.length; i++) {
+      if (this.failureTimestamps[i] >= cutoff) {
+        this.failureTimestamps[writeIdx++] = this.failureTimestamps[i];
+      }
+    }
+    this.failureTimestamps.length = writeIdx;
   }
 }

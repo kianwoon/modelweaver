@@ -40,9 +40,33 @@ const MAX_TOKENS_REGEX = /"max_tokens"\s*:\s*(\d+)/;
 /** Module-level TextEncoder — avoids per-request allocation */
 const textEncoder = new TextEncoder();
 
+/** Module-level Set of headers to forward from incoming requests */
+const KNOWN_FORWARD_HEADERS = new Set([
+  "anthropic-version",
+  "anthropic-beta",
+  "content-type",
+  "accept",
+]);
+
+/** Pre-built regex combinations for targeted body replacements */
+const REPLACEMENT_REGEX_MODEL = new RegExp(MODEL_KEY_REGEX.source, "g");
+const REPLACEMENT_REGEX_MAX_TOKENS = new RegExp(MAX_TOKENS_REGEX.source, "g");
+const REPLACEMENT_REGEX_BOTH = new RegExp(MODEL_KEY_REGEX.source + "|" + MAX_TOKENS_REGEX.source, "g");
+
 // --- Pre-built error response helpers ---
 
 const ERR_HEADERS = Object.freeze({ "content-type": "application/json" });
+
+function makeErrorResponse(status: number, type: string, message: string): Response {
+  const body = JSON.stringify({ type: "error", error: { type, message } });
+  return new Response(body, {
+    status,
+    headers: {
+      "content-type": "application/json",
+      "content-length": textEncoder.encode(body).byteLength.toString(),
+    },
+  });
+}
 
 function unknownProviderErr(providerName: string): Response {
   const body = JSON.stringify({
@@ -181,15 +205,9 @@ export function buildOutboundHeaders(
   const headers = new Headers();
 
   // Forward known headers and all x-* custom headers
-  const knownForward = new Set([
-    "anthropic-version",
-    "anthropic-beta",
-    "content-type",
-    "accept",
-  ]);
   for (const [name, value] of incomingHeaders.entries()) {
     const lower = name.toLowerCase();
-    if (knownForward.has(lower) || lower.startsWith("x-")) {
+    if (KNOWN_FORWARD_HEADERS.has(lower) || lower.startsWith("x-")) {
       headers.set(name, value);
     }
   }
@@ -369,11 +387,12 @@ function applyTargetedReplacements(
     return JSON.stringify(mutable);
   }
 
-  // Build combined regex for single-pass replacement
-  const patterns: string[] = [];
-  if (needsModel) patterns.push(MODEL_KEY_REGEX.source);
-  if (needsMaxTokensClamp) patterns.push(MAX_TOKENS_REGEX.source);
-  const combinedRegex = new RegExp(patterns.join("|"), "g");
+  // Use pre-built regex for single-pass replacement
+  const combinedRegex = needsModel && needsMaxTokensClamp
+    ? REPLACEMENT_REGEX_BOTH
+    : needsModel
+      ? REPLACEMENT_REGEX_MODEL
+      : REPLACEMENT_REGEX_MAX_TOKENS;
 
   // Capture values for the replacer (avoid repeated property access)
   const modelRepl = needsModel ? `"model":"${entry.model}"` : null;
@@ -536,17 +555,7 @@ export async function forwardRequest(
       // Already aborted — don't even start the request
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
-      const errBody = JSON.stringify({
-          type: "error",
-          error: { type: "overloaded_error", message: `Provider "${provider.name}" cancelled by race winner` },
-        });
-      return new Response(errBody, {
-        status: 502,
-        headers: {
-          "content-type": "application/json",
-          "content-length": textEncoder.encode(errBody).byteLength.toString(),
-        },
-      });
+      return makeErrorResponse(502, "overloaded_error", `Provider "${provider.name}" cancelled by race winner`);
     }
     // Increase max listeners to prevent Node.js warning when multiple providers race
     // and all listen to the same sharedController.signal
@@ -610,6 +619,18 @@ export async function forwardRequest(
       });
     }
 
+    // Non-standard upstream response (e.g., plain text/buffer) — send as-is without stall detection.
+    // Check this BEFORE creating passThrough so we avoid the allocation when not needed.
+    if (!undiciResponse.body || typeof undiciResponse.body.pipe !== 'function') {
+      const fallback = undiciResponse.body
+        ? new ReadableStream({ start(controller) { controller.enqueue(textEncoder.encode(String(undiciResponse.body))); controller.close(); } })
+        : new ReadableStream({ start(controller) { controller.close(); } });
+      return new Response(fallback, {
+        status: undiciResponse.statusCode,
+        headers: undiciResponse.headers as unknown as HeadersInit,
+      });
+    }
+
     // Body stall detection: pipe through PassThrough to monitor for data without
     // interfering with undici's internal stream state (no flowing mode conflict).
     // Uses a single interval that checks a timestamp instead of per-chunk setTimeout/clearTimeout,
@@ -656,18 +677,6 @@ export async function forwardRequest(
     });
 
     // Pipe undici body → PassThrough. Data flows through without mode conflicts.
-    if (!undiciResponse.body || typeof undiciResponse.body.pipe !== 'function') {
-      // Non-standard upstream response (e.g., plain text/buffer) — send as-is
-      const fallback = undiciResponse.body
-        ? new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(String(undiciResponse.body))); controller.close(); } })
-        : new ReadableStream({ start(controller) { controller.close(); } });
-      passThrough.end();
-      if (stallTimerRef) clearInterval(stallTimerRef);
-      return new Response(fallback, {
-        status: undiciResponse.statusCode,
-        headers: undiciResponse.headers as unknown as HeadersInit,
-      });
-    }
     undiciResponse.body.pipe(passThrough);
 
     // Wrap in a ReadableStream to catch undici's internal double-close bug.
@@ -711,17 +720,7 @@ export async function forwardRequest(
         ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
         : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
 
-    const body = JSON.stringify({
-        type: "error",
-        error: { type: "overloaded_error", message },
-      });
-    return new Response(body, {
-      status: 502,
-      headers: {
-        "content-type": "application/json",
-        "content-length": textEncoder.encode(body).byteLength.toString(),
-      },
-    });
+    return makeErrorResponse(502, "overloaded_error", message);
   } finally {
     removeAbortListener?.();
   }
@@ -783,15 +782,14 @@ async function raceProviders(
     while (completed.size < races.length) {
       const pending = races.filter(r => !completed.has(r));
       if (pending.length === 0) break;
-
       const winner = await Promise.race(pending);
       completed.add(races[winner.index]);
 
       if (winner.response.status >= 200 && winner.response.status < 300) {
         // Drain/cancel in-flight loser response bodies BEFORE aborting shared controller
         // to prevent leaked stream chunks from mid-write cancellation.
-        for (const r of pending) {
-          if (r !== races[winner.index]) {
+        for (const r of races) {
+          if (r !== races[winner.index] && !completed.has(r)) {
             r.then(({ response }) => {
               if (response.body) {
                 try { response.body.cancel(); } catch { /* already consumed */ }
@@ -838,24 +836,10 @@ async function raceProviders(
       return failures[0].response;
     }
 
-    const errBody = JSON.stringify({
-        type: "error",
-        error: { type: "overloaded_error", message: "All providers in race failed" },
-      });
-    return new Response(errBody, {
-      status: 502,
-      headers: { "content-type": "application/json" },
-    });
+    return makeErrorResponse(502, "overloaded_error", "All providers in race failed");
   } catch {
     sharedController.abort();
-    const errBody = JSON.stringify({
-        type: "error",
-        error: { type: "overloaded_error", message: "All providers in race failed" },
-      });
-    return new Response(errBody, {
-      status: 502,
-      headers: { "content-type": "application/json" },
-    });
+    return makeErrorResponse(502, "overloaded_error", "All providers in race failed");
   }
 }
 
@@ -925,7 +909,6 @@ async function hedgedForwardRequest(
     while (completed.size < wrapped.length) {
       const pending = wrapped.filter((_, i) => !completed.has(i));
       if (pending.length === 0) break;
-
       const winner = await Promise.race(pending);
       completed.add(winner.hedgeIndex);
 
@@ -943,11 +926,13 @@ async function hedgedForwardRequest(
         // Abort all in-flight hedge copies — triggers onExternalAbort in each
         // which properly destroys their PassThrough streams and clears stall timers
         hedgeController.abort();
-        // Cancel remaining — record 502 for each cancelled copy
+        // Cancel remaining — record actual status for each cancelled copy
         for (let i = 0; i < wrapped.length; i++) {
           if (!completed.has(i)) {
-            if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502);
-            wrapped[i].then(r => { try { r.response.body?.cancel(); } catch {} });
+            wrapped[i].then(r => {
+              if (provider._circuitBreaker) provider._circuitBreaker.recordResult(r.response.status);
+              try { r.response.body?.cancel(); } catch {}
+            });
           }
         }
         for (const f of failures) { try { f.body?.cancel(); } catch {} }
@@ -960,17 +945,11 @@ async function hedgedForwardRequest(
     // All hedged copies returned errors — cancel bodies, return first failure
     hedgeController.abort();
     for (const f of failures) { try { f.body?.cancel(); } catch {} }
-    return failures[0] ?? new Response(
-      JSON.stringify({ type: "error", error: { type: "api_error", message: `Provider "${provider.name}" all hedged requests failed` } }),
-      { status: 502, headers: { "content-type": "application/json" } }
-    );
+    return failures[0] ?? makeErrorResponse(502, "api_error", `Provider "${provider.name}" all hedged requests failed`);
   } catch {
     hedgeController.abort();
     for (const f of failures) { try { f.body?.cancel(); } catch {} }
-    return failures[0] ?? new Response(
-      JSON.stringify({ type: "error", error: { type: "api_error", message: `Provider "${provider.name}" hedging failed` } }),
-      { status: 502, headers: { "content-type": "application/json" } }
-    );
+    return failures[0] ?? makeErrorResponse(502, "api_error", `Provider "${provider.name}" hedging failed`);
   }
 }
 
@@ -994,6 +973,15 @@ export async function forwardWithFallback(
   onAttempt?: (provider: string, index: number) => void,
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void }
 ): Promise<FallbackResult> {
+  // Guard: empty chain
+  if (chain.length === 0) {
+    return {
+      response: makeErrorResponse(502, "api_error", "Empty provider chain"),
+      actualModel: undefined,
+      actualProvider: undefined,
+    };
+  }
+
   // Single provider — no racing needed
   if (chain.length <= 1) {
     const entry = chain[0];
@@ -1104,13 +1092,7 @@ export async function forwardWithFallback(
 
     // All providers failed
     return {
-      response: new Response(JSON.stringify({
-        type: "error",
-        error: { type: "api_error", message: "All providers failed" },
-      }), {
-        status: 502,
-        headers: { "content-type": "application/json" },
-      }),
+      response: makeErrorResponse(502, "api_error", "All providers failed"),
       actualModel: chain[chain.length - 1]?.model,
       actualProvider: chain[chain.length - 1]?.provider,
     };
@@ -1159,18 +1141,8 @@ export async function forwardWithFallback(
       return { response, index };
     } catch {
       if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502, cbProbeId);
-      const errBody = JSON.stringify({
-        type: "error",
-        error: { type: "api_error", message: `Provider "${entry.provider}" failed` },
-      });
       return {
-        response: new Response(errBody, {
-          status: 502,
-          headers: {
-            "content-type": "application/json",
-            "content-length": textEncoder.encode(errBody).byteLength.toString(),
-          },
-        }),
+        response: makeErrorResponse(502, "api_error", `Provider "${entry.provider}" failed`),
         index,
       };
     }
@@ -1190,15 +1162,8 @@ export async function forwardWithFallback(
           setTimeout(() => {
             if (sharedController.signal.aborted) {
               // Race already won — resolve with a cancelled placeholder
-              const errBody = JSON.stringify({
-                type: "error",
-                error: { type: "api_error", message: "Cancelled by race winner" },
-              });
               resolve({
-                response: new Response(errBody, {
-                  status: 502,
-                  headers: { "content-type": "application/json" },
-                }),
+                response: makeErrorResponse(502, "api_error", "Cancelled by race winner"),
                 index: i,
               });
               return;
@@ -1215,7 +1180,6 @@ export async function forwardWithFallback(
     while (completed.size < races.length) {
       const pending = races.filter((_, idx) => !completed.has(idx));
       if (pending.length === 0) break;
-
       const winner = await Promise.race(pending);
       completed.add(winner.index);
 
@@ -1266,34 +1230,14 @@ export async function forwardWithFallback(
       return { response: failures[0].response, actualModel: failedEntry?.model, actualProvider: failedEntry?.provider };
     }
 
-    const errBody = JSON.stringify({
-      type: "error",
-      error: { type: "overloaded_error", message: "All providers failed" },
-    });
     return {
-      response: new Response(errBody, {
-        status: 502,
-        headers: {
-          "content-type": "application/json",
-          "content-length": textEncoder.encode(errBody).byteLength.toString(),
-        },
-      }),
+      response: makeErrorResponse(502, "overloaded_error", "All providers failed"),
       actualModel: undefined,
     };
   } catch {
     sharedController.abort();
-    const errBody = JSON.stringify({
-      type: "error",
-      error: { type: "overloaded_error", message: "All providers failed" },
-    });
     return {
-      response: new Response(errBody, {
-        status: 502,
-        headers: {
-          "content-type": "application/json",
-          "content-length": textEncoder.encode(errBody).byteLength.toString(),
-        },
-      }),
+      response: makeErrorResponse(502, "overloaded_error", "All providers failed"),
       actualModel: undefined,
     };
   }

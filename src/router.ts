@@ -64,9 +64,10 @@ export function selectByWeight(
     return entries;
   }
 
-  // Filter out circuit-opened providers
+  // Filter out circuit-opened providers (O(1) Set lookup vs O(n) array includes)
+  const openSet = new Set(openCircuitProviders);
   const available = entries.filter(
-    e => !openCircuitProviders.includes(e.provider)
+    e => !openSet.has(e.provider)
   );
 
   // If all providers are circuit-opened, return original chain
