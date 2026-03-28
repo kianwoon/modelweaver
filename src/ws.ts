@@ -1,5 +1,5 @@
 // src/ws.ts
-import { WebSocketServer } from "ws";
+import { WebSocketServer, type WebSocket } from "ws";
 import type { Server } from "node:http";
 import type { MetricsStore } from "./metrics.js";
 import type { RequestMetrics, MetricsSummary, MetricsSummaryDelta, StreamEvent } from "./types.js";
@@ -16,13 +16,13 @@ const SUMMARY_DEBOUNCE_MS = 500;
 const STREAM_WS_THROTTLE_MS = 500; // caps stream event delivery to ~2 Hz per client
 const BACKPRESSURE_LOG_INTERVAL_MS = 10_000; // throttle backpressure warnings to once per 10s
 const MAX_DRAIN_QUEUE = 100; // cap queue size per client to prevent unbounded growth
-const clientStreamThrottle = new Map<any, number>();
+const clientStreamThrottle = new Map<WebSocket, number>();
 
 interface PendingDrain {
   timer: ReturnType<typeof setTimeout>;
   queue: string[];
 }
-const pendingDrains = new Map<any, PendingDrain>();
+const pendingDrains = new Map<WebSocket, PendingDrain>();
 const lastSummarySent = new WeakMap<any, MetricsSummary>();
 
 function computeSummaryDelta(prev: MetricsSummary, next: MetricsSummary): MetricsSummaryDelta | null {
@@ -44,8 +44,15 @@ function computeSummaryDelta(prev: MetricsSummary, next: MetricsSummary): Metric
   delta.modelStats = next.modelStats;
 
   // recentRequests: only send new ones not in prev
-  const prevIds = new Set(prev.recentRequests.map(r => r.requestId));
-  const newRequests = next.recentRequests.filter(r => !prevIds.has(r.requestId));
+  // Fast path: skip Set allocation when no new requests arrived
+  let newRequests: typeof next.recentRequests;
+  if (next.recentRequests.length === prev.recentRequests.length &&
+      next.recentRequests[0]?.requestId === prev.recentRequests[0]?.requestId) {
+    newRequests = [];
+  } else {
+    const prevIds = new Set(prev.recentRequests.map(r => r.requestId));
+    newRequests = next.recentRequests.filter(r => !prevIds.has(r.requestId));
+  }
   if (newRequests.length > 0) { delta.recentRequests = newRequests; changed = true; }
 
   // sessionStats: only include if changed
