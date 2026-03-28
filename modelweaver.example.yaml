@@ -2,6 +2,12 @@
 # Run 'npx modelweaver init' to auto-configure this file AND
 # ~/.claude/settings.json for seamless Claude Code integration.
 
+# Hedging and timing configuration
+hedging:
+  speculativeDelay: 1000   # ms before starting backup providers (lower = faster fallback)
+  cvThreshold: 0.5         # latency variance threshold for multi-copy hedging
+  maxHedge: 4              # max concurrent copies per request
+
 server:
   port: 3456
   host: localhost
