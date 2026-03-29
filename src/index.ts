@@ -21,7 +21,7 @@ function setupGlobalExceptionHandlers(log: {
   error: (msg: string, meta?: Record<string, string>) => void;
 }): void {
   process.on('uncaughtException', (err) => {
-    log.error('Uncaught exception (process survived)', { error: err.message, stack: err.stack });
+    log.error('Uncaught exception (process survived)', { error: err.message, stack: err.stack ?? '' });
   });
   process.on('unhandledRejection', (reason) => {
     log.error('Unhandled rejection (process survived)', { reason: String(reason) });
