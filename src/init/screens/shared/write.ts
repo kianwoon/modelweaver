@@ -118,13 +118,12 @@ export function writeEnvFile(state: WizardState, envDir: string): void {
  */
 export function writeStateToFiles(state: WizardState): void {
   const configDir = join(homedir(), ".modelweaver");
-  let changed = false;
+  const messages: string[] = [];
 
   try {
     // Create directory if it doesn't exist
     if (!existsSync(configDir)) {
       mkdirSync(configDir, { recursive: true });
-      changed = true;
     }
 
     // Write config.yaml — backup existing, skip if content unchanged
@@ -137,11 +136,13 @@ export function writeStateToFiles(state: WizardState): void {
         const backupPath = yamlPath + ".bak";
         writeFileSync(backupPath, currentYaml, "utf-8");
         writeFileSync(yamlPath, yamlContent, "utf-8");
-        changed = true;
+        messages.push("Updated config.yaml");
+      } else {
+        messages.push("No changes to config.yaml");
       }
     } else {
       writeFileSync(yamlPath, yamlContent, "utf-8");
-      changed = true;
+      messages.push("Created config.yaml");
     }
 
     // Write .env — skip if content unchanged
@@ -150,12 +151,13 @@ export function writeStateToFiles(state: WizardState): void {
     writeEnvFile(state, configDir);
     const envAfter = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
     if (envAfter !== envBefore) {
-      changed = true;
+      messages.push("Updated .env");
+    } else {
+      messages.push("No changes to .env");
     }
 
-    if (!changed) {
-      process.stdout.write("\nNo changes detected\n");
-    }
+    // Print summary
+    process.stdout.write(`\n${messages.join("\n")}\n`);
   } catch (err: unknown) {
     const code = err instanceof Error && "code" in err ? (err as NodeJS.ErrnoException).code : undefined;
     const hint = code === "ENOSPC"
