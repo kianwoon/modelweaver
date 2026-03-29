@@ -187,6 +187,7 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
       clearInterval(pingTimer);
       if (pendingSummaryTimer) clearTimeout(pendingSummaryTimer);
       lastSummarySent.delete(ws);
+      clientStreamThrottle.delete(ws);
       const pending = pendingDrains.get(ws);
       if (pending) {
         clearTimeout(pending.timer);

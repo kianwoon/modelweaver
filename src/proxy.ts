@@ -125,7 +125,10 @@ function providerFailedErr(providerName: string): Response {
     type: "error",
     error: { type: "api_error", message: `Provider "${providerName}" failed` },
   });
-  return new Response(body, { status: 502, headers: ERR_HEADERS });
+  return new Response(body, {
+    status: 502,
+    headers: { ...ERR_HEADERS, "content-length": String(textEncoder.encode(body).byteLength) },
+  });
 }
 
 /** Default delay (ms) before starting backup providers in staggered race */

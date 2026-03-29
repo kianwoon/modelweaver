@@ -9,7 +9,7 @@ import { gzip } from "node:zlib";
 import { promisify } from "node:util";
 
 import type { MetricsStore } from "./metrics.js";
-import { latencyTracker, inFlightCounter, getHedgeStats } from "./hedging.js";
+import { latencyTracker, inFlightCounter, getHedgeStats, clearHedgeStats } from "./hedging.js";
 import { broadcastStreamEvent } from "./ws.js";
 import type { StreamEvent } from "./types.js";
 
@@ -687,6 +687,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
 
       config = newConfig;
       clearRoutingCache();
+      clearHedgeStats();
       await Promise.all(closePromises);
     },
     closeAgents: async () => {
