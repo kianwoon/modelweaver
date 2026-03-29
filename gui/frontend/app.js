@@ -28,6 +28,9 @@ const activeRequests = new Map();
 const MAX_VISIBLE_BARS = 3;
 const STALE_BAR_TIMEOUT_MS = 120_000; // 2 minutes
 
+// Glow state — counter-based so concurrent requests don't fight
+let glowActiveCount = 0;
+
 // Title bar buttons
 document.getElementById('btn-close').addEventListener('click', () => {
   if (window.__TAURI__) {
@@ -515,6 +518,23 @@ function removeActivityBar(requestId) {
   }
 }
 
+// --- Glow helpers ---
+function activateGlow() {
+  if (glowActiveCount === 0) {
+    document.getElementById('app').classList.add('glow-active');
+  }
+  glowActiveCount++;
+}
+
+function deactivateGlow() {
+  glowActiveCount = Math.max(0, glowActiveCount - 1);
+  if (glowActiveCount === 0) {
+    const app = document.getElementById('app');
+    // Fade out — CSS transition handles opacity
+    app.classList.remove('glow-active');
+  }
+}
+
 // rAF batching state for streaming events — prevents layout thrash at ~60 mutations/sec
 const pendingStreamUpdates = new Map();
 let rafScheduled = false;
@@ -614,6 +634,7 @@ function resetStaleTimer(entry) {
 
 function handleStreamEvent(data) {
   if (data.state === 'start') {
+    activateGlow();
     // Guard: don't create duplicate bars for the same request
     if (activeRequests.has(data.requestId)) return;
     const bar = createActivityBar(data.requestId, data.model, data.tier);
@@ -676,6 +697,7 @@ function handleStreamEvent(data) {
     if (data.cacheHitRate != null && data.cacheHitRate > 0) finalMeta += ' \u00b7 ' + data.cacheHitRate.toFixed(0) + '% cache';
     if (data.contextPercent != null && data.contextPercent > 0) finalMeta += ' \u00b7 ' + data.contextPercent.toFixed(0) + '% ctx';
     entry.statusSpan.textContent = finalMeta;
+    deactivateGlow();
     // Dismiss track immediately so it fades together with the fill
     setTimeout(() => {
       entry.element.classList.add('dismissing');
@@ -697,6 +719,7 @@ function handleStreamEvent(data) {
       entry.fill.style.width = '10%';
     }
     entry.statusSpan.textContent = 'error ' + (data.status || '');
+    deactivateGlow();
     // Dismiss track immediately so it fades together with the fill
     setTimeout(() => {
       entry.element.classList.add('dismissing');
