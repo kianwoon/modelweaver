@@ -29,6 +29,15 @@ export function recordProviderLatency(providerName: string, latencyMs: number): 
   }
 }
 
+export function pruneProviderLatencySamples(activeProviders: string[]): void {
+  const active = new Set(activeProviders);
+  for (const name of providerLatencySamples.keys()) {
+    if (!active.has(name)) {
+      providerLatencySamples.delete(name);
+    }
+  }
+}
+
 /**
  * Shallow-clone a parsed API request body just enough so that
  * cleanOrphanedToolMessages() can safely reassign body.messages
