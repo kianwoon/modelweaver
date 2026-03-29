@@ -20,9 +20,9 @@ const providerSchema = z.object({
     "baseUrl must use http:// or https://"
   ),
   apiKey: z.string().min(1, "apiKey is required"),
-  timeout: z.number().positive().default(30000),
-  ttfbTimeout: z.number().positive().default(15000),
-  stallTimeout: z.number().positive().default(30000),
+  timeout: z.number().positive().default(20000),
+  ttfbTimeout: z.number().positive().default(8000),
+  stallTimeout: z.number().positive().default(15000),
   authType: z.enum(["anthropic", "bearer"]).default("anthropic"),
   modelLimits: modelLimitsSchema,
   concurrentLimit: z.number().int().min(1).optional(),
@@ -42,7 +42,7 @@ const routingEntrySchema = z.object({
 
 const hedgingSchema = z.object({
   /** Delay (ms) before starting backup providers in staggered race */
-  speculativeDelay: z.number().int().positive().default(1000),
+  speculativeDelay: z.number().int().positive().default(500),
   /** Coefficient of variation threshold — hedging activates when CV >= this */
   cvThreshold: z.number().min(0).max(10).default(0.5),
   /** Maximum number of hedged copies per request */

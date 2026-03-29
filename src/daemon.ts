@@ -2,8 +2,7 @@
 import { spawn, execFile, execFileSync } from "node:child_process";
 import { access, readFile, writeFile, unlink, mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolveEntryScript } from "./entry-path.js";
 import { createServer } from "node:net";
 
 function isWindows(): boolean {
@@ -319,10 +318,7 @@ export async function startDaemon(
   }
 
   // Resolve the entry script path
-  const __filename = fileURLToPath(import.meta.url);
-  const __dirname = dirname(__filename);
-  // Use dist/index.js (built output) — works with both npx and direct node
-  const entryScript = join(__dirname, "index.js");
+  const entryScript = resolveEntryScript();
 
   // Build args — spawn a monitor process; monitor spawns the actual daemon child
   const childArgs: string[] = [entryScript, "--monitor"];

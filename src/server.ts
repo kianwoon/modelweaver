@@ -1,7 +1,7 @@
 // src/server.ts
 import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
-import { forwardWithFallback, type FallbackResult } from "./proxy.js";
+import { forwardWithFallback, type FallbackResult, recordProviderLatency } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
 import type { AppConfig, ProviderConfig, RequestContext } from "./types.js";
 import { randomUUID } from "node:crypto";
@@ -235,6 +235,9 @@ function createMetricsTransform(
         cacheCreationTokens: cacheCreation,
         sessionId: ctx.sessionId,
       });
+
+      // Record per-provider latency for percentile logging
+      recordProviderLatency(provider, latencyMs);
 
       // Broadcast completion event
       const contextWindow = getContextWindow(ctx.actualModel || ctx.model);

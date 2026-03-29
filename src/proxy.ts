@@ -8,6 +8,27 @@ import os from "node:os";
 import { latencyTracker, inFlightCounter, computeHedgingCount, recordHedgeWin, recordHedgeLosses } from './hedging.js';
 import { broadcastStreamEvent } from './ws.js';
 
+// --- Per-provider latency metrics ---
+const providerLatencySamples: Map<string, number[]> = new Map();
+const LATENCY_SAMPLE_THRESHOLD = 100;
+
+export function recordProviderLatency(providerName: string, latencyMs: number): void {
+  let samples = providerLatencySamples.get(providerName);
+  if (!samples) {
+    samples = [];
+    providerLatencySamples.set(providerName, samples);
+  }
+  samples.push(latencyMs);
+  if (samples.length >= LATENCY_SAMPLE_THRESHOLD) {
+    samples.sort((a, b) => a - b);
+    const p50 = samples[Math.floor(samples.length * 0.5)];
+    const p95 = samples[Math.floor(samples.length * 0.95)];
+    const p99 = samples[Math.floor(samples.length * 0.99)];
+    console.log(`[metrics] ${providerName} latency (n=${samples.length}): P50=${p50}ms P95=${p95}ms P99=${p99}ms`);
+    samples.length = 0; // reset
+  }
+}
+
 /**
  * Shallow-clone a parsed API request body just enough so that
  * cleanOrphanedToolMessages() can safely reassign body.messages
@@ -533,7 +554,7 @@ export async function forwardRequest(
   const timeout = setTimeout(() => controller.abort(), provider.timeout);
 
   // TTFB timeout: fail if no response headers received within ttfbTimeout ms
-  const ttfbTimeout = provider.ttfbTimeout ?? 15000;
+  const ttfbTimeout = provider.ttfbTimeout ?? 8000;
   let ttfbTimedOut = false;
   let ttfbTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -635,13 +656,15 @@ export async function forwardRequest(
     // interfering with undici's internal stream state (no flowing mode conflict).
     // Uses a single interval that checks a timestamp instead of per-chunk setTimeout/clearTimeout,
     // reducing syscall-level overhead on every data event.
-    const stallTimeout = provider.stallTimeout ?? 30000;
+    const stallTimeout = provider.stallTimeout ?? 15000;
     passThrough = new PassThrough();
 
     const stallMsg = `Body stalled: no data after ${stallTimeout}ms`;
     let lastDataTime = Date.now();
 
     const handleStall = () => {
+      provider._circuitBreaker?.recordResult(502);
+      console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
       broadcastStreamEvent({
         requestId: ctx.requestId,
         model: String(ctx.actualModel ?? entry.model ?? ""),
@@ -660,7 +683,7 @@ export async function forwardRequest(
         stallTimerRef = undefined;
         handleStall();
       }
-    }, Math.min(stallTimeout / 4, 5000));
+    }, Math.min(stallTimeout / 8, 1000));
 
     // Monitor PassThrough for data events — just update timestamp (no timer churn)
     passThrough!.on("data", () => {
