@@ -43,6 +43,10 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 - **Adaptive fallback** — on 429 rate limits, automatically races remaining providers simultaneously instead of sequential fallback
 - **Connection pooling** — per-provider undici Agent dispatcher with configurable pool size, closes old agents on config reload
 - **Health endpoint** — `/api/status` returns circuit breaker state and uptime
+- **Adaptive request hedging** — sends multiple copies of requests when a provider shows high latency variance (CV > 0.5), returns the fastest response
+- **TTFB timeout** — fails slow providers before full timeout elapses (configurable per provider)
+- **Observability endpoints** — `/api/metrics/summary` (aggregated stats), `/api/circuit-breaker` (per-provider state), `/api/hedging/stats` (hedge win/loss)
+- **Weighted distribution** — route to multiple providers simultaneously with weight-based distribution
 - **Desktop GUI** — native app with one-command launch (`modelweaver gui`), auto-downloads from GitHub Releases
 
 ## Prerequisites
@@ -72,7 +76,7 @@ The wizard guides you through:
 - Selecting from 6 preset providers (Anthropic, OpenRouter, Together AI, GLM/Z.ai, Minimax, Fireworks)
 - Testing API keys to verify connectivity
 - Setting up model routing tiers
-- Auto-configuring `~/.claude/settings.json` for Claude Code integration
+- Creating `~/.modelweaver/config.yaml` and `~/.modelweaver/.env` for configuration
 
 ### 2. Start ModelWeaver
 
@@ -177,8 +181,13 @@ providers:
     baseUrl: https://api.anthropic.com
     apiKey: ${ANTHROPIC_API_KEY}  # Env var substitution
     timeout: 30000                # Request timeout in ms  (default: 30000)
+    ttfbTimeout: 15000            # TTFB timeout in ms (default: 15000)
     poolSize: 10                  # Connection pool size (default: varies by provider)
     authType: anthropic           # "anthropic" | "bearer"  (default: anthropic)
+    circuitBreaker:               # Per-provider circuit breaker
+      threshold: 5                # Failures before opening circuit (default: 5)
+      cooldown: 30000             # Cooldown before half-open (default: 30000ms)
+    concurrentLimit: 10           # Max concurrent requests (default: unlimited)
   openrouter:
     baseUrl: https://openrouter.ai/api
     apiKey: ${OPENROUTER_API_KEY}
@@ -217,8 +226,9 @@ modelRouting:
 ### Routing priority
 
 1. **Exact model name** (`modelRouting`) — if the request model matches exactly, use that route
-2. **Tier pattern** (`tierPatterns` + `routing`) — substring match the model name against patterns, then use the tier's provider chain
-3. **No match** — returns 502 with a descriptive error listing configured tiers and model routes
+2. **Weighted distribution** — if the model has `weight` entries, requests are distributed across providers proportionally
+3. **Tier pattern** (`tierPatterns` + `routing`) — substring match the model name against patterns, then use the tier's provider chain
+4. **No match** — returns 502 with a descriptive error listing configured tiers and model routes
 
 ### Provider chain behavior
 
@@ -247,7 +257,7 @@ Any OpenAI/Anthropic-compatible API works — just set `baseUrl` and `authType` 
 In daemon mode, ModelWeaver watches the config file for changes and reloads automatically (debounced 300ms). You can also send a manual reload signal:
 
 ```bash
-kill -SIGUSR1 $(cat ~/.modelweaver/modelweaver.pid)
+kill -SIGHUP $(cat ~/.modelweaver/modelweaver.pid)
 ```
 
 Or just re-run `npx @kianwoon/modelweaver init` — it automatically signals the running daemon to reload.
@@ -262,6 +272,19 @@ curl http://localhost:3456/api/status
 
 Returns circuit breaker state for all providers and server uptime.
 
+## Observability
+
+```bash
+# Aggregated request metrics (by model, provider, error type)
+curl http://localhost:3456/api/metrics/summary
+
+# Per-provider circuit breaker state
+curl http://localhost:3456/api/circuit-breaker
+
+# Hedging win/loss statistics
+curl http://localhost:3456/api/hedging/stats
+```
+
 ## How Claude Code Uses Model Tiers
 
 Claude Code sends different model names for different agent roles:
@@ -272,6 +295,8 @@ Claude Code sends different model names for different agent roles:
 | Explore (codebase search) | Haiku | `claude-haiku-4-5-20251001` |
 | Plan (analysis) | Sonnet | `claude-sonnet-4-20250514` |
 | Complex subagents | Opus | `claude-opus-4-20250514` |
+| GLM/Z.ai models | Exact routing | `glm-5-turbo` |
+| MiniMax models | Exact routing | `MiniMax-M2.7` |
 
 ModelWeaver uses the model name to determine which agent tier is calling, then routes accordingly.
 
@@ -279,7 +304,7 @@ ModelWeaver uses the model name to determine which agent tier is calling, then r
 
 ```bash
 npm install          # Install dependencies
-npm test             # Run tests (174 tests)
+npm test             # Run tests (205 tests)
 npm run build        # Build for production (tsup)
 npm run dev          # Run in dev mode (tsx)
 ```
