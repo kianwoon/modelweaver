@@ -11,7 +11,6 @@ import { promisify } from "node:util";
 import type { MetricsStore } from "./metrics.js";
 import { latencyTracker, inFlightCounter, getHedgeStats, clearHedgeStats } from "./hedging.js";
 import { broadcastStreamEvent } from "./ws.js";
-import type { StreamEvent } from "./types.js";
 
 const gzipAsync = promisify(gzip);
 

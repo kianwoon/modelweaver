@@ -675,8 +675,6 @@ export async function forwardRequest(
     let lastDataTime = Date.now();
 
     const handleStall = () => {
-      // Issue 2: Set stalled flag BEFORE any async operations to prevent race with late-arriving data
-      let stalled = true;
       provider._circuitBreaker?.recordResult(502);
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
       broadcastStreamEvent({
@@ -776,123 +774,6 @@ export async function forwardRequest(
     return makeErrorResponse(502, "overloaded_error", message);
   } finally {
     removeAbortListener?.();
-  }
-}
-
-/**
- * Race multiple providers simultaneously. Returns the first successful response.
- * Aborts all remaining requests once a winner is found.
- */
-async function raceProviders(
-  chain: RoutingEntry[],
-  providers: Map<string, ProviderConfig>,
-  ctx: RequestContext,
-  incomingRequest: Request,
-  onAttempt?: (provider: string, index: number) => void,
-  logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
-  chainOffset: number = 0,
-): Promise<Response> {
-  const sharedController = new AbortController();
-
-  const races = chain.map(async (entry, index): Promise<{ response: Response; index: number }> => {
-    const provider = providers.get(entry.provider);
-    if (!provider) {
-      return { response: unknownProviderErr(entry.provider), index };
-    }
-
-    // Check circuit breaker
-    let cbProbeId: number | undefined;
-    if (provider._circuitBreaker) {
-      const cb = provider._circuitBreaker.canProceed();
-      if (!cb.allowed) {
-        return { response: circuitBreakerErr(entry.provider), index };
-      }
-      cbProbeId = cb.probeId;
-    }
-
-    onAttempt?.(entry.provider, index);
-
-    try {
-      const response = await forwardRequest(provider, entry, ctx, incomingRequest, sharedController.signal, index + chainOffset);
-      // Record for circuit breaker
-      if (provider._circuitBreaker) {
-        provider._circuitBreaker.recordResult(response.status, cbProbeId);
-      }
-      return { response, index };
-    } catch {
-      if (provider._circuitBreaker) {
-        provider._circuitBreaker.recordResult(502, cbProbeId);
-      }
-      return { response: providerFailedErr(entry.provider), index };
-    }
-  });
-
-  // Track completed promises to avoid double-processing
-  const completed = new Set<Promise<{ response: Response; index: number }>>();
-  const failures: { response: Response; index: number }[] = [];
-
-  try {
-    while (completed.size < races.length) {
-      const pending = races.filter(r => !completed.has(r));
-      if (pending.length === 0) break;
-      const winner = await Promise.race(pending);
-      completed.add(races[winner.index]);
-
-      if (winner.response.status >= 200 && winner.response.status < 300) {
-        // Drain/cancel in-flight loser response bodies BEFORE aborting shared controller
-        // to prevent leaked stream chunks from mid-write cancellation.
-        for (const r of races) {
-          if (r !== races[winner.index] && !completed.has(r)) {
-            r.then(({ response }) => {
-              if (response.body) {
-                try { response.body.cancel(); } catch { /* already consumed */ }
-              }
-            }).catch(() => { /* aborted */ });
-          }
-        }
-        sharedController.abort();
-        // Cancel bodies of already-completed losing responses to free resources
-        for (const f of failures) {
-          try { f.response.body?.cancel(); } catch { /* ignore */ }
-        }
-        return winner.response;
-      }
-
-      // Non-retriable error — check for context window limit before propagating
-      if (!isRetriable(winner.response.status)) {
-        sharedController.abort();
-        if ((winner.response.status === 400 || winner.response.status === 413) && winner.response.body) {
-          try {
-            const errBody = await winner.response.text();
-            const handled = handleContextWindowError(winner.response.status, errBody);
-            if (handled) return handled;
-            // Not a context error — re-create response with buffered body
-            return new Response(errBody, {
-              status: winner.response.status,
-              statusText: winner.response.statusText,
-              headers: winner.response.headers,
-            });
-          } catch {
-            return winner.response;
-          }
-        }
-        return winner.response;
-      }
-
-      // Retriable but not success — record and continue waiting
-      failures.push(winner);
-    }
-
-    // All providers returned retriable errors — return the first failure
-    sharedController.abort();
-    if (failures.length > 0) {
-      return failures[0].response;
-    }
-
-    return makeErrorResponse(502, "overloaded_error", "All providers in race failed");
-  } catch {
-    sharedController.abort();
-    return makeErrorResponse(502, "overloaded_error", "All providers in race failed");
   }
 }
 
