@@ -1,9 +1,10 @@
-import { describe, it, expect, vi, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { getPresets, getPreset } from '../src/presets.js';
 import { testApiKey } from '../src/init.js';
 import { loadConfig } from '../src/config.js';
 import { join } from 'node:path';
-import { mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { writeFileSync, rmSync, mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 
 // ---------------------------------------------------------------------------
 // 1. Preset tests
@@ -139,10 +140,10 @@ describe('testApiKey', () => {
 // ---------------------------------------------------------------------------
 
 describe('wizard-generated YAML passes loadConfig validation', () => {
-  const tmpDir = join(process.cwd(), 'tests', '.tmp-init');
+  let tmpDir: string;
 
   beforeEach(() => {
-    mkdirSync(tmpDir, { recursive: true });
+    tmpDir = mkdtempSync(join(tmpdir(), 'mw-init-test-'));
   });
 
   afterEach(() => {
