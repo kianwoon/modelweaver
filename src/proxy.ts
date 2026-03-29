@@ -562,6 +562,7 @@ export async function forwardRequest(
   const ttfbPromise = new Promise<never>((_, reject) => {
     ttfbTimer = setTimeout(() => {
       ttfbTimedOut = true;
+      ttfbTimer = null; // null out so catch can detect TTFB fired vs pending
       controller.abort();
       reject(new Error(`TTFB timeout after ${ttfbTimeout}ms`));
     }, ttfbTimeout);
@@ -754,9 +755,16 @@ export async function forwardRequest(
     if (stallTimerRef) clearInterval(stallTimerRef);
 
     // Network errors / timeouts — return a synthetic 502
-    const message = ttfbTimedOut
+    // If TTFB timer was still pending when we hit an AbortError, it means the
+    // total timeout fired first but the TTFB timeout hadn't elapsed yet — this
+    // is a genuine total timeout, not a TTFB failure.  If the TTFB timer was
+    // already cleared (fired), treat it as a TTFB timeout regardless of which
+    // rejection won Promise.race.
+    const isAbort = error instanceof DOMException && error.name === "AbortError";
+    const isTTFB = ttfbTimedOut || (isAbort && ttfbTimer === null);
+    const message = isTTFB
       ? `Provider "${provider.name}" timed out waiting for first byte after ${ttfbTimeout}ms`
-      : error instanceof DOMException && error.name === "AbortError"
+      : isAbort
         ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
         : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
 
