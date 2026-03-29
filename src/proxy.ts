@@ -870,9 +870,14 @@ async function hedgedForwardRequest(
     hedgeController.abort();
     for (const f of failures) { try { f.body?.cancel(); } catch {} }
     return failures[0] ?? makeErrorResponse(502, "api_error", `Provider "${provider.name}" all hedged requests failed`);
-  } catch {
+  } catch (err) {
     hedgeController.abort();
     for (const f of failures) { try { f.body?.cancel(); } catch {} }
+    // If the error is an AbortError from hedge cancellation (winner found or chain cancelled),
+    // return 499 instead of 502 to avoid false circuit breaker trips
+    if (err instanceof Error && err.name === 'AbortError') {
+      return makeErrorResponse(499, "api_error", `Provider "${provider.name}" hedging aborted`);
+    }
     return failures[0] ?? makeErrorResponse(502, "api_error", `Provider "${provider.name}" hedging failed`);
   }
 }

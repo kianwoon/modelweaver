@@ -142,11 +142,10 @@ async function editChain(
 
         const toIdx = await promptSelect('Move to which position?', toChoices);
 
-        // Swap
-        const temp = entries[fromIdx];
-        entries[fromIdx] = entries[toIdx];
-        entries[toIdx] = temp;
-        check('Entries swapped.');
+        // Move
+        const [moved] = entries.splice(fromIdx, 1);
+        entries.splice(toIdx, 0, moved);
+        check('Entry moved.');
         break;
       }
 
