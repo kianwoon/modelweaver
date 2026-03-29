@@ -6,6 +6,7 @@ import { loadConfig } from "./config.js";
 import type { LogLevel } from "./logger.js";
 import { MetricsStore } from "./metrics.js";
 import { latencyTracker, clearHedgeStats } from "./hedging.js";
+import { pruneProviderLatencySamples } from "./proxy.js";
 import { attachWebSocket, closeWebSocket } from "./ws.js";
 import { startMonitor } from "./monitor.js";
 
@@ -355,6 +356,7 @@ async function main() {
             const newConfig = await reloadConfig(configPath);
             await handle.setConfig(newConfig);
             latencyTracker.prune([...newConfig.providers.keys()]);
+            pruneProviderLatencySamples([...newConfig.providers.keys()]);
             clearHedgeStats();
           },
         })
@@ -367,6 +369,7 @@ async function main() {
         const newConfig = await reloadConfig(configPath!);
         await handle.setConfig(newConfig);
         latencyTracker.prune([...newConfig.providers.keys()]);
+        pruneProviderLatencySamples([...newConfig.providers.keys()]);
         clearHedgeStats();
         logger.info("Config reloaded (SIGUSR1)", { path: configPath });
       } catch (err) {
@@ -495,6 +498,7 @@ async function main() {
           const newConfig = await reloadConfig(configPath);
           await handle.setConfig(newConfig);
           latencyTracker.prune([...newConfig.providers.keys()]);
+          pruneProviderLatencySamples([...newConfig.providers.keys()]);
           clearHedgeStats();
         },
       })
