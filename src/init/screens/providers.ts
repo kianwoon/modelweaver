@@ -138,12 +138,25 @@ export async function addProvider(state: WizardState): Promise<ScreenAction> {
 
   const baseUrl = await promptText('Base URL', '');
   if (!baseUrl) throw new GoBackError();
+  if (!/^https?:\/\//i.test(baseUrl)) {
+    fail('Base URL must start with http:// or https://');
+    return { type: 'error', message: 'Base URL must start with http:// or https://' };
+  }
 
-  const apiKey = await promptPassword('API key');
+  const apiKey = (await promptPassword('API key')).trim();
   if (!apiKey) throw new GoBackError();
 
   const timeout = await promptNumber('Request timeout (ms)', 60000);
+  if (timeout <= 0) {
+    fail('Timeout must be greater than 0');
+    return { type: 'error', message: 'Timeout must be greater than 0' };
+  }
+
   const ttfbTimeout = await promptNumber('TTFB timeout (ms)', 30000);
+  if (ttfbTimeout >= timeout) {
+    fail(`Warning: TTFB timeout (${ttfbTimeout}ms) should be less than total timeout (${timeout}ms). Proceeding anyway.`);
+    // Non-blocking warning — continue with the values
+  }
   const threshold = await promptNumber('Circuit breaker threshold', 3);
   const cooldown = await promptNumber('Circuit breaker cooldown (s)', 60);
 
