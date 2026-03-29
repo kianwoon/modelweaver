@@ -663,6 +663,8 @@ export async function forwardRequest(
     let lastDataTime = Date.now();
 
     const handleStall = () => {
+      // Issue 2: Set stalled flag BEFORE any async operations to prevent race with late-arriving data
+      let stalled = true;
       provider._circuitBreaker?.recordResult(502);
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
       broadcastStreamEvent({
@@ -675,18 +677,22 @@ export async function forwardRequest(
       });
       // Inject a structured SSE error event so the client can parse it and retry.
       // Format: "event: error\ndata: {...}\n\n" — standard SSE error event.
-      // Write it to passThrough BEFORE destroying so the event reaches the client.
       const sseError = JSON.stringify({
         requestId: ctx.requestId,
         model: String(ctx.actualModel ?? entry.model ?? ""),
         state: "error",
         message: stallMsg,
         timestamp: Date.now(),
+        provider: provider.name,  // Issue 1: include provider in SSE error payload
+        stalled: true,            // Issue 2: mark this as a stall event
       });
       const ssePayload = `event: error\ndata: ${sseError}\n\n`;
-      passThrough!.write(ssePayload); // flush the error event to the client
+      // Issue 2 & 4: Destroy upstream FIRST so no more data can enter the pipe,
+      // eliminating the race between SSE error write and late-arriving chunks.
       try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
-      passThrough!.end(); // signal stream end cleanly after the error event
+      // Now write the SSE error and end — no data can arrive after this since upstreamBody is destroyed
+      passThrough!.write(ssePayload);
+      passThrough!.end();
     };
 
     stallTimerRef = setInterval(() => {
