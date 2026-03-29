@@ -673,8 +673,20 @@ export async function forwardRequest(
         message: stallMsg,
         timestamp: Date.now(),
       });
+      // Inject a structured SSE error event so the client can parse it and retry.
+      // Format: "event: error\ndata: {...}\n\n" — standard SSE error event.
+      // Write it to passThrough BEFORE destroying so the event reaches the client.
+      const sseError = JSON.stringify({
+        requestId: ctx.requestId,
+        model: String(ctx.actualModel ?? entry.model ?? ""),
+        state: "error",
+        message: stallMsg,
+        timestamp: Date.now(),
+      });
+      const ssePayload = `event: error\ndata: ${sseError}\n\n`;
+      passThrough!.write(ssePayload); // flush the error event to the client
       try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
-      passThrough!.destroy(new Error(stallMsg));
+      passThrough!.end(); // signal stream end cleanly after the error event
     };
 
     stallTimerRef = setInterval(() => {
