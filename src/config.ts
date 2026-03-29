@@ -110,7 +110,7 @@ export function findConfigFile(cwd: string = process.cwd(), { skipGlobal = false
  *  Used by init wizard to show existing providers and offer add/edit. */
 export function peekConfig(
   cwd?: string,
-): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string; weight?: number }[]> } | null {
+): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; circuitBreaker?: { threshold?: number; cooldown?: number } }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string; weight?: number }[]> } | null {
   const configPath = findConfigFile(cwd);
   if (!configPath) return null;
 
@@ -118,18 +118,27 @@ export function peekConfig(
   const parsed = parseYaml(raw) as Record<string, unknown>;
   const providersRaw = (parsed?.providers ?? {}) as Record<string, Record<string, unknown>>;
 
-  const providers = new Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number }>();
+  const providers = new Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; circuitBreaker?: { threshold?: number; cooldown?: number } }>();
 
   for (const [id, config] of Object.entries(providersRaw)) {
     const apiKey = String(config.apiKey ?? "");
     const envMatch = apiKey.match(/^\$\{([^}]+)\}$/);
     const envKey = envMatch ? envMatch[1] : "";
 
+    // Extract circuitBreaker config if present
+    const cbRaw = config.circuitBreaker as Record<string, unknown> | undefined;
+    const circuitBreaker = cbRaw ? {
+      threshold: cbRaw.failureThreshold !== undefined ? Number(cbRaw.failureThreshold) : undefined,
+      cooldown: cbRaw.cooldownSeconds !== undefined ? Number(cbRaw.cooldownSeconds) : undefined,
+    } : undefined;
+
     providers.set(id, {
       baseUrl: String(config.baseUrl ?? ""),
       envKey,
       authType: String(config.authType ?? "anthropic") as "anthropic" | "bearer",
       timeout: Number(config.timeout ?? 30000),
+      ttfbTimeout: config.ttfbTimeout !== undefined ? Number(config.ttfbTimeout) : undefined,
+      circuitBreaker,
     });
   }
 
