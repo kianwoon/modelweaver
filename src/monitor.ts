@@ -1,8 +1,7 @@
 // src/monitor.ts — Monitor mode: spawns daemon child, auto-restarts on crash
 import { spawn } from "node:child_process";
 import { existsSync, unlinkSync } from "node:fs";
-import { dirname, join as pathJoin } from "node:path";
-import { fileURLToPath } from "node:url";
+import { resolveEntryScript } from "./entry-path.js";
 import { writePidFile, removePidFile, removeWorkerPidFile, getPidPath } from "./daemon.js";
 
 export async function startMonitor(args: {
@@ -18,7 +17,7 @@ export async function startMonitor(args: {
   }
   await writePidFile(process.pid);
 
-  const entryScript = pathJoin(dirname(fileURLToPath(import.meta.url)), "index.js");
+  const entryScript = resolveEntryScript();
 
   // Prevent monitor from crashing on unexpected errors
   process.on("uncaughtException", (err) => {

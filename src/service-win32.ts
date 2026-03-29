@@ -1,7 +1,7 @@
 // src/service-win32.ts — Windows startup folder service management
 import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { resolveEntryScript } from "./entry-path.js";
 
 export const platform = "win32";
 
@@ -16,8 +16,7 @@ const STARTUP_FOLDER = join(
 const VBS_PATH = join(STARTUP_FOLDER, "modelweaver.vbs");
 
 function getEntryScript(): string {
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  return join(__dirname, "..", "dist", "index.js");
+  return resolveEntryScript();
 }
 
 function getVbsContent(): string {
