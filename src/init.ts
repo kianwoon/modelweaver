@@ -92,11 +92,11 @@ function buildStateFromConfig(): WizardState {
       envKey: provider.envKey,
       apiKey: process.env[provider.envKey] ?? '',
       timeout: provider.timeout,
-      ttfbTimeout: 15000, // default
+      ttfbTimeout: provider.ttfbTimeout ?? 15000,
       authType: provider.authType,
       circuitBreaker: {
-        threshold: 5,
-        cooldown: 60,
+        threshold: provider.circuitBreaker?.threshold ?? 5,
+        cooldown: provider.circuitBreaker?.cooldown ?? 60,
       },
     });
   }
