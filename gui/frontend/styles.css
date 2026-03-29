@@ -625,52 +625,29 @@ body {
 }
 
 /* === Apple Intelligence Glow === */
-@property --glow-angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
+body.glow-active {
+  border-color: rgba(99, 102, 241, 0.5);
+  animation: glow-border 3s ease-in-out infinite;
 }
 
-#app {
-  position: relative;
+@keyframes glow-border {
+  0%, 100% { border-color: rgba(155, 89, 182, 0.5); box-shadow: inset 0 0 15px rgba(155, 89, 182, 0.08); }
+  33% { border-color: rgba(99, 102, 241, 0.5); box-shadow: inset 0 0 15px rgba(99, 102, 241, 0.08); }
+  66% { border-color: rgba(6, 182, 212, 0.5); box-shadow: inset 0 0 15px rgba(6, 182, 212, 0.08); }
 }
 
-/* Glow ring — sits above everything, never blocks interaction */
-#app.glow-active::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 10px;
-  background: conic-gradient(
-    from var(--glow-angle) at 50% 50%,
-    #9b59b6 0deg,
-    #6366f1 90deg,
-    #3b82f6 180deg,
-    #06b6d4 270deg,
-    #9b59b6 360deg
-  );
-  mask-image: linear-gradient(#fff 0 0), linear-gradient(#fff 0 0);
-  mask-mode: luminance, alpha;
-  mask-size: 100% 100%, calc(100% - 6px) calc(100% - 6px);
-  mask-position: 0 0, 3px 3px;
-  mask-composite: exclude;
-  -webkit-mask-image: linear-gradient(#fff 0 0), linear-gradient(#fff 0 0);
-  -webkit-mask-mode: luminance, alpha;
-  -webkit-mask-size: 100% 100%, calc(100% - 6px) calc(100% - 6px);
-  -webkit-mask-position: 0 0, 3px 3px;
-  -webkit-mask-composite: destination-out;
-  opacity: 0.7;
-  will-change: --glow-angle;
-  animation: glow-orbit 4s linear infinite;
-  pointer-events: none;
-  z-index: 9999;
+body.glow-active #app {
+  box-shadow: inset 0 0 30px rgba(99, 102, 241, 0.1), inset 0 0 8px rgba(99, 102, 241, 0.15);
+  animation: glow-inner 3s ease-in-out infinite;
 }
 
-@keyframes glow-orbit {
-  to { --glow-angle: 360deg; }
+@keyframes glow-inner {
+  0%, 100% { box-shadow: inset 0 0 30px rgba(155, 89, 182, 0.1), inset 0 0 8px rgba(155, 89, 182, 0.15); }
+  33% { box-shadow: inset 0 0 30px rgba(99, 102, 241, 0.1), inset 0 0 8px rgba(99, 102, 241, 0.15); }
+  66% { box-shadow: inset 0 0 30px rgba(6, 182, 212, 0.1), inset 0 0 8px rgba(6, 182, 212, 0.15); }
 }
 
-/* Reduced motion: skip glow entirely */
 @media (prefers-reduced-motion: reduce) {
-  #app.glow-active::before { animation: none; opacity: 0; }
+  body.glow-active { animation: none; box-shadow: none; border-color: var(--border); }
+  body.glow-active #app { animation: none; box-shadow: none; }
 }

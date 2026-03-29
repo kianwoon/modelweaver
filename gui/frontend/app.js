@@ -521,7 +521,7 @@ function removeActivityBar(requestId) {
 // --- Glow helpers ---
 function activateGlow() {
   if (glowActiveCount === 0) {
-    document.getElementById('app').classList.add('glow-active');
+    document.body.classList.add('glow-active');
   }
   glowActiveCount++;
 }
@@ -529,9 +529,9 @@ function activateGlow() {
 function deactivateGlow() {
   glowActiveCount = Math.max(0, glowActiveCount - 1);
   if (glowActiveCount === 0) {
-    const app = document.getElementById('app');
+    const body = document.body;
     // Fade out — CSS transition handles opacity
-    app.classList.remove('glow-active');
+    body.classList.remove('glow-active');
   }
 }
 
