@@ -397,13 +397,13 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
 
   app.use("/api/*", async (c, next) => {
     const origin = c.req.header('Origin') || '';
-    const isAllowed = !origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o));
+    const isAllowed = !origin || ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.some(o => origin.startsWith(o + ':'));
     c.header("Access-Control-Allow-Origin", isAllowed ? origin : '');
     await next();
   });
   app.options("/api/*", (c) => {
     const origin = c.req.header('Origin') || '';
-    const isAllowed = !origin || ALLOWED_ORIGINS.some(o => origin.startsWith(o));
+    const isAllowed = !origin || ALLOWED_ORIGINS.includes(origin) || ALLOWED_ORIGINS.some(o => origin.startsWith(o + ':'));
     c.header("Access-Control-Allow-Origin", isAllowed ? origin : '');
     c.header("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     c.header("Access-Control-Allow-Headers", "Content-Type, Authorization, anthropic-version, x-api-key");
