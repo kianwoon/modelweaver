@@ -10,12 +10,31 @@ import type { Server } from "node:http";
 export function createMockProvider() {
   const app = new Hono();
 
-  let behavior: "success" | "error-429" | "error-500" | "error-401" | "timeout" = "success";
+  let behavior: "success" | "error-429" | "error-500" | "error-401" | "timeout" | "stall" = "success";
 
   app.post("/v1/messages", async (c) => {
     if (behavior === "timeout") {
       // Never respond — caller must set short timeout
       await new Promise(() => {}); // hangs forever
+    }
+
+    if (behavior === "stall") {
+      // Send headers immediately (satisfies TTFB) but never send body data
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            // Never enqueue or close — simulates a stalled stream
+          },
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            "anthropic-version": "2023-06-01",
+          },
+        }
+      );
     }
 
     if (behavior === "error-429") {

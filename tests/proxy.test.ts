@@ -308,3 +308,123 @@ describe("forwardWithFallback race mode", () => {
     await mock2.close();
   });
 });
+
+describe("forwardRequest TTFB timeout", () => {
+  let mock: ReturnType<typeof createMockProvider>;
+
+  beforeEach(async () => {
+    mock = createMockProvider();
+    mock.setBehavior("timeout");
+  });
+
+  afterEach(async () => {
+    await mock.close();
+  });
+
+  it("returns 502 when TTFB timeout fires before total timeout", async () => {
+    const provider: ProviderConfig = {
+      name: "mock",
+      baseUrl: mock.url,
+      apiKey: "sk-test",
+      timeout: 5000, // Total timeout: 5s (longer than TTFB)
+      ttfbTimeout: 200, // TTFB timeout: 200ms (shorter than total)
+    };
+    const entry: RoutingEntry = { provider: "mock" };
+    const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
+    const ctx: RequestContext = {
+      requestId: "test-ttfb",
+      model: "claude-sonnet-4",
+      tier: "sonnet",
+      providerChain: [entry],
+      startTime: Date.now(),
+      rawBody: body,
+    };
+
+    const result = await forwardRequest(provider, entry, ctx, new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    }));
+    expect(result.status).toBe(502);
+    const json = (await result.json()) as { type: string; error: { type: string; message: string } };
+    expect(json.type).toBe("error");
+    expect(json.error.message).toContain("timed out waiting for first byte");
+    expect(json.error.message).toContain("200ms");
+  }, 10_000);
+
+  it("TTFB timeout message differs from total timeout message", async () => {
+    const provider: ProviderConfig = {
+      name: "mock",
+      baseUrl: mock.url,
+      apiKey: "sk-test",
+      timeout: 1000, // Total timeout: 1s (longer than TTFB so TTFB fires first)
+      ttfbTimeout: 200,
+    };
+    const entry: RoutingEntry = { provider: "mock" };
+    const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
+    const ctx: RequestContext = {
+      requestId: "test-ttfb-msg",
+      model: "claude-sonnet-4",
+      tier: "sonnet",
+      providerChain: [entry],
+      startTime: Date.now(),
+      rawBody: body,
+    };
+
+    const result = await forwardRequest(provider, entry, ctx, new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    }));
+    expect(result.status).toBe(502);
+    const json = (await result.json()) as { type: string; error: { type: string; message: string } };
+    // TTFB message should mention "first byte", not just generic "timed out after Xms"
+    expect(json.error.message).toContain("first byte");
+  }, 10_000);
+});
+
+describe("forwardRequest stall detection", () => {
+  let mock: ReturnType<typeof createMockProvider>;
+
+  beforeEach(async () => {
+    mock = createMockProvider();
+    mock.setBehavior("stall");
+  });
+
+  afterEach(async () => {
+    await mock.close();
+  });
+
+  it("emits SSE error event when body stalls after headers received", async () => {
+    const provider: ProviderConfig = {
+      name: "mock",
+      baseUrl: mock.url,
+      apiKey: "sk-test",
+      timeout: 5000,
+      stallTimeout: 300, // Stall timeout: 300ms
+    };
+    const entry: RoutingEntry = { provider: "mock" };
+    const body = JSON.stringify({ model: "claude-sonnet-4", max_tokens: 100, messages: [] });
+    const ctx: RequestContext = {
+      requestId: "test-stall",
+      model: "claude-sonnet-4",
+      tier: "sonnet",
+      providerChain: [entry],
+      startTime: Date.now(),
+      rawBody: body,
+    };
+
+    const result = await forwardRequest(provider, entry, ctx, new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    }));
+    // Stall detection returns a 200 with an SSE error event injected into the stream
+    expect(result.status).toBe(200);
+
+    const text = await result.text();
+    expect(text).toContain("event: error");
+    expect(text).toContain("stalled");
+    expect(text).toContain("no data after");
+  }, 10_000);
+});
