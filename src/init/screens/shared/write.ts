@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { stringify } from "yaml";
-import type { WizardState, WizardProvider, RoutingEntry } from "./types.js";
+import type { WizardState } from "./types.js";
 
 /**
  * Converts WizardState to YAML config string.
@@ -106,7 +106,7 @@ export function writeEnvFile(state: WizardState, envDir: string): void {
     const currentContent = readFileSync(envPath, "utf-8");
     if (currentContent === newContent) return;
   }
-  writeFileSync(envPath, newContent, "utf-8");
+  writeFileSync(envPath, newContent, { encoding: "utf-8", mode: 0o600 });
 }
 
 /**
@@ -125,12 +125,15 @@ export function writeStateToFiles(state: WizardState): void {
     changed = true;
   }
 
-  // Write config.yaml — skip if content unchanged
+  // Write config.yaml — backup existing, skip if content unchanged
   const yamlContent = buildYamlConfig(state);
   const yamlPath = join(configDir, "config.yaml");
   if (existsSync(yamlPath)) {
     const currentYaml = readFileSync(yamlPath, "utf-8");
     if (currentYaml !== yamlContent) {
+      // Create backup before overwriting
+      const backupPath = yamlPath + ".bak";
+      writeFileSync(backupPath, currentYaml, "utf-8");
       writeFileSync(yamlPath, yamlContent, "utf-8");
       changed = true;
     }
