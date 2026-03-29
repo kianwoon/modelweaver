@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { stringify } from "yaml";
 import type { WizardState } from "./types.js";
+import { fail } from "./ui.js";
 
 /**
  * Converts WizardState to YAML config string.
@@ -119,39 +120,51 @@ export function writeStateToFiles(state: WizardState): void {
   const configDir = join(homedir(), ".modelweaver");
   let changed = false;
 
-  // Create directory if it doesn't exist
-  if (!existsSync(configDir)) {
-    mkdirSync(configDir, { recursive: true });
-    changed = true;
-  }
+  try {
+    // Create directory if it doesn't exist
+    if (!existsSync(configDir)) {
+      mkdirSync(configDir, { recursive: true });
+      changed = true;
+    }
 
-  // Write config.yaml — backup existing, skip if content unchanged
-  const yamlContent = buildYamlConfig(state);
-  const yamlPath = join(configDir, "config.yaml");
-  if (existsSync(yamlPath)) {
-    const currentYaml = readFileSync(yamlPath, "utf-8");
-    if (currentYaml !== yamlContent) {
-      // Create backup before overwriting
-      const backupPath = yamlPath + ".bak";
-      writeFileSync(backupPath, currentYaml, "utf-8");
+    // Write config.yaml — backup existing, skip if content unchanged
+    const yamlContent = buildYamlConfig(state);
+    const yamlPath = join(configDir, "config.yaml");
+    if (existsSync(yamlPath)) {
+      const currentYaml = readFileSync(yamlPath, "utf-8");
+      if (currentYaml !== yamlContent) {
+        // Create backup before overwriting
+        const backupPath = yamlPath + ".bak";
+        writeFileSync(backupPath, currentYaml, "utf-8");
+        writeFileSync(yamlPath, yamlContent, "utf-8");
+        changed = true;
+      }
+    } else {
       writeFileSync(yamlPath, yamlContent, "utf-8");
       changed = true;
     }
-  } else {
-    writeFileSync(yamlPath, yamlContent, "utf-8");
-    changed = true;
-  }
 
-  // Write .env — skip if content unchanged
-  const envPath = join(configDir, ".env");
-  const envBefore = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
-  writeEnvFile(state, configDir);
-  const envAfter = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
-  if (envAfter !== envBefore) {
-    changed = true;
-  }
+    // Write .env — skip if content unchanged
+    const envPath = join(configDir, ".env");
+    const envBefore = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
+    writeEnvFile(state, configDir);
+    const envAfter = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
+    if (envAfter !== envBefore) {
+      changed = true;
+    }
 
-  if (!changed) {
-    process.stdout.write("\nNo changes detected\n");
+    if (!changed) {
+      process.stdout.write("\nNo changes detected\n");
+    }
+  } catch (err: unknown) {
+    const code = err instanceof Error && "code" in err ? (err as NodeJS.ErrnoException).code : undefined;
+    const hint = code === "ENOSPC"
+      ? "No disk space available"
+      : code === "EACCES"
+        ? "Permission denied"
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    fail(`Failed to write config: ${hint}`);
   }
 }
