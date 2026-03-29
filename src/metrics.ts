@@ -205,7 +205,7 @@ export class MetricsStore {
     // Group entries by actualModel || model
     const groups = new Map<string, RequestMetrics[]>();
     for (let i = 0; i < this.count; i++) {
-      const index = (i) % this.maxSize;
+      const index = ((this.head - this.count + i) % this.maxSize + this.maxSize) % this.maxSize;
       const entry = this.buffer[index];
       if (entry === null) continue;
       const key = entry.actualModel || entry.model;
