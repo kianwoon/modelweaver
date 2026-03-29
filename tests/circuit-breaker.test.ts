@@ -1,5 +1,5 @@
 // tests/circuit-breaker.test.ts
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { CircuitBreaker } from "../src/circuit-breaker.js";
 
 describe("CircuitBreaker", () => {
@@ -67,14 +67,23 @@ describe("CircuitBreaker", () => {
   });
 
   describe("half-open state", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
     it("transitions to half-open after cooldown", async () => {
       breaker.recordResult(429);
       breaker.recordResult(429);
       breaker.recordResult(429);
       expect(breaker.getState()).toBe("open");
 
-      // Wait for cooldown (1 second in test config)
-      await new Promise((r) => setTimeout(r, 1100));
+      // Advance timers past cooldown (1 second in test config)
+      vi.advanceTimersByTime(1100);
+      await Promise.resolve(); // flush any pending microtasks
 
       expect(breaker.canProceed().allowed).toBe(true);
       expect(breaker.getState()).toBe("half-open");
@@ -84,7 +93,8 @@ describe("CircuitBreaker", () => {
       breaker.recordResult(429);
       breaker.recordResult(429);
       breaker.recordResult(429);
-      await new Promise((r) => setTimeout(r, 1100));
+      vi.advanceTimersByTime(1100);
+      await Promise.resolve(); // flush any pending microtasks
       breaker.canProceed(); // triggers half-open
 
       breaker.recordResult(200);
@@ -96,7 +106,8 @@ describe("CircuitBreaker", () => {
       breaker.recordResult(429);
       breaker.recordResult(429);
       breaker.recordResult(429);
-      await new Promise((r) => setTimeout(r, 1100));
+      vi.advanceTimersByTime(1100);
+      await Promise.resolve(); // flush any pending microtasks
       breaker.canProceed(); // triggers half-open
 
       breaker.recordResult(429);
