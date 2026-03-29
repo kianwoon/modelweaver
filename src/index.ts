@@ -13,6 +13,21 @@ import { startMonitor } from "./monitor.js";
 // Read version from package.json at startup
 const VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")).version;
 
+/**
+ * Registers global exception handlers to prevent silent crashes.
+ * Used in both daemon and foreground modes.
+ */
+function setupGlobalExceptionHandlers(log: {
+  error: (msg: string, meta?: Record<string, string>) => void;
+}): void {
+  process.on('uncaughtException', (err) => {
+    log.error('Uncaught exception (process survived)', { error: err.message, stack: err.stack });
+  });
+  process.on('unhandledRejection', (reason) => {
+    log.error('Unhandled rejection (process survived)', { reason: String(reason) });
+  });
+}
+
 function parseArgs(argv: string[]): { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean; gui: boolean } {
   const args: { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean; gui: boolean } = { verbose: false, help: false, daemon: false, monitor: false, gui: false };
   for (let i = 2; i < argv.length; i++) {
@@ -320,12 +335,7 @@ async function main() {
     const logger = createLogger(logLevel);
 
     // Prevent silent crashes from killing the daemon worker
-    process.on('uncaughtException', (err) => {
-      logger.error('Uncaught exception (daemon survived)', { error: err.message, stack: err.stack });
-    });
-    process.on('unhandledRejection', (reason) => {
-      logger.error('Unhandled rejection (daemon survived)', { reason: String(reason) });
-    });
+    setupGlobalExceptionHandlers(logger);
 
     // Write worker PID file (monitor owns modelweaver.pid)
     await writeWorkerPidFile(process.pid);
@@ -429,12 +439,7 @@ async function main() {
   const handle = createApp(config, logLevel, metricsStore);
 
   // Prevent silent crashes — log uncaught exceptions instead of crashing silently
-  process.on('uncaughtException', (err) => {
-    console.error(`Uncaught exception: ${err.message}\n${err.stack ?? ''}`);
-  });
-  process.on('unhandledRejection', (reason) => {
-    console.error(`Unhandled rejection: ${String(reason)}`);
-  });
+  setupGlobalExceptionHandlers(console);
 
   // Print startup info
   console.log(`\n  ModelWeaver v${VERSION}`);
