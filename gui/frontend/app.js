@@ -707,6 +707,11 @@ function handleStreamEvent(data) {
 
 function connectWebSocket(port) {
   if (ws && ws.readyState === WebSocket.OPEN) return;
+  // Clear any pending reconnect timer from a previous close event
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
   // Close stale sockets stuck in CONNECTING or CLOSING state
   if (ws) {
     ws.close();
