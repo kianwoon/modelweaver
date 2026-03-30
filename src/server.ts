@@ -683,7 +683,9 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       const closePromises: Promise<void>[] = [];
       for (const [key, agent] of oldAgents) {
         if (!reusedKeys.has(key)) {
-          closePromises.push(agent.close().catch(() => {}));
+          closePromises.push(agent.close().catch((e) => {
+          console.warn(`[server] Failed to close agent: ${e.message}`);
+        }));
         }
       }
 

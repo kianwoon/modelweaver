@@ -65,6 +65,7 @@ const STRIP_ORIGIN = /^https?:\/\/[^/]+/;
 
 /** Pre-compiled regexes for targeted body replacements (preserve prompt caching) */
 const MODEL_KEY_REGEX = /"model"\s*:\s*"([^"]*)"/;
+const MODEL_KEY_TEST = /"model"\s*:\s*"([^"]*)"/;
 const MAX_TOKENS_REGEX = /"max_tokens"\s*:\s*(\d+)/;
 
 /** Module-level TextEncoder — avoids per-request allocation */
@@ -420,8 +421,7 @@ function applyTargetedReplacements(
   let modelLogged = false;
 
   const result = rawBody.replace(combinedRegex, (match: string) => {
-    if (modelRepl && MODEL_KEY_REGEX.test(match)) {
-      MODEL_KEY_REGEX.lastIndex = 0;
+    if (modelRepl && MODEL_KEY_TEST.test(match)) {
       if (!modelLogged && origModel) {
         console.warn(`Routing override: ${origModel} -> ${entry.model} via ${provider.name}`);
         modelLogged = true;
@@ -556,6 +556,9 @@ export async function forwardRequest(
   let ttfbTimedOut = false;
   let ttfbTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // TTFB timer: fires after ttfbTimeout ms if no response headers received.
+  // The finally block in forwardRequest clears the timer before any async ops resume,
+  // so this timeout can only fire between timer creation and first response byte.
   const ttfbPromise = new Promise<never>((_, reject) => {
     ttfbTimer = setTimeout(() => {
       ttfbTimedOut = true;
@@ -855,17 +858,18 @@ async function hedgedForwardRequest(
         // Abort all in-flight hedge copies — triggers onExternalAbort in each
         // which properly destroys their PassThrough streams and clears stall timers
         hedgeController.abort();
-        // Cancel remaining — record actual status for each cancelled copy
+        // Cancel remaining — record actual status for each cancelled copy.
+        // Use void + .catch() to suppress unhandled rejections from late resolves.
         for (let i = 0; i < wrapped.length; i++) {
           if (!completed.has(i)) {
-            wrapped[i].then(r => {
+            void wrapped[i].then(r => {
               // Skip 499 — these are synthetic responses from hedge cancellation
               // (hedgeController.abort()), not real upstream failures. Recording
               // them would inflate circuit breaker failure counts.
               if (r.response.status === 499) return;
               if (provider._circuitBreaker) provider._circuitBreaker.recordResult(r.response.status);
               try { r.response.body?.cancel(); } catch {}
-            });
+            }).catch(() => {});
           }
         }
         for (const f of failures) { try { f.body?.cancel(); } catch {} }
@@ -1132,11 +1136,7 @@ export async function forwardWithFallback(
           winningProvider._circuitBreaker.recordResult(winner.response.status);
         }
         for (const f of failures) {
-          try {
-            f.response.body?.cancel();
-          } catch {
-            /* ignore */
-          }
+          void f.response.body?.cancel?.().catch(() => {});
         }
         return { response: winner.response, actualModel: winningEntry?.model, actualProvider: winningEntry?.provider };
       }
