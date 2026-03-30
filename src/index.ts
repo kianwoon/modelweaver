@@ -11,7 +11,7 @@ import { attachWebSocket, closeWebSocket } from "./ws.js";
 import { startMonitor } from "./monitor.js";
 
 // Read version from package.json at startup
-const VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")).version;
+export const VERSION: string = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf-8")).version;
 
 /**
  * Registers global exception handlers to prevent silent crashes.
@@ -347,7 +347,7 @@ async function main() {
     process.stderr.write = logStream.write.bind(logStream) as typeof process.stderr.write;
 
     // Create app with mutable config
-    const handle = createApp(config, logLevel, metricsStore);
+    const handle = createApp(config, logLevel, metricsStore, VERSION);
 
     // Hot-reload: watch config file for changes
     const configWatcherHandle = configPath
@@ -436,7 +436,7 @@ async function main() {
   // --- Foreground mode ---
   const { reloadConfig } = await import('./config.js');
   const { watch: fsWatch } = await import('node:fs');
-  const handle = createApp(config, logLevel, metricsStore);
+  const handle = createApp(config, logLevel, metricsStore, VERSION);
 
   // Prevent silent crashes — log uncaught exceptions instead of crashing silently
   setupGlobalExceptionHandlers(console);

@@ -769,6 +769,7 @@ function connectWebSocket(port) {
     // Defensive: fetch summary via HTTP to ensure active models/providers
     // are populated even if the initial WS summary message is missed
     fetchSummary();
+    fetchDaemonVersion();
   });
 
   ws.addEventListener('message', (event) => {
@@ -837,9 +838,20 @@ async function fetchSummary() {
     scheduleSummaryUpdate(data);
     // Don't overwrite status if WebSocket is already live
     if (ws) setStatus('live');
+    fetchDaemonVersion();
   } catch (err) {
     console.error('[fetchSummary] failed:', err);
     setStatus(false);
+  }
+}
+
+async function fetchDaemonVersion() {
+  try {
+    const data = await invoke('fetch_version', { port: DEFAULT_PORT });
+    const el = document.querySelector('.app-credit__version');
+    if (el) el.textContent = 'v' + data.version;
+  } catch {
+    // daemon not running — leave version blank
   }
 }
 
