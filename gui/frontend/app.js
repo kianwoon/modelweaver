@@ -99,6 +99,52 @@ if (localStorage.getItem(COMPACT_KEY) === '1') {
   setCompactMode(true);
 }
 
+// --- Config validation error banner ---
+
+let configErrorTimer = null;
+
+function showConfigError(fieldErrors) {
+  // Remove any existing banner
+  const existing = document.getElementById('config-error-banner');
+  if (existing) existing.remove();
+  if (configErrorTimer) { clearTimeout(configErrorTimer); configErrorTimer = null; }
+
+  if (!fieldErrors || fieldErrors.length === 0) return;
+
+  const banner = document.createElement('div');
+  banner.id = 'config-error-banner';
+  banner.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);max-width:560px;width:calc(100% - 32px);background:#1a1a2e;border:1px solid #e74c3c;border-radius:8px;padding:12px 16px;z-index:9999;font-family:inherit;box-shadow:0 4px 20px rgba(0,0,0,0.5);';
+
+  const title = document.createElement('div');
+  title.style.cssText = 'color:#e74c3c;font-weight:600;font-size:13px;margin-bottom:6px;';
+  title.textContent = 'Config validation failed (' + fieldErrors.length + ' error' + (fieldErrors.length > 1 ? 's' : '') + ')';
+  banner.appendChild(title);
+
+  const list = document.createElement('div');
+  list.style.cssText = 'max-height:120px;overflow-y:auto;font-size:12px;';
+  for (const fe of fieldErrors) {
+    const row = document.createElement('div');
+    row.style.cssText = 'color:#ccc;margin:2px 0;white-space:pre-wrap;word-break:break-word;';
+    row.textContent = fe.path + ': ' + fe.message + (fe.expected ? ' (expected: ' + fe.expected + ')' : '');
+    list.appendChild(row);
+  }
+  banner.appendChild(list);
+
+  const dismiss = document.createElement('div');
+  dismiss.style.cssText = 'color:#666;font-size:11px;margin-top:8px;text-align:right;cursor:pointer;';
+  dismiss.textContent = 'dismiss';
+  dismiss.addEventListener('click', () => { banner.remove(); if (configErrorTimer) { clearTimeout(configErrorTimer); configErrorTimer = null; } });
+  banner.appendChild(dismiss);
+
+  document.body.appendChild(banner);
+
+  // Auto-dismiss after 30 seconds
+  configErrorTimer = setTimeout(() => {
+    banner.remove();
+    configErrorTimer = null;
+  }, 30000);
+}
+
 function setStatus(mode) {
   if (mode === 'live') {
     statusEl.className = 'status connected';
@@ -801,6 +847,8 @@ function connectWebSocket(port) {
         appendRequestMetric(msg.data);
       } else if (msg.type === 'stream') {
         handleStreamEvent(msg.data);
+      } else if (msg.type === 'config_error') {
+        showConfigError(msg.data.fieldErrors);
       }
     } catch (err) {
       console.error('[WebSocket] parse error:', err);

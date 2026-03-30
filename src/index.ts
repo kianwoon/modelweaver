@@ -2,7 +2,7 @@
 import { createAdaptorServer } from "@hono/node-server";
 import { readFileSync } from "node:fs";
 import { createApp } from "./server.js";
-import { loadConfig } from "./config.js";
+import { loadConfig, ConfigValidationError } from "./config.js";
 import type { LogLevel } from "./logger.js";
 import { MetricsStore } from "./metrics.js";
 import { latencyTracker, clearHedgeStats } from "./hedging.js";
@@ -130,7 +130,17 @@ function setupConfigWatcher(opts: {
         await onReload();
         log("Config reloaded", { path: configPath });
       } catch (err) {
-        onError("Config reload failed — keeping old config", { error: (err as Error).message });
+        if (err instanceof ConfigValidationError) {
+          const detail = err.fieldErrors
+            .map(e => `${e.path}: ${e.message}`)
+            .join("; ");
+          onError("Config reload failed — validation errors", {
+            error: `${err.fieldErrors.length} error(s): ${detail}`,
+            validationErrors: JSON.stringify(err.fieldErrors),
+          });
+        } else {
+          onError("Config reload failed — keeping old config", { error: (err as Error).message });
+        }
       }
     }, debounceMs);
   };
@@ -308,7 +318,15 @@ async function main() {
     config = result.config;
     configPath = result.configPath;
   } catch (error) {
-    console.error(`Config error: ${(error as Error).message}`);
+    const err = error as Error;
+    if (err instanceof ConfigValidationError) {
+      console.error(`Config validation failed — ${err.fieldErrors.length} error(s):`);
+      for (const fe of err.fieldErrors) {
+        console.error(`  - ${fe.path}: ${fe.message}${fe.expected ? ` (expected: ${fe.expected})` : ""}${fe.received ? ` (got: ${fe.received})` : ""}`);
+      }
+    } else {
+      console.error(`Config error: ${err.message}`);
+    }
     process.exit(1);
   }
 
@@ -332,6 +350,7 @@ async function main() {
     const { reloadConfig } = await import('./config.js');
     const { createWriteStream, watch } = await import('node:fs');
     const { createLogger } = await import('./logger.js');
+    const { broadcastConfigError } = await import('./ws.js');
     const logger = createLogger(logLevel);
 
     // Prevent silent crashes from killing the daemon worker
@@ -361,6 +380,12 @@ async function main() {
             } else {
               logger.error(msg, meta);
             }
+            // Broadcast validation errors to connected GUI clients
+            if (meta?.validationErrors) {
+              try {
+                broadcastConfigError(JSON.parse(meta.validationErrors));
+              } catch { /* ignore parse errors */ }
+            }
           },
           onReload: async () => {
             const newConfig = await reloadConfig(configPath);
@@ -383,7 +408,15 @@ async function main() {
         clearHedgeStats();
         logger.info("Config reloaded (SIGUSR1)", { path: configPath });
       } catch (err) {
-        logger.error("Config reload failed (SIGUSR1)", { error: (err as Error).message });
+        if (err instanceof ConfigValidationError) {
+          logger.warn("Config reload failed (SIGUSR1) — validation errors", {
+            errorCount: String(err.fieldErrors.length),
+            errors: err.fieldErrors.map(e => `${e.path}: ${e.message}`).join("; "),
+          });
+          broadcastConfigError(err.fieldErrors);
+        } else {
+          logger.error("Config reload failed (SIGUSR1)", { error: (err as Error).message });
+        }
       }
     });
 
@@ -493,6 +526,16 @@ async function main() {
         watch: fsWatch,
         log: (msg, meta) => console.log(`  ${msg}` + (meta?.path ? ` (${meta.path})` : "")),
         onError: (msg, meta) => {
+          if (meta?.validationErrors) {
+            try {
+              const errors = JSON.parse(meta.validationErrors) as Array<{path: string; message: string; expected?: string; received?: string}>;
+              console.warn(`  Warning: Config validation failed — ${errors.length} error(s):`);
+              for (const fe of errors) {
+                console.warn(`    - ${fe.path}: ${fe.message}${fe.expected ? ` (expected: ${fe.expected})` : ""}${fe.received ? ` (got: ${fe.received})` : ""}`);
+              }
+              return;
+            } catch { /* not JSON, fall through */ }
+          }
           if (meta?.error) {
             console.warn(`  Warning: ${msg} — ${meta.error}`);
           } else {

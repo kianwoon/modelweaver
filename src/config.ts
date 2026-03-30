@@ -8,6 +8,113 @@ import { Agent } from "undici";
 import { CircuitBreaker } from "./circuit-breaker.js";
 import type { AppConfig, HedgingConfig, ProviderConfig, RoutingEntry, ServerConfig } from "./types.js";
 
+// --- Structured config validation error ---
+
+/** A single field-level validation issue produced by Zod. */
+export interface ConfigFieldError {
+  /** Dot-joined path into the config object, e.g. "modelRouting.glm-5.1.0.weight" */
+  path: string;
+  /** Human-readable description of what went wrong */
+  message: string;
+  /** The value Zod received (if available) */
+  received?: string;
+  /** The type Zod expected (if available) */
+  expected?: string;
+}
+
+/**
+ * Custom error class for config validation failures.
+ * Carries structured field errors for machine consumption (GUI, API)
+ * and a human-readable summary for logs/CLI.
+ */
+export class ConfigValidationError extends Error {
+  public readonly fieldErrors: ConfigFieldError[];
+  public readonly isValidationError = true;
+
+  constructor(fieldErrors: ConfigFieldError[]) {
+    const summary = fieldErrors.length === 1
+      ? `Config validation failed: ${fieldErrors[0].message} (at ${fieldErrors[0].path})`
+      : `Config validation failed — ${fieldErrors.length} error(s):\n${fieldErrors.map(e => `  - ${e.path}: ${e.message}`).join("\n")}`;
+    super(summary);
+    this.name = "ConfigValidationError";
+    this.fieldErrors = fieldErrors;
+  }
+}
+
+/**
+ * Convert a raw ZodError into structured ConfigFieldError[].
+ * Extracts expected/received types from Zod's error code and params.
+ */
+export function formatZodErrors(error: z.ZodError): ConfigFieldError[] {
+  const fields: ConfigFieldError[] = [];
+
+  for (const issue of error.issues) {
+    // Zod v4 uses top-level keys on the issue object, not nested params
+    const issueAny = issue as unknown as Record<string, unknown>;
+    const pathStr = issue.path.map(String).join(".");
+    const received = issueAny.received !== undefined ? String(issueAny.received) : undefined;
+
+    let expected: string | undefined;
+    let message = issue.message;
+
+    switch (issue.code) {
+      case "invalid_type":
+        // Zod v4: expected is top-level (e.g. "number", "string")
+        expected = issueAny.expected as string | undefined;
+        message = `Expected ${expected ?? "a valid type"}, got ${received ?? "unknown type"}`;
+        break;
+      case "invalid_value": {
+        // Zod v4: enum validation uses "invalid_value" with "values" array
+        const values = (issueAny.values as string[] | undefined)?.join(", ");
+        expected = values ?? issueAny.expected as string | undefined;
+        message = expected
+          ? `Invalid value "${received}". Allowed: ${expected}`
+          : issue.message;
+        break;
+      }
+      case "too_small": {
+        const minimum = issueAny.minimum as number | undefined;
+        expected = `number >= ${minimum ?? "?"}`;
+        message = `Value ${received ?? "?"} is too small (minimum: ${minimum ?? "?"})`;
+        break;
+      }
+      case "too_big": {
+        const maximum = issueAny.maximum as number | undefined;
+        expected = `number <= ${maximum ?? "?"}`;
+        message = `Value ${received ?? "?"} is too large (maximum: ${maximum ?? "?"})`;
+        break;
+      }
+      case "invalid_format": {
+        // Zod v4: string format validation (e.g. "url", "email")
+        const format = issueAny.format as string | undefined;
+        if (format === "url") {
+          message = `Invalid URL: "${received}"`;
+          expected = "valid URL (http:// or https://)";
+        } else {
+          expected = format ? `valid ${format}` : undefined;
+          message = issue.message;
+        }
+        break;
+      }
+      default:
+        // Zod v4: may still emit codes like invalid_string for min/max length checks
+        const validation = issueAny.validation as string | undefined;
+        expected = validation ? `valid string (${validation})` : undefined;
+        message = issue.message;
+        break;
+    }
+
+    fields.push({
+      path: pathStr,
+      message,
+      received,
+      expected,
+    });
+  }
+
+  return fields;
+}
+
 // --- Zod schemas for raw (pre-resolution) config ---
 
 const modelLimitsSchema = z.object({
@@ -197,7 +304,11 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
   // Resolve ${VAR} references in all string values
   const resolved = resolveAllEnvStrings(parsed) as z.infer<typeof rawConfigSchema>;
 
-  const validated = rawConfigSchema.parse(resolved);
+  const parseResult = rawConfigSchema.safeParse(resolved);
+  if (!parseResult.success) {
+    throw new ConfigValidationError(formatZodErrors(parseResult.error));
+  }
+  const validated = parseResult.data;
 
   // Cross-validation
   const providerNames = new Set(Object.keys(validated.providers));

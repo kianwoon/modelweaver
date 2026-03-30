@@ -1,8 +1,8 @@
 // src/service-darwin.ts — macOS launchd service management
 export const platform = "darwin";
 import { existsSync, unlinkSync, mkdirSync, writeFileSync } from "node:fs";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { resolveEntryScript } from "./entry-path.js";
 import { homedir } from "node:os";
 import { execFileSync } from "node:child_process";
 
@@ -12,9 +12,8 @@ const PLIST_PATH = join(PLIST_DIR, `${LABEL}.plist`);
 const LOG_DIR = join(homedir(), ".modelweaver", "logs");
 
 function getPlistContent(): string {
-  // Resolve the entry script path relative to this source file
-  const __dirname = dirname(fileURLToPath(import.meta.url));
-  const nodePath = join(__dirname, "index.js");
+  // Use centralized entry script resolution — avoids double-dist/ bugs
+  const nodePath = resolveEntryScript();
   const workDir = process.cwd();
 
   return `<?xml version="1.0" encoding="UTF-8"?>

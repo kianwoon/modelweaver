@@ -2,7 +2,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { writeFileSync, mkdirSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { loadConfig, findConfigFile, resolveEnvVars } from "../src/config.js";
+import { loadConfig, findConfigFile, resolveEnvVars, formatZodErrors, ConfigValidationError } from "../src/config.js";
 import type { AppConfig } from "../src/types.js";
 
 const TEST_DIR = join(import.meta.dirname, ".tmp-config-test");
@@ -355,5 +355,113 @@ modelRouting: {}
       expect(config.modelRouting.size).toBe(0);
       delete process.env.KEY;
     });
+  });
+});
+
+describe("formatZodErrors", () => {
+  it("converts invalid_type errors to structured fields", async () => {
+    const { z } = await import("zod");
+    const schema = z.object({ weight: z.number() });
+    const result = schema.safeParse({ weight: "abc" });
+    expect(result.success).toBe(false);
+    const errors = formatZodErrors(result.error);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].path).toBe("weight");
+    expect(errors[0].message).toContain("Expected");
+    expect(errors[0].expected).toBe("number");
+  });
+
+  it("converts invalid_value (enum) errors with allowed options", async () => {
+    const { z } = await import("zod");
+    const schema = z.object({ authType: z.enum(["anthropic", "bearer"]) });
+    const result = schema.safeParse({ authType: "basic" });
+    expect(result.success).toBe(false);
+    const errors = formatZodErrors(result.error);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].path).toBe("authType");
+    expect(errors[0].expected).toContain("anthropic");
+    expect(errors[0].expected).toContain("bearer");
+  });
+
+  it("converts invalid_format (URL) errors", async () => {
+    const { z } = await import("zod");
+    const schema = z.object({ baseUrl: z.string().url() });
+    const result = schema.safeParse({ baseUrl: "not-a-url" });
+    expect(result.success).toBe(false);
+    const errors = formatZodErrors(result.error);
+    expect(errors).toHaveLength(1);
+    expect(errors[0].path).toBe("baseUrl");
+    expect(errors[0].message).toContain("Invalid URL");
+    expect(errors[0].expected).toContain("http");
+  });
+
+  it("handles multiple errors at different paths", async () => {
+    const { z } = await import("zod");
+    const schema = z.object({
+      port: z.number().int().min(1),
+      host: z.string().min(1),
+    });
+    const result = schema.safeParse({ port: "abc", host: "" });
+    expect(result.success).toBe(false);
+    const errors = formatZodErrors(result.error);
+    expect(errors.length).toBeGreaterThanOrEqual(2);
+    const paths = errors.map(e => e.path);
+    expect(paths).toContain("port");
+    expect(paths).toContain("host");
+  });
+});
+
+describe("ConfigValidationError", () => {
+  it("creates a human-readable message for a single error", () => {
+    const err = new ConfigValidationError([
+      { path: "modelRouting.glm-5.1.0.weight", message: "Expected number, got string", received: "string", expected: "number" },
+    ]);
+    expect(err.name).toBe("ConfigValidationError");
+    expect(err.isValidationError).toBe(true);
+    expect(err.message).toContain("modelRouting.glm-5.1.0.weight");
+    expect(err.message).toContain("Expected number, got string");
+    expect(err.fieldErrors).toHaveLength(1);
+  });
+
+  it("creates a multi-line message for multiple errors", () => {
+    const err = new ConfigValidationError([
+      { path: "server.port", message: "Expected number, got string", received: "string", expected: "number" },
+      { path: "providers.foo.baseUrl", message: "Invalid URL", received: "ftp://evil.com", expected: "valid URL" },
+    ]);
+    expect(err.message).toContain("2 error(s)");
+    expect(err.message).toContain("server.port");
+    expect(err.message).toContain("providers.foo.baseUrl");
+  });
+});
+
+describe("loadConfig validation error formatting (full integration)", () => {
+  it("throws ConfigValidationError with structured fields for wrong type", async () => {
+    process.env.KEY = "sk-123";
+    writeTestConfig(`
+server:
+  port: "not-a-number"
+providers:
+  p:
+    baseUrl: https://example.com
+    apiKey: \${KEY}
+routing:
+  t:
+    - provider: p
+tierPatterns:
+  t: ["t"]
+`);
+    try {
+      await loadConfig(TEST_DIR);
+      expect.fail("Should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(ConfigValidationError);
+      const cve = err as ConfigValidationError;
+      expect(cve.fieldErrors.length).toBeGreaterThanOrEqual(1);
+      const portError = cve.fieldErrors.find(e => e.path.includes("port"));
+      expect(portError).toBeDefined();
+      expect(portError!.message).toContain("Expected");
+      expect(portError!.expected).toBe("number");
+    }
+    delete process.env.KEY;
   });
 });

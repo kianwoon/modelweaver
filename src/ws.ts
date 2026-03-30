@@ -3,6 +3,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import type { Server } from "node:http";
 import type { MetricsStore } from "./metrics.js";
 import type { RequestMetrics, MetricsSummary, MetricsSummaryDelta, StreamEvent } from "./types.js";
+import type { ConfigFieldError } from "./config.js";
 
 interface WsMessage {
   type: "request" | "summary" | "summary_delta";
@@ -273,6 +274,24 @@ export function broadcastStreamEvent(data: StreamEvent): void {
       continue;
     }
 
+    setImmediate(() => {
+      if (client.readyState === client.OPEN) {
+        client.send(msg);
+      }
+    });
+  }
+}
+
+/**
+ * Broadcast a config validation error to all connected GUI clients.
+ * Sent as a `config_error` message type so the GUI can display
+ * structured field-level error details.
+ */
+export function broadcastConfigError(fieldErrors: ConfigFieldError[]): void {
+  if (!wssInstance) return;
+  const msg = JSON.stringify({ type: "config_error", data: { fieldErrors, timestamp: Date.now() } });
+  for (const client of wssInstance.clients) {
+    if (client.readyState !== client.OPEN) continue;
     setImmediate(() => {
       if (client.readyState === client.OPEN) {
         client.send(msg);
