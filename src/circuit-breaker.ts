@@ -26,6 +26,9 @@ export class CircuitBreaker {
   private halfOpenInProgress: boolean = false;
   private halfOpenProbeId: number | null = null;
   private nextProbeId: number = 0;
+  /** Synchronous lock: prevents concurrent half-open probe grants in the same microtask batch.
+   *  Set synchronously in canProceed() before any await, reset in recordResult(). */
+  private _probeGranted: boolean = false;
   private readonly config: BreakerConfig;
 
   constructor(config: Partial<BreakerConfig> = {}) {
@@ -46,15 +49,17 @@ export class CircuitBreaker {
         const probeId = this.nextProbeId++;
         this.halfOpenInProgress = true;
         this.halfOpenProbeId = probeId;
+        this._probeGranted = true;
         return { allowed: true, probeId };
       }
       return { allowed: false, probeId: 0 };
     }
     // half-open: allow exactly one probe at a time
-    if (!this.halfOpenInProgress) {
+    if (!this.halfOpenInProgress && !this._probeGranted) {
       const probeId = this.nextProbeId++;
       this.halfOpenInProgress = true;
       this.halfOpenProbeId = probeId;
+      this._probeGranted = true;
       return { allowed: true, probeId };
     }
     return { allowed: false, probeId: 0 };
@@ -65,6 +70,7 @@ export class CircuitBreaker {
     if (this.halfOpenInProgress && (probeId === undefined || probeId === this.halfOpenProbeId)) {
       this.halfOpenInProgress = false;
       this.halfOpenProbeId = null;
+      this._probeGranted = false;
     }
 
     if (status >= 200 && status < 300) {
@@ -72,6 +78,7 @@ export class CircuitBreaker {
       this.state = "closed";
       this.failureTimestamps = [];
       this.openedAt = null;
+      this._probeGranted = false;
       console.warn('[circuit-breaker] CLOSED — recovered after successful request');
       return;
     }
@@ -87,6 +94,7 @@ export class CircuitBreaker {
       // Any failure in half-open → back to open
       this.state = "open";
       this.openedAt = now;
+      this._probeGranted = false;
       console.warn('[circuit-breaker] back to OPEN — probe failed');
       return;
     }

@@ -141,14 +141,11 @@ function isContextWindowError(status: number, body: string): boolean {
 function handleContextWindowError(status: number, body: string): Response | null {
   if (!isContextWindowError(status, body)) return null;
 
-  console.warn('[context-compact] Upstream context window limit detected');
-  try {
-    const flagDir = path.join(os.homedir(), '.claude', 'state');
-    fs.mkdirSync(flagDir, { recursive: true });
-    fs.writeFileSync(path.join(flagDir, 'context-compact-needed'), Date.now().toString());
-  } catch {
-    // Best-effort flag write
-  }
+  // Fire-and-forget async I/O to avoid blocking the event loop on the hot path.
+  // Only triggers on 400/413 context window errors (rare path).
+  fs.promises.mkdir(path.join(os.homedir(), '.claude', 'state'), { recursive: true })
+    .then(() => fs.promises.writeFile(path.join(os.homedir(), '.claude', 'state', 'context-compact-needed'), Date.now().toString()))
+    .catch(() => { /* best-effort */ });
 
   const enhanced = JSON.stringify({
     type: "error",
@@ -862,6 +859,10 @@ async function hedgedForwardRequest(
         for (let i = 0; i < wrapped.length; i++) {
           if (!completed.has(i)) {
             wrapped[i].then(r => {
+              // Skip 499 — these are synthetic responses from hedge cancellation
+              // (hedgeController.abort()), not real upstream failures. Recording
+              // them would inflate circuit breaker failure counts.
+              if (r.response.status === 499) return;
               if (provider._circuitBreaker) provider._circuitBreaker.recordResult(r.response.status);
               try { r.response.body?.cancel(); } catch {}
             });
@@ -1124,6 +1125,12 @@ export async function forwardWithFallback(
 
       if (winner.response.status >= 200 && winner.response.status < 300) {
         sharedController.abort();
+        // Record winner's result for circuit breaker (mirrors distribution path pattern)
+        const winningEntry = chain[winner.index];
+        const winningProvider = winningEntry ? providers.get(winningEntry.provider) : undefined;
+        if (winningProvider?._circuitBreaker) {
+          winningProvider._circuitBreaker.recordResult(winner.response.status);
+        }
         for (const f of failures) {
           try {
             f.response.body?.cancel();
@@ -1131,8 +1138,6 @@ export async function forwardWithFallback(
             /* ignore */
           }
         }
-        // Return the winning entry's model, not ctx.actualModel which may be overwritten
-        const winningEntry = chain[winner.index];
         return { response: winner.response, actualModel: winningEntry?.model, actualProvider: winningEntry?.provider };
       }
 
