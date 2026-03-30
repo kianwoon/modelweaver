@@ -373,7 +373,7 @@ function agentKey(provider: ProviderConfig): string {
   return `${origin ?? "unknown"}:${size}`;
 }
 
-export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStore?: MetricsStore): AppHandle {
+export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStore?: MetricsStore, version?: string): AppHandle {
   let config: AppConfig = initConfig;
   const logger = createLogger(logLevel);
   const app = new Hono();
@@ -603,6 +603,9 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
 
     return c.json(data);
   });
+
+  // Version endpoint
+  app.get("/api/version", (c) => c.json({ version: version ?? "unknown" }));
 
   // Circuit breaker status endpoint
   app.get("/api/circuit-breaker", (c) => {
