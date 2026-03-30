@@ -28,10 +28,10 @@ describe("CircuitBreaker", () => {
       expect(breaker.getStatus().failures).toBe(0);
     });
 
-    it("counts auth failures (401) toward breaker threshold but stays closed under 3-failure limit", () => {
+    it("ignores auth failures (401) toward breaker threshold — only 429 and 5xx count as failures", () => {
       breaker.recordResult(401);
       expect(breaker.getState()).toBe("closed");
-      expect(breaker.getStatus().failures).toBe(1);
+      expect(breaker.getStatus().failures).toBe(0);
     });
 
     it("tracks retriable failures (429, 5xx) but stays closed under threshold", () => {
