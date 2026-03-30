@@ -16,6 +16,8 @@ const SUMMARY_DEBOUNCE_MS = 500;
 const STREAM_WS_THROTTLE_MS = 500; // caps stream event delivery to ~2 Hz per client
 const BACKPRESSURE_LOG_INTERVAL_MS = 10_000; // throttle backpressure warnings to once per 10s
 const MAX_DRAIN_QUEUE = 100; // cap queue size per client to prevent unbounded growth
+const MAX_TOTAL_QUEUED_BYTES = 10 * 1024 * 1024; // 10MB safety cap across all clients
+let totalQueuedBytes = 0;
 const clientStreamThrottle = new Map<WebSocket, number>();
 
 interface PendingDrain {
@@ -229,21 +231,32 @@ export function broadcastStreamEvent(data: StreamEvent): void {
         if (pending) {
           // Cap queue size per client to prevent unbounded growth
           if (pending.queue.length >= MAX_DRAIN_QUEUE) {
-            pending.queue.shift(); // drop oldest
+            const dropped = pending.queue.shift()!; // drop oldest
+            totalQueuedBytes -= Buffer.byteLength(dropped, 'utf-8');
             droppedQueueCount++;
             maybeLogBackpressure("queue");
           }
+          const msgSize = Buffer.byteLength(msg, 'utf-8');
+          if (totalQueuedBytes + msgSize > MAX_TOTAL_QUEUED_BYTES) {
+            console.warn(`[ws] Total queued bytes cap reached (${totalQueuedBytes}/${MAX_TOTAL_QUEUED_BYTES}), dropping message`);
+            droppedQueueCount++;
+            maybeLogBackpressure("global-cap");
+            continue;
+          }
+          totalQueuedBytes += msgSize;
           pending.queue.push(msg);
         } else {
           const queue = [msg];
           const sendOnDrain = () => {
             pendingDrains.delete(client);
+            totalQueuedBytes = 0;
             if (client.readyState === client.OPEN) {
               for (const queuedMsg of queue) client.send(queuedMsg);
             }
           };
           const timer = setTimeout(() => {
             pendingDrains.delete(client);
+            totalQueuedBytes = 0;
             client.removeListener('drain', sendOnDrain);
             if (client.readyState === client.OPEN) {
               for (const queuedMsg of queue) client.send(queuedMsg);

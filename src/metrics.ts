@@ -93,6 +93,8 @@ export class MetricsStore {
     }
 
     // Increment counters for new entry
+    // NOTE: Uses Number (IEEE 754 double). Precision loss after ~9 quadrillion tokens.
+    // Consider BigInt for extreme-scale deployments.
     this._totalInputTokens += metrics.inputTokens ?? 0;
     this._totalOutputTokens += metrics.outputTokens ?? 0;
     this._totalTokensPerSec += metrics.tokensPerSec ?? 0;

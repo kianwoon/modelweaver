@@ -75,8 +75,12 @@ export function selectByWeight(
     return entries;
   }
 
-  // Calculate total weight of available providers
-  const totalWeight = available.reduce((sum, e) => sum + (e.weight ?? 0), 0);
+  // Filter out zero/negative weight entries to avoid degenerate weighted selection
+  const selectable = available.filter(e => (e.weight ?? 0) > 0);
+  if (selectable.length === 0) return entries;
+
+  // Calculate total weight of selectable providers
+  const totalWeight = selectable.reduce((sum, e) => sum + (e.weight ?? 0), 0);
   if (totalWeight <= 0) return entries;
 
   // Weighted random selection
@@ -84,8 +88,8 @@ export function selectByWeight(
   let cumulative = 0;
   let selectedIndex = 0;
 
-  for (let i = 0; i < available.length; i++) {
-    cumulative += available[i].weight ?? 0;
+  for (let i = 0; i < selectable.length; i++) {
+    cumulative += selectable[i].weight ?? 0;
     if (rand < cumulative) {
       selectedIndex = i;
       break;
@@ -93,8 +97,8 @@ export function selectByWeight(
   }
 
   // Build result: [selected, ...remaining as fallback]
-  const selected = available[selectedIndex];
-  const fallback = available.filter((_, i) => i !== selectedIndex);
+  const selected = selectable[selectedIndex];
+  const fallback = selectable.filter((_, i) => i !== selectedIndex);
 
   return [selected, ...fallback];
 }

@@ -28,7 +28,7 @@ describe("CircuitBreaker", () => {
       expect(breaker.getStatus().failures).toBe(0);
     });
 
-    it("stays closed on non-retriable error (401)", () => {
+    it("ignores auth failures (401) toward breaker threshold — only 429 and 5xx count as failures", () => {
       breaker.recordResult(401);
       expect(breaker.getState()).toBe("closed");
       expect(breaker.getStatus().failures).toBe(0);
