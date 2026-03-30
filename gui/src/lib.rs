@@ -93,7 +93,7 @@ async fn fetch_version(port: u16) -> Result<VersionResult, String> {
 }
 
 pub fn run() {
-    let version = env!("PACKAGE_VERSION");
+    let version = env!("CARGO_PKG_VERSION");
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![fetch_metrics, check_daemon, fetch_version])
