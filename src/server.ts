@@ -304,13 +304,15 @@ function createMetricsTransform(
         firstChunk = false;
         const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
         setImmediate(() => {
-          const prevState = ctx._streamState ?? "start";
-          ctx._streamState = nextState(prevState, "streaming", ctx.requestId);
+          if (ctx._streamState !== "streaming") {
+            const prevState = ctx._streamState ?? "start";
+            ctx._streamState = nextState(prevState, "streaming", ctx.requestId);
+          }
           broadcastStreamEvent({
             requestId: ctx.requestId,
             model: actualModel || ctx.model,
             tier: ctx.tier,
-            state: ctx._streamState,
+            state: ctx._streamState ?? "streaming",
             outputTokens: tokens.output,
             timestamp: now,
             preview: responsePreview,
@@ -338,13 +340,15 @@ function createMetricsTransform(
         firstChunk = false;
         const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
         setImmediate(() => {
-          const prevState = ctx._streamState ?? "start";
-          ctx._streamState = nextState(prevState, "streaming", ctx.requestId);
+          if (ctx._streamState !== "streaming") {
+            const prevState = ctx._streamState ?? "start";
+            ctx._streamState = nextState(prevState, "streaming", ctx.requestId);
+          }
           broadcastStreamEvent({
             requestId: ctx.requestId,
             model: actualModel || ctx.model,
             tier: ctx.tier,
-            state: ctx._streamState,
+            state: ctx._streamState ?? "streaming",
             outputTokens,
             timestamp: nowJson,
             preview: responsePreview,
