@@ -318,8 +318,10 @@ function updateSummary(data) {
     recentEl.appendChild(createEmptyEl('No requests yet'));
   } else {
     recentEl.textContent = '';
-    const reversed = recentRequests.slice(-10).reverse();
-    for (const r of reversed) {
+    const sorted = [...recentRequests]
+      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+      .slice(0, 10);
+    for (const r of sorted) {
       const latency = r.latencyMs >= 1000 ? (r.latencyMs / 1000).toFixed(1) + 's' : r.latencyMs + 'ms';
 
       const item = document.createElement('div');

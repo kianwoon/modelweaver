@@ -202,7 +202,12 @@ function createMetricsTransform(
     if (textBlockMatches.length > 0) {
       const rawValue = textBlockMatches[textBlockMatches.length - 1][1];
       // Use JSON.parse to correctly handle ALL escape sequences (\uXXXX, \t, \r, etc.)
-      const lastText = JSON.parse(`"${rawValue}"`);
+      let lastText: string;
+      try {
+        lastText = JSON.parse(`"${rawValue}"`);
+      } catch {
+        lastText = rawValue;
+      }
       responsePreview += lastText;
       if (responsePreview.length > PREVIEW_MAX) {
         responsePreview = responsePreview.slice(-PREVIEW_MAX);

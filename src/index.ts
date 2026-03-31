@@ -64,6 +64,11 @@ function parseArgs(argv: string[]): { port?: number; config?: string; verbose: b
       case "--monitor":
         args.monitor = true;
         break;
+      default:
+        if (argv[i].startsWith("-")) {
+          console.warn(`Unknown argument: ${argv[i]}`);
+        }
+        break;
     }
   }
   return args;

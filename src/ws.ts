@@ -19,6 +19,7 @@ const BACKPRESSURE_LOG_INTERVAL_MS = 10_000; // throttle backpressure warnings t
 const MAX_DRAIN_QUEUE = 100; // cap queue size per client to prevent unbounded growth
 const MAX_TOTAL_QUEUED_BYTES = 10 * 1024 * 1024; // 10MB safety cap across all clients
 let totalQueuedBytes = 0;
+const clientQueuedBytes = new Map<WebSocket, number>();
 const clientStreamThrottle = new Map<WebSocket, number>();
 
 interface PendingDrain {
@@ -26,6 +27,15 @@ interface PendingDrain {
   queue: string[];
 }
 const pendingDrains = new Map<WebSocket, PendingDrain>();
+
+/** Decrement totalQueuedBytes by a client's tracked bytes and clear the entry. */
+function releaseClientQueuedBytes(client: WebSocket): void {
+  const bytes = clientQueuedBytes.get(client) ?? 0;
+  if (bytes > 0) {
+    totalQueuedBytes -= bytes;
+    clientQueuedBytes.delete(client);
+  }
+}
 const lastSummarySent = new WeakMap<any, MetricsSummary>();
 
 function computeSummaryDelta(prev: MetricsSummary, next: MetricsSummary): MetricsSummaryDelta | null {
@@ -196,6 +206,7 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
         clearTimeout(pending.timer);
         pendingDrains.delete(ws);
       }
+      releaseClientQueuedBytes(ws);
       unsubscribe();
     };
 
@@ -233,7 +244,9 @@ export function broadcastStreamEvent(data: StreamEvent): void {
           // Cap queue size per client to prevent unbounded growth
           if (pending.queue.length >= MAX_DRAIN_QUEUE) {
             const dropped = pending.queue.shift()!; // drop oldest
-            totalQueuedBytes -= Buffer.byteLength(dropped, 'utf-8');
+            const droppedSize = Buffer.byteLength(dropped, 'utf-8');
+            totalQueuedBytes -= droppedSize;
+            clientQueuedBytes.set(client, (clientQueuedBytes.get(client) ?? 0) - droppedSize);
             droppedQueueCount++;
             maybeLogBackpressure("queue");
           }
@@ -245,19 +258,23 @@ export function broadcastStreamEvent(data: StreamEvent): void {
             continue;
           }
           totalQueuedBytes += msgSize;
+          clientQueuedBytes.set(client, (clientQueuedBytes.get(client) ?? 0) + msgSize);
           pending.queue.push(msg);
         } else {
           const queue = [msg];
+          const msgSize = Buffer.byteLength(msg, 'utf-8');
+          totalQueuedBytes += msgSize;
+          clientQueuedBytes.set(client, msgSize);
           const sendOnDrain = () => {
             pendingDrains.delete(client);
-            totalQueuedBytes = 0;
+            releaseClientQueuedBytes(client);
             if (client.readyState === client.OPEN) {
               for (const queuedMsg of queue) client.send(queuedMsg);
             }
           };
           const timer = setTimeout(() => {
             pendingDrains.delete(client);
-            totalQueuedBytes = 0;
+            releaseClientQueuedBytes(client);
             client.removeListener('drain', sendOnDrain);
             if (client.readyState === client.OPEN) {
               for (const queuedMsg of queue) client.send(queuedMsg);
@@ -308,6 +325,7 @@ export function closeWebSocket(): void {
   }
   pendingDrains.clear();
   clientStreamThrottle.clear();
+  clientQueuedBytes.clear();
   for (const client of wssInstance.clients) {
     client.terminate();
   }

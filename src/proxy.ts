@@ -675,16 +675,15 @@ export async function forwardRequest(
         message: stallMsg,
         timestamp: Date.now(),
       });
-      // Inject a structured SSE error event so the client can parse it and retry.
-      // Format: "event: error\ndata: {...}\n\n" — standard SSE error event.
+      // Inject an Anthropic-compatible SSE error event so Claude Code's SDK
+      // parses it as a retriable error and fires again automatically.
+      // Format: "event: error\ndata: {"type":"error","error":{"type":"api_error","message":"..."}}\n\n"
       const sseError = JSON.stringify({
-        requestId: ctx.requestId,
-        model: String(ctx.actualModel ?? entry.model ?? ""),
-        state: "error",
-        message: stallMsg,
-        timestamp: Date.now(),
-        provider: provider.name,  // Issue 1: include provider in SSE error payload
-        stalled: true,            // Issue 2: mark this as a stall event
+        type: "error",
+        error: {
+          type: "api_error",
+          message: stallMsg,
+        },
       });
       const ssePayload = `event: error\ndata: ${sseError}\n\n`;
       // Issue 2 & 4: Destroy upstream FIRST so no more data can enter the pipe,
