@@ -117,6 +117,7 @@ export interface MetricsSummary {
   recentRequests: RequestMetrics[];
   modelStats: ModelPerformanceStats[];
   sessionStats: { sessionId: string; requestCount: number; lastSeen: number }[];
+  providerErrors: { [provider: string]: { total: number; errors: { [status: number]: number } } };
 }
 
 export interface MetricsSummaryDelta {

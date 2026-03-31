@@ -148,9 +148,9 @@ body {
   display: flex;
   flex-direction: column;
   gap: 3px;
-  min-height: 0;
-  max-height: 58px;
-  overflow: hidden;
+  overflow-y: auto;
+  max-height: 200px;
+  transition: max-height 0.3s ease;
 }
 
 .activity-content {
@@ -191,7 +191,7 @@ body {
   bottom: 0;
   width: 0%;
   min-width: 18px;
-  transition: width 0.3s ease;
+  transition: none;
   background-image: repeating-linear-gradient(
     -45deg,
     transparent,
@@ -200,28 +200,28 @@ body {
     rgba(255, 255, 255, 0.15) 16px
   );
   background-size: 200% 100%;
-  -webkit-animation: activity-stripes 0.6s linear infinite;
-  animation: activity-stripes 0.6s linear infinite;
   will-change: background-position;
 }
 
 .activity-fill.state-streaming {
   background-color: var(--green);
+  background-image: none !important;
+  -webkit-animation: none !important;
+  animation: none !important;
+  transition: none;
   box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
 }
 
 .activity-fill.state-fallback {
   background-color: var(--yellow);
   box-shadow: 0 0 8px rgba(255, 193, 7, 0.4);
-  -webkit-animation-duration: 0.4s;
-  animation-duration: 0.4s;
+  transition: none;
 }
 
 .activity-fill.state-error {
   background-color: var(--accent);
   box-shadow: 0 0 8px rgba(233, 69, 96, 0.5);
-  -webkit-animation: none;
-  animation: none;
+  transition: none;
 }
 
 .activity-fill.state-complete {
@@ -235,6 +235,8 @@ body {
 .activity-fill.state-start {
   background-color: var(--blue);
   box-shadow: 0 0 8px rgba(33, 150, 243, 0.4);
+  transition: none;
+  -webkit-animation: activity-pulse 1.5s ease-in-out infinite, activity-stripes 0.6s linear infinite;
   animation: activity-pulse 1.5s ease-in-out infinite, activity-stripes 0.6s linear infinite;
 }
 

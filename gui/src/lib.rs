@@ -27,6 +27,9 @@ struct MetricsResult {
     total_cache_read_tokens: Option<u64>,
     total_cache_creation_tokens: Option<u64>,
     avg_cache_hit_rate: Option<f64>,
+    model_stats: Option<Vec<serde_json::Value>>,
+    provider_errors: Option<serde_json::Value>,
+    session_stats: Option<Vec<serde_json::Value>>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -65,6 +68,13 @@ async fn fetch_metrics(port: u16) -> Result<MetricsResult, String> {
         total_cache_read_tokens: data["totalCacheReadTokens"].as_u64(),
         total_cache_creation_tokens: data["totalCacheCreationTokens"].as_u64(),
         avg_cache_hit_rate: data["avgCacheHitRate"].as_f64(),
+        model_stats: data["modelStats"].as_array().cloned(),
+        provider_errors: if data["providerErrors"].is_null() || data["providerErrors"].is_object() {
+            Some(data["providerErrors"].clone())
+        } else {
+            None
+        },
+        session_stats: data["sessionStats"].as_array().cloned(),
     })
 }
 

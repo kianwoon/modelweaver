@@ -144,7 +144,7 @@ const providerSchema = z.object({
 const routingEntrySchema = z.object({
   provider: z.string(),
   model: z.string().optional(),
-  weight: z.number().positive().optional(),
+  weight: z.number().min(0).optional(),
 });
 
 const hedgingSchema = z.object({

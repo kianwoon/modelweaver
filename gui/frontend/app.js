@@ -25,8 +25,38 @@ const recentEl = document.getElementById('recent');
 // Activity bar state
 const activityContent = document.getElementById('activity-content');
 const activeRequests = new Map();
-const MAX_VISIBLE_BARS = 3;
 const STALE_BAR_TIMEOUT_MS = 120_000; // 2 minutes
+const barLifecycle = new Map(); // requestId -> 'active' | 'closing' | 'removed'
+
+// Keyed DOM diffing Maps for updateSummary
+const modelRows = new Map();
+const providerRows = new Map();
+const recentRows = new Map();
+
+// Global stale check interval (replaces per-bar timers)
+const STALE_CHECK_INTERVAL_MS = 5000;
+let staleCheckTimer = null;
+
+function ensureStaleChecker() {
+  if (staleCheckTimer || activeRequests.size === 0) return;
+  staleCheckTimer = setInterval(() => {
+    if (activeRequests.size === 0) {
+      clearInterval(staleCheckTimer);
+      staleCheckTimer = null;
+      return;
+    }
+    const now = Date.now();
+    for (const [requestId, entry] of activeRequests) {
+      if (now - entry.startTime > STALE_BAR_TIMEOUT_MS && barLifecycle.get(requestId) === 'active') {
+        console.warn('[Activity] Bar stale — auto-dismissing', requestId);
+        entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
+        entry.fill.classList.add('state-error');
+        entry.statusSpan.textContent = 'stalled';
+        removeActivityBar(requestId);
+      }
+    }
+  }, STALE_CHECK_INTERVAL_MS);
+}
 
 // Glow state — counter-based so concurrent requests don't fight
 let glowActiveCount = 0;
@@ -185,170 +215,210 @@ function updateSummary(data) {
   statInputTokens.textContent = formatNumber(data.totalInputTokens || 0);
   statOutputTokens.textContent = formatNumber(data.totalOutputTokens || 0);
   statCache.textContent = data.avgCacheHitRate > 0 ? data.avgCacheHitRate.toFixed(0) + '%' : '\u2014';
-
   // Uptime
   const uptimeEl = document.getElementById('last-refresh');
   if (uptimeEl) uptimeEl.textContent = formatUptime(data.uptimeSeconds || 0);
-
-  // Active models — performance indicators
+  // --- Models: keyed DOM diffing ---
   const modelStats = data.modelStats || [];
+  const modelKeys = new Set(modelStats.map(m => m.model));
+  // Remove rows for models no longer present
+  for (const [key, row] of modelRows) {
+    if (!modelKeys.has(key)) {
+      row.remove();
+      modelRows.delete(key);
+    }
+  }
   if (modelStats.length === 0) {
-    modelsEl.textContent = '';
-    modelsEl.appendChild(createEmptyEl('No requests yet'));
+    // Show empty state in place of rows (keep header if already built)
+    if (modelRows.size === 0 && !modelsEl.querySelector('.empty')) {
+      modelsEl.appendChild(createEmptyEl('No requests yet'));
+    }
   } else {
     const maxLatency = Math.max(...modelStats.map(m => m.avgLatencyMs), 1);
-    modelsEl.textContent = '';
-    // Column headers
-    const header = document.createElement('div');
-    header.className = 'perf-row perf-header';
-    const cols = ['Model', 'Reqs', 'Latency', '', 'Success', 'T/s', '%'];
-    for (const col of cols) {
-      const span = document.createElement('span');
-      span.textContent = col;
-      header.appendChild(span);
-    }
-    modelsEl.appendChild(header);
-    for (const m of modelStats) {
-      const row = document.createElement('div');
-      row.className = 'perf-row';
-      row.setAttribute('data-model', m.model || '');
-
-      // Model name
-      const nameEl = document.createElement('span');
-      nameEl.className = 'model-name';
-      nameEl.textContent = shortModel(m.model);
-      nameEl.title = m.model;
-      row.appendChild(nameEl);
-
-      // Request count
-      const countEl = document.createElement('span');
-      countEl.className = 'perf-count';
-      countEl.textContent = m.count + ' reqs';
-      row.appendChild(countEl);
-
-      // Latency bar + value
-      const latencyWrap = document.createElement('span');
-      latencyWrap.className = 'perf-latency';
-      const barTrack = document.createElement('span');
-      barTrack.className = 'perf-bar';
-      const barFill = document.createElement('span');
-      barFill.className = 'perf-bar-fill';
-      const pct = maxLatency > 0 ? (m.avgLatencyMs / maxLatency * 100) : 0;
-      barFill.style.width = Math.max(pct, 2) + '%';
-      if (m.avgLatencyMs < 500) barFill.classList.add('perf-fast');
-      else if (m.avgLatencyMs < 1500) barFill.classList.add('perf-medium');
-      else barFill.classList.add('perf-slow');
-      barTrack.appendChild(barFill);
-      const latencyVal = document.createElement('span');
-      latencyVal.className = 'perf-latency-val';
-      if (m.avgLatencyMs < 500) latencyVal.classList.add('perf-fast');
-      else if (m.avgLatencyMs < 1500) latencyVal.classList.add('perf-medium');
-      else latencyVal.classList.add('perf-slow');
-      latencyVal.textContent = m.avgLatencyMs >= 1000
-        ? (m.avgLatencyMs / 1000).toFixed(1) + 's'
-        : m.avgLatencyMs + 'ms';
-      latencyWrap.appendChild(barTrack);
-      latencyWrap.appendChild(latencyVal);
-      row.appendChild(latencyWrap);
-
-      // Success rate
-      const successEl = document.createElement('span');
-      successEl.className = 'perf-success';
-      if (m.successRate >= 95) {
-        successEl.classList.add('perf-good');
-        successEl.textContent = '\u2713 ' + m.successRate.toFixed(0) + '%';
-      } else if (m.successRate >= 80) {
-        successEl.classList.add('perf-warn');
-        successEl.textContent = '\u26A0 ' + m.successRate.toFixed(0) + '%';
-      } else {
-        successEl.classList.add('perf-bad');
-        successEl.textContent = '\u26A0 ' + m.successRate.toFixed(0) + '%';
+    // Ensure header exists
+    if (!modelsEl.querySelector('.perf-header')) {
+      const header = document.createElement('div');
+      header.className = 'perf-row perf-header';
+      const cols = ['Model', 'Reqs', 'Latency', '', 'Success', 'T/s', '%'];
+      for (const col of cols) {
+        const span = document.createElement('span');
+        span.textContent = col;
+        header.appendChild(span);
       }
-      row.appendChild(successEl);
-
+      modelsEl.appendChild(header);
+    }
+    // Remove empty placeholder if present
+    const empty = modelsEl.querySelector('.empty');
+    if (empty) empty.remove();
+    for (const m of modelStats) {
+      const key = m.model || '';
+      let row = modelRows.get(key);
+      if (!row) {
+        row = document.createElement('div');
+        row.className = 'perf-row';
+        row.setAttribute('data-model', key);
+        // Build sub-elements, append to row, and cache refs
+        const specs = [
+          ['model-name', '_nameEl'], ['perf-count', '_countEl'],
+          ['perf-latency', null], ['perf-success', '_successEl'],
+          ['perf-tokens', '_tokensEl'], ['perf-cache', '_cacheEl'],
+        ];
+        let barFill, latencyVal;
+        for (const [cls, ref] of specs) {
+          const span = document.createElement('span');
+          span.className = cls;
+          row.appendChild(span);
+          if (ref) row[ref] = span;
+          if (cls === 'perf-latency') {
+            const track = document.createElement('span');
+            track.className = 'perf-bar';
+            barFill = document.createElement('span');
+            barFill.className = 'perf-bar-fill';
+            track.appendChild(barFill);
+            latencyVal = document.createElement('span');
+            latencyVal.className = 'perf-latency-val';
+            span.appendChild(track);
+            span.appendChild(latencyVal);
+          }
+        }
+        row._barFill = barFill;
+        row._latencyVal = latencyVal;
+        modelsEl.appendChild(row);
+        modelRows.set(key, row);
+      }
+      // Patch values — only update DOM if changed
+      const short = shortModel(m.model);
+      if (row._nameEl.textContent !== short) {
+        row._nameEl.textContent = short;
+        row._nameEl.title = m.model;
+      }
+      const countText = m.count + ' reqs';
+      if (row._countEl.textContent !== countText) row._countEl.textContent = countText;
+      const pct = maxLatency > 0 ? (m.avgLatencyMs / maxLatency * 100) : 0;
+      const newWidth = Math.max(pct, 2) + '%';
+      if (row._barFill.style.width !== newWidth) row._barFill.style.width = newWidth;
+      // Latency color class
+      const lc = m.avgLatencyMs < 500 ? 'perf-fast' : m.avgLatencyMs < 1500 ? 'perf-medium' : 'perf-slow';
+      for (const el of [row._barFill, row._latencyVal]) {
+        el.classList.toggle('perf-fast', lc === 'perf-fast');
+        el.classList.toggle('perf-medium', lc === 'perf-medium');
+        el.classList.toggle('perf-slow', lc === 'perf-slow');
+      }
+      const latencyText = m.avgLatencyMs >= 1000
+        ? (m.avgLatencyMs / 1000).toFixed(1) + 's' : m.avgLatencyMs + 'ms';
+      if (row._latencyVal.textContent !== latencyText) row._latencyVal.textContent = latencyText;
+      // Success rate
+      const sr = m.successRate >= 0 ? m.successRate.toFixed(0) + '%' : '\u2014';
+      const sp = m.successRate >= 95 ? '\u2713 ' : '\u26A0 ';
+      const sc = m.successRate >= 95 ? 'perf-good' : m.successRate >= 80 ? 'perf-warn' : 'perf-bad';
+      const successText = sp + sr;
+      if (row._successEl.textContent !== successText) {
+        row._successEl.textContent = successText;
+        row._successEl.className = 'perf-success ' + sc;
+      }
       // Tokens/sec
-      const tokensEl = document.createElement('span');
-      tokensEl.className = 'perf-tokens';
-      tokensEl.textContent = m.avgTokensPerSec > 0 ? m.avgTokensPerSec.toFixed(0) + ' t/s' : '\u2014';
-      row.appendChild(tokensEl);
-
-      // Cache hit %
-      const cacheEl = document.createElement('span');
-      cacheEl.className = 'perf-cache';
-      cacheEl.textContent = m.avgCacheHitRate > 0 ? m.avgCacheHitRate.toFixed(0) + '%' : '\u2014';
-      row.appendChild(cacheEl);
-
-      modelsEl.appendChild(row);
+      const tokenText = m.avgTokensPerSec > 0 ? m.avgTokensPerSec.toFixed(0) + ' t/s' : '\u2014';
+      if (row._tokensEl.textContent !== tokenText) row._tokensEl.textContent = tokenText;
+      // Cache hit rate
+      const cacheText = m.avgCacheHitRate > 0 ? m.avgCacheHitRate.toFixed(0) + '%' : '\u2014';
+      if (row._cacheEl.textContent !== cacheText) row._cacheEl.textContent = cacheText;
     }
   }
-
-  // Providers
+  // --- Providers: keyed DOM diffing ---
   const providers = data.providerDistribution || [];
+  const providerErrors = data.providerErrors || {};
+  const providerKeys = new Set(providers.map(p => p.provider));
+  // Remove rows for providers no longer present
+  for (const [key, row] of providerRows) {
+    if (!providerKeys.has(key)) {
+      row.remove();
+      providerRows.delete(key);
+    }
+  }
   if (providers.length === 0) {
-    providersEl.textContent = '';
-    providersEl.appendChild(createEmptyEl('No requests yet'));
+    if (providerRows.size === 0 && !providersEl.querySelector('.empty')) {
+      providersEl.appendChild(createEmptyEl('No requests yet'));
+    }
   } else {
     const total = providers.reduce((s, p) => s + p.count, 0);
-    providersEl.textContent = '';
+    const empty = providersEl.querySelector('.empty');
+    if (empty) empty.remove();
     for (const p of providers) {
+      const key = p.provider;
+      let row = providerRows.get(key);
+      if (!row) {
+        row = document.createElement('div');
+        row.className = 'provider-row';
+        row.setAttribute('data-provider', key);
+        row._nameEl = Object.assign(document.createElement('span'), { className: 'provider-name' });
+        row._countEl = Object.assign(document.createElement('span'), { className: 'provider-count' });
+        row.appendChild(row._nameEl);
+        row.appendChild(row._countEl);
+        providersEl.appendChild(row);
+        providerRows.set(key, row);
+      }
+      if (row._nameEl.textContent !== p.provider) row._nameEl.textContent = p.provider;
       const pct = total > 0 ? Math.round(p.count / total * 100) : 0;
-
-      const row = document.createElement('div');
-      row.className = 'provider-row';
-      row.setAttribute('data-provider', p.provider);
-
-      const name = document.createElement('span');
-      name.className = 'provider-name';
-      name.textContent = p.provider;
-
-      const count = document.createElement('span');
-      count.className = 'provider-count';
-      count.textContent = p.count + ' (' + pct + '%)';
-
-      row.appendChild(name);
-      row.appendChild(count);
-      providersEl.appendChild(row);
+      const errs = providerErrors[p.provider];
+      const err429 = errs?.errors?.[429] ?? 0;
+      const countText = err429 > 0
+        ? p.count + ' req \u00b7 ' + err429 + ' \u00d7 429'
+        : p.count + ' (' + pct + '%)';
+      if (row._countEl.textContent !== countText) row._countEl.textContent = countText;
     }
   }
-
-  // Recent requests
-  const recentRequests = data.recentRequests || [];
+  // --- Recent requests: keyed DOM diffing (cap 10) ---
+  const recentRequests = (data.recentRequests || [])
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+    .slice(0, 10);
+  const recentKeys = new Set(recentRequests.map(r => r.requestId));
+  // Remove rows for requestIds no longer present
+  for (const [key, row] of recentRows) {
+    if (!recentKeys.has(key)) {
+      row.remove();
+      recentRows.delete(key);
+    }
+  }
   if (recentRequests.length === 0) {
-    recentEl.textContent = '';
-    recentEl.appendChild(createEmptyEl('No requests yet'));
+    if (recentRows.size === 0 && !recentEl.querySelector('.empty')) {
+      recentEl.appendChild(createEmptyEl('No requests yet'));
+    }
   } else {
-    recentEl.textContent = '';
-    const sorted = [...recentRequests]
-      .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
-      .slice(0, 10);
-    for (const r of sorted) {
+    const empty = recentEl.querySelector('.empty');
+    if (empty) empty.remove();
+    for (const r of recentRequests) {
+      const key = r.requestId || '';
+      let item = recentRows.get(key);
+      if (!item) {
+        item = document.createElement('div');
+        item.className = 'recent-item';
+        const refs = ['recent-model', 'recent-provider', 'recent-tokens'];
+        const cacheKeys = ['_modelEl', '_providerEl', '_tokensEl'];
+        refs.forEach((cls, i) => {
+          const el = document.createElement('span');
+          el.className = cls;
+          item.appendChild(el);
+          item[cacheKeys[i]] = el;
+        });
+        recentEl.appendChild(item);
+        recentRows.set(key, item);
+      }
       const latency = r.latencyMs >= 1000 ? (r.latencyMs / 1000).toFixed(1) + 's' : r.latencyMs + 'ms';
-
-      const item = document.createElement('div');
-      item.className = 'recent-item';
-
-      const model = document.createElement('span');
-      model.className = 'recent-model';
       const actualModel = r.actualModel || r.model || 'unknown';
       const requestedModel = r.model || 'unknown';
       const showAlias = actualModel !== requestedModel;
-      model.title = showAlias ? `${actualModel} (via ${requestedModel})` : actualModel;
-      model.textContent = showAlias
-        ? `${shortModel(actualModel)} (${shortModel(requestedModel)})`
+      const newModelText = showAlias
+        ? shortModel(actualModel) + ' (' + shortModel(requestedModel) + ')'
         : shortModel(actualModel);
-
-      const provider = document.createElement('span');
-      provider.className = 'recent-provider';
-      provider.textContent = r.targetProvider || r.provider || '';
-
-      const tokens = document.createElement('span');
-      tokens.className = 'recent-tokens';
-      tokens.textContent = formatNumber((r.inputTokens || 0) + (r.outputTokens || 0)) + ' ' + latency;
-
-      item.appendChild(model);
-      item.appendChild(provider);
-      item.appendChild(tokens);
-      recentEl.appendChild(item);
+      const newTitle = showAlias ? actualModel + ' (via ' + requestedModel + ')' : actualModel;
+      if (item._modelEl.textContent !== newModelText) {
+        item._modelEl.textContent = newModelText;
+        item._modelEl.title = newTitle;
+      }
+      const newProvider = r.targetProvider || r.provider || '';
+      if (item._providerEl.textContent !== newProvider) item._providerEl.textContent = newProvider;
+      const newTokens = formatNumber((r.inputTokens || 0) + (r.outputTokens || 0)) + ' ' + latency;
+      if (item._tokensEl.textContent !== newTokens) item._tokensEl.textContent = newTokens;
     }
   }
 }
@@ -519,51 +589,54 @@ function createActivityBar(requestId, model, tier) {
 
   track.dataset.requestId = requestId;
   activityContent.appendChild(track);
-  trimBars();
 
-  const entry = { element: track, fill, label, statusSpan, startTime: Date.now(), lastOutputTokens: 0, prevTimestamp: 0, model, tier, ttfbTimer: null, staleTimer: null };
+  barLifecycle.set(requestId, 'active');
+  ensureStaleChecker();
 
-  entry.staleTimer = setTimeout(() => {
-    console.warn('[Activity] Bar stale — auto-dismissing', requestId);
-    entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
-    entry.fill.classList.add('state-error');
-    entry.statusSpan.textContent = 'stalled';
-    setTimeout(() => {
-      entry.element.classList.add('dismissing');
-      setTimeout(() => removeActivityBar(requestId), 800);
-    }, 2000);
-  }, STALE_BAR_TIMEOUT_MS);
+  const entry = { element: track, fill, label, statusSpan, modelName, startTime: Date.now(), lastOutputTokens: 0, prevTimestamp: 0, model, tier, ttfbTimer: null, lastStreamMs: 0 };
 
   return entry;
 }
 
-function trimBars() {
-  const bars = activityContent.querySelectorAll('.activity-track');
-  while (bars.length > MAX_VISIBLE_BARS) {
-    bars[0].remove();
-  }
-}
 
 function removeActivityBar(requestId) {
+  deactivateGlow();
   const entry = activeRequests.get(requestId);
   if (!entry) return;
-  if (entry.staleTimer) clearTimeout(entry.staleTimer);
-  if (entry) entry.ttfbCleared = true;
-  if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
-  if (entry) entry.ttfbTimer = null;
+  if (entry.barDismissed) return;
+  entry.barDismissed = true;
+  if (entry.ttfbTimer) { cancelAnimationFrame(entry.ttfbTimer); entry.ttfbTimer = null; }
+  entry.ttfbCleared = true;
   const bar = entry.element;
-  bar.remove();
-  activeRequests.delete(requestId);
-  if (activeRequests.size === 0) {
-    let idle = activityContent.querySelector('.activity-idle');
-    if (!idle) {
-      idle = document.createElement('span');
-      idle.className = 'activity-idle';
-      idle.textContent = 'Idle';
-      activityContent.appendChild(idle);
-    }
-    idle.style.display = '';
+  const fill = bar.querySelector('.activity-fill');
+  if (fill && fill.style.width !== '100%') {
+    fill.style.width = '100%';
   }
+  // Clean up Maps immediately (bar is still in DOM for CSS animation)
+  barLifecycle.delete(requestId);
+  activeRequests.delete(requestId);
+
+  // Apply dismissing class for CSS fade-out animation
+  bar.classList.add('dismissing');
+
+  // Remove bar after CSS transition completes
+  const cleanup = () => {
+    if (bar.parentNode) bar.parentNode.removeChild(bar);
+    if (activeRequests.size === 0) {
+      let idle = activityContent.querySelector('.activity-idle');
+      if (!idle) {
+        idle = document.createElement('span');
+        idle.className = 'activity-idle';
+        idle.textContent = 'Idle';
+        activityContent.appendChild(idle);
+      }
+      idle.style.display = '';
+    }
+  };
+
+  // Wait for CSS transition + safety fallback
+  bar.addEventListener('transitionend', cleanup, { once: true });
+  setTimeout(cleanup, 600); // 600ms fallback
 }
 
 // --- Glow helpers ---
@@ -609,7 +682,6 @@ function applyStreamingUpdate(requestId, data) {
   if (entry) entry.ttfbCleared = true;
   if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
   if (entry) entry.ttfbTimer = null;
-  resetStaleTimer(entry);
   entry.fill.classList.remove('state-start');
   entry.fill.classList.add('state-streaming');
   const elapsed = (Date.now() - entry.startTime) / 1000;
@@ -665,21 +737,6 @@ function flushSummaryUpdate() {
   summaryData = null;
 }
 
-function resetStaleTimer(entry) {
-  if (entry.staleTimer) clearTimeout(entry.staleTimer);
-  const requestId = entry.element.dataset.requestId;
-  entry.staleTimer = setTimeout(() => {
-    console.warn('[Activity] Bar stale — auto-dismissing', requestId);
-    entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
-    entry.fill.classList.add('state-error');
-    entry.statusSpan.textContent = 'stalled';
-    setTimeout(() => {
-      entry.element.classList.add('dismissing');
-      setTimeout(() => removeActivityBar(requestId), 800);
-    }, 2000);
-  }, STALE_BAR_TIMEOUT_MS);
-}
-
 function handleStreamEvent(data) {
   if (data.state === 'start') {
     activateGlow();
@@ -687,6 +744,7 @@ function handleStreamEvent(data) {
     if (activeRequests.has(data.requestId)) return;
     const bar = createActivityBar(data.requestId, data.model, data.tier);
     activeRequests.set(data.requestId, bar);
+    ensureStaleChecker();
     bar.provider = data.provider || '';
     bar.statusSpan.textContent = (bar.provider || '') + ' connecting...';
     bar.ttfbTimer = null;
@@ -704,11 +762,20 @@ function handleStreamEvent(data) {
     const hdr = data.headerSize || 0;
     entry.statusSpan.textContent = hdr + 'B hdr \u00b7 ' + secs + 's';
     entry.headerInfo = hdr + 'B hdr';
-    resetStaleTimer(entry);
+    // Update bar label if model differed (e.g. fallback, ttfb provider switch)
+    if (data.model) {
+      entry.modelName.textContent = shortModel(data.model);
+      entry.modelName.title = data.model;
+    }
 
   } else if (data.state === 'streaming') {
-    if (activeRequests.size >= 2) return;
     if (!activeRequests.has(data.requestId)) return;
+    const entry = activeRequests.get(data.requestId);
+    // Per-bar throttle: skip if updated within 200ms
+    const STREAM_THROTTLE_MS = 200;
+    const now = Date.now();
+    if (entry.lastStreamMs && now - entry.lastStreamMs < STREAM_THROTTLE_MS) return;
+    entry.lastStreamMs = now;
     // Batch streaming DOM updates via rAF — coalesces multiple events per frame
     pendingStreamUpdates.set(data.requestId, data);
     if (!rafScheduled) {
@@ -725,7 +792,6 @@ function handleStreamEvent(data) {
     entry.fill.classList.remove('state-streaming');
     entry.fill.classList.add('state-fallback');
     entry.statusSpan.textContent = 'fallback \u2192 ' + (data.to || '?');
-    resetStaleTimer(entry);
 
   } else if (data.state === 'complete') {
     const entry = activeRequests.get(data.requestId);
@@ -733,7 +799,6 @@ function handleStreamEvent(data) {
     if (entry) entry.ttfbCleared = true;
     if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
     if (entry) entry.ttfbTimer = null;
-    if (entry.staleTimer) clearTimeout(entry.staleTimer);
     entry.element.removeAttribute('data-preview');
     entry.element.style.marginBottom = '';
     entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
@@ -745,12 +810,12 @@ function handleStreamEvent(data) {
     if (data.cacheHitRate != null && data.cacheHitRate > 0) finalMeta += ' \u00b7 ' + data.cacheHitRate.toFixed(0) + '% cache';
     if (data.contextPercent != null && data.contextPercent > 0) finalMeta += ' \u00b7 ' + data.contextPercent.toFixed(0) + '% ctx';
     entry.statusSpan.textContent = finalMeta;
-    deactivateGlow();
-    // Dismiss track immediately so it fades together with the fill
-    setTimeout(() => {
-      entry.element.classList.add('dismissing');
-      setTimeout(() => removeActivityBar(data.requestId), 800);
-    }, 2000);
+    // Update bar label to show actual model that served the request
+    if (data.model) {
+      entry.modelName.textContent = shortModel(data.model);
+      entry.modelName.title = data.model;
+    }
+    removeActivityBar(data.requestId);
 
   } else if (data.state === 'error') {
     const entry = activeRequests.get(data.requestId);
@@ -758,7 +823,6 @@ function handleStreamEvent(data) {
     if (entry) entry.ttfbCleared = true;
     if (entry?.ttfbTimer) cancelAnimationFrame(entry.ttfbTimer);
     if (entry) entry.ttfbTimer = null;
-    if (entry.staleTimer) clearTimeout(entry.staleTimer);
     entry.element.removeAttribute('data-preview');
     entry.element.style.marginBottom = '';
     entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
@@ -767,12 +831,7 @@ function handleStreamEvent(data) {
       entry.fill.style.width = '10%';
     }
     entry.statusSpan.textContent = 'error ' + (data.status || '');
-    deactivateGlow();
-    // Dismiss track immediately so it fades together with the fill
-    setTimeout(() => {
-      entry.element.classList.add('dismissing');
-      setTimeout(() => removeActivityBar(data.requestId), 800);
-    }, 2000);
+    removeActivityBar(data.requestId);
   }
 }
 
@@ -821,11 +880,6 @@ function connectWebSocket(port) {
   });
 
   ws.addEventListener('message', (event) => {
-    // Allow start/complete/error/ttfb for bar lifecycle, skip summary/request/streaming
-    if (activeRequests.size >= 2) {
-      const raw = typeof event.data === 'string' ? event.data : '';
-      if (!raw.includes('"complete"') && !raw.includes('"error"')) return;
-    }
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === 'summary') {
@@ -923,9 +977,7 @@ if (window.__TAURI__) {
   }
 }
 
-// Initial HTTP fetch for instant data
+// Initial HTTP fetch, start polling, and attempt WebSocket connection
 fetchSummary();
-// Start polling as fallback
 pollTimer = setInterval(fetchSummary, POLL_INTERVAL);
-// Attempt WebSocket connection
 connectWebSocket(DEFAULT_PORT);

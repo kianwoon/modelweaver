@@ -89,6 +89,7 @@ function createMetricsTransform(
   ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race"; sessionId?: string },
   provider: string,
   targetProvider: string,
+  actualModel: string | undefined,
   metricsStore: MetricsStore,
   status: number,
   contentType: string,
@@ -248,7 +249,7 @@ function createMetricsTransform(
       setImmediate(() => {
         broadcastStreamEvent({
           requestId: ctx.requestId,
-          model: ctx.model,
+          model: actualModel || ctx.model,
           tier: ctx.tier,
           state: "complete",
           status,
@@ -302,7 +303,7 @@ function createMetricsTransform(
         setImmediate(() => {
           broadcastStreamEvent({
             requestId: ctx.requestId,
-            model: ctx.model,
+            model: actualModel || ctx.model,
             tier: ctx.tier,
             state: "streaming",
             outputTokens: tokens.output,
@@ -334,7 +335,7 @@ function createMetricsTransform(
         setImmediate(() => {
           broadcastStreamEvent({
             requestId: ctx.requestId,
-            model: ctx.model,
+            model: actualModel || ctx.model,
             tier: ctx.tier,
             state: "streaming",
             outputTokens,
@@ -467,7 +468,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     // Broadcast stream start event
     broadcastStreamEvent({
       requestId,
-      model,
+      model: ctx.providerChain[0]?.model || ctx.model,
       tier: ctx.tier,
       state: "start",
       provider: ctx.providerChain[0]?.provider ?? "unknown",
@@ -499,7 +500,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       setImmediate(() => {
         broadcastStreamEvent({
           requestId,
-          model,
+          model: ctx.providerChain[0]?.model || ctx.model,
           tier: ctx.tier,
           state: "error",
           status: 502,
@@ -532,7 +533,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       setImmediate(() => {
         broadcastStreamEvent({
           requestId,
-          model,
+          model: ctx.providerChain[0]?.model || ctx.model,
           tier: ctx.tier,
           state: "ttfb",
           status: response.status,
@@ -547,7 +548,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       setImmediate(() => {
         broadcastStreamEvent({
           requestId,
-          model,
+          model: ctx.providerChain[0]?.model || ctx.model,
           tier: ctx.tier,
           state: "error",
           status: response.status,
@@ -561,8 +562,23 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     let responseBody: ReadableStream<Uint8Array> | null = response.body;
     if (response.body && response.status >= 200 && response.status < 300 && metricsStore) {
       const targetProvider = result.actualProvider || (ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider);
-      const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, metricsStore, response.status, response.headers.get("content-type") || "");
+      const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, result.actualModel, metricsStore, response.status, response.headers.get("content-type") || "");
       responseBody = response.body.pipeThrough(transform) as typeof responseBody;
+    } else if (response.status >= 200 && response.status < 300 && !metricsStore) {
+      // No metricsStore — broadcast complete directly so the GUI progress bar finishes
+      const latencyMs = Date.now() - ctx.startTime;
+      setImmediate(() => {
+        broadcastStreamEvent({
+          requestId,
+          model: result.actualModel || ctx.providerChain[0]?.model || ctx.model,
+          tier: ctx.tier,
+          state: "complete",
+          status: response.status,
+          latencyMs,
+          outputTokens: 0,
+          timestamp: Date.now(),
+        });
+      });
     }
 
     // Add request ID to response (responses from fetch have immutable headers, so create new)

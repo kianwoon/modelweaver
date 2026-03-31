@@ -30,6 +30,7 @@ export class MetricsStore {
   private _totalCacheCreationTokens = 0;
   private _modelMap = new Map<string, ModelEntry>();
   private _providerMap = new Map<string, number>();
+  private _providerErrors = new Map<string, { total: number; errors: { [status: number]: number } }>();
   private _sessionMap = new Map<string, { count: number; lastSeen: number }>();
 
   // Lazy cache for getModelStats() — invalidated on every recordRequest()
@@ -82,6 +83,16 @@ export class MetricsStore {
       if (pCount <= 1) this._providerMap.delete(pKey);
       else this._providerMap.set(pKey, pCount - 1);
 
+      // Decrement provider error counters for evicted entry
+      if (evicted.status < 200 || evicted.status >= 400) {
+        const pe = this._providerErrors.get(pKey);
+        if (pe) {
+          pe.total--;
+          if (pe.errors[evicted.status]) pe.errors[evicted.status]--;
+          if (pe.total <= 0) this._providerErrors.delete(pKey);
+        }
+      }
+
       // Decrement session counter for evicted entry
       if (evicted.sessionId) {
         const sEntry = this._sessionMap.get(evicted.sessionId);
@@ -114,6 +125,21 @@ export class MetricsStore {
 
     const pKey = metrics.targetProvider ?? metrics.provider;
     this._providerMap.set(pKey, (this._providerMap.get(pKey) ?? 0) + 1);
+
+    // Track provider errors (4xx/5xx)
+    if (metrics.status < 200 || metrics.status >= 400) {
+      const pe = this._providerErrors.get(pKey);
+      if (pe) {
+        pe.total++;
+        pe.errors[metrics.status] = (pe.errors[metrics.status] ?? 0) + 1;
+      } else {
+        this._providerErrors.set(pKey, {
+          total: 1,
+          errors: { [metrics.status]: 1 },
+        });
+      }
+      this.pruneMap(this._providerErrors, (e) => e.total);
+    }
 
     // Increment session counter
     if (metrics.sessionId) {
@@ -190,6 +216,7 @@ export class MetricsStore {
         .map(([sessionId, { count, lastSeen }]) => ({ sessionId, requestCount: count, lastSeen }))
         .sort((a, b) => b.lastSeen - a.lastSeen)
         .slice(0, 50),
+      providerErrors: Object.fromEntries(this._providerErrors),
     };
   }
 

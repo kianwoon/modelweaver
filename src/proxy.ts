@@ -767,6 +767,19 @@ export async function forwardRequest(
         ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
         : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
 
+    // Broadcast error so the GUI progress bar doesn't stall on TTFB/total timeout
+    setImmediate(() => {
+      broadcastStreamEvent({
+        requestId: ctx.requestId,
+        model: String(ctx.actualModel ?? entry.model ?? ctx.providerChain[0]?.model ?? ""),
+        tier: ctx.tier,
+        state: "error",
+        status: 502,
+        message,
+        timestamp: Date.now(),
+      });
+    });
+
     return makeErrorResponse(502, "overloaded_error", message);
   } finally {
     removeAbortListener?.();

@@ -26,8 +26,12 @@ npx modelweaver order
 After modifying `gui/frontend/**` (HTML/CSS/JS):
 
 ```bash
-# 3. Rebuild GUI app bundle
-cd gui && npx tauri build --bundles app
+# 1. Clean Rust artifacts (MUST — Tauri embeds frontend as a brotli blob at compile time.
+#    Cargo caches this embedding, so regular rebuilds skip frontend changes!)
+cd gui && cargo clean
+
+# 2. Rebuild GUI app bundle from scratch
+npx tauri build --bundles app
 ```
 
 ## Commit / Push / NPM Publish Workflow
@@ -76,5 +80,5 @@ git push
 ## Conventions
 
 - Commit messages: conventional commits (`feat:`, `fix:`, `chore:`, `docs:`)
-- GUI frontend is **embedded at build time** — always rebuild app bundle after frontend changes
+- GUI frontend is **embedded at build time** as a brotli blob — `cargo clean` is required before rebuilding to pick up CSS/HTML/JS changes (regular rebuild uses cached blob)
 - Never commit `.env` or secrets
