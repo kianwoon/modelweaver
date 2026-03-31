@@ -15,11 +15,13 @@ LLM proxy with Tauri GUI. Routes requests to multiple upstream providers with fa
 After modifying `src/**/*.ts` or `gui/frontend/**`:
 
 ```bash
-# 1. Rebuild daemon
+# 1. Stop daemon (free port 3456 first — prevents "Port already in use" errors)
+npx modelweaver stop
+
+# 2. Rebuild daemon
 npm run build
 
-# 2. Restart daemon
-npx modelweaver stop
+# 3. Start daemon
 npx modelweaver order
 ```
 
