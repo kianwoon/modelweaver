@@ -23,8 +23,12 @@ export function buildYamlConfig(state: WizardState): string {
       timeout: provider.timeout,
       ttfbTimeout: provider.ttfbTimeout,
       authType: provider.authType,
+      ...(provider.concurrentLimit != null && { concurrentLimit: provider.concurrentLimit }),
+      ...(provider.stallTimeout != null && { stallTimeout: provider.stallTimeout }),
+      ...(provider.poolSize != null && { poolSize: provider.poolSize }),
       circuitBreaker: {
         failureThreshold: provider.circuitBreaker.threshold,
+        windowSeconds: provider.circuitBreaker.windowSeconds,
         cooldownSeconds: provider.circuitBreaker.cooldown,
       },
     };

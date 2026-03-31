@@ -217,7 +217,7 @@ export function findConfigFile(cwd: string = process.cwd(), { skipGlobal = false
  *  Used by init wizard to show existing providers and offer add/edit. */
 export function peekConfig(
   cwd?: string,
-): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; circuitBreaker?: { threshold?: number; cooldown?: number } }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string; weight?: number }[]> } | null {
+): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; concurrentLimit?: number; stallTimeout?: number; poolSize?: number; circuitBreaker?: { threshold?: number; windowSeconds?: number; cooldown?: number } }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string; weight?: number }[]> } | null {
   const configPath = findConfigFile(cwd);
   if (!configPath) return null;
 
@@ -225,7 +225,7 @@ export function peekConfig(
   const parsed = parseYaml(raw) as Record<string, unknown>;
   const providersRaw = (parsed?.providers ?? {}) as Record<string, Record<string, unknown>>;
 
-  const providers = new Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; circuitBreaker?: { threshold?: number; cooldown?: number } }>();
+  const providers = new Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; concurrentLimit?: number; stallTimeout?: number; poolSize?: number; circuitBreaker?: { threshold?: number; windowSeconds?: number; cooldown?: number } }>();
 
   for (const [id, config] of Object.entries(providersRaw)) {
     const apiKey = String(config.apiKey ?? "");
@@ -236,6 +236,7 @@ export function peekConfig(
     const cbRaw = config.circuitBreaker as Record<string, unknown> | undefined;
     const circuitBreaker = cbRaw ? {
       threshold: cbRaw.failureThreshold !== undefined ? Number(cbRaw.failureThreshold) : undefined,
+      windowSeconds: cbRaw.windowSeconds !== undefined ? Number(cbRaw.windowSeconds) : undefined,
       cooldown: cbRaw.cooldownSeconds !== undefined ? Number(cbRaw.cooldownSeconds) : undefined,
     } : undefined;
 
@@ -245,6 +246,9 @@ export function peekConfig(
       authType: String(config.authType ?? "anthropic") as "anthropic" | "bearer",
       timeout: Number(config.timeout ?? 30000),
       ttfbTimeout: config.ttfbTimeout !== undefined ? Number(config.ttfbTimeout) : undefined,
+      concurrentLimit: config.concurrentLimit !== undefined ? Number(config.concurrentLimit) : undefined,
+      stallTimeout: config.stallTimeout !== undefined ? Number(config.stallTimeout) : undefined,
+      poolSize: config.poolSize !== undefined ? Number(config.poolSize) : undefined,
       circuitBreaker,
     });
   }

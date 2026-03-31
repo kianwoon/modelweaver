@@ -146,19 +146,27 @@ export async function addProvider(state: WizardState): Promise<ScreenAction> {
   const apiKey = (await promptPassword('API key')).trim();
   if (!apiKey) throw new GoBackError();
 
-  const timeout = await promptNumber('Request timeout (ms)', 60000);
+  const timeout = await promptNumber('Request timeout (ms)', 20000);
   if (timeout <= 0) {
     fail('Timeout must be greater than 0');
     return { type: 'error', message: 'Timeout must be greater than 0' };
   }
 
-  const ttfbTimeout = await promptNumber('TTFB timeout (ms)', 30000);
+  const ttfbTimeout = await promptNumber('TTFB timeout (ms)', 8000);
   if (ttfbTimeout >= timeout) {
     fail(`Warning: TTFB timeout (${ttfbTimeout}ms) should be less than total timeout (${timeout}ms). Proceeding anyway.`);
     // Non-blocking warning — continue with the values
   }
-  const threshold = await promptNumber('Circuit breaker threshold', 3);
+  const threshold = await promptNumber('Circuit breaker failure threshold', 3);
+  const windowSeconds = await promptNumber('Circuit breaker window (s)', 120);
+  if (windowSeconds < 1) { fail('Window must be at least 1 second'); return { type: 'error', message: 'Window must be at least 1 second' }; }
   const cooldown = await promptNumber('Circuit breaker cooldown (s)', 60);
+  const concurrentLimit = await promptNumber('Concurrent limit', 3);
+  if (concurrentLimit < 1) { fail('Concurrent limit must be at least 1'); return { type: 'error', message: 'Concurrent limit must be at least 1' }; }
+  const stallTimeout = await promptNumber('Stall timeout (ms)', 15000);
+  if (stallTimeout <= 0) { fail('Stall timeout must be positive'); return { type: 'error', message: 'Stall timeout must be positive' }; }
+  const poolSize = await promptNumber('Connection pool size', 10);
+  if (poolSize < 1) { fail('Pool size must be at least 1'); return { type: 'error', message: 'Pool size must be at least 1' }; }
 
   // Determine auth type from baseUrl matching
   const preset = matchPreset(baseUrl);
@@ -171,8 +179,12 @@ export async function addProvider(state: WizardState): Promise<ScreenAction> {
     timeout,
     ttfbTimeout,
     authType: preset.authType,
+    concurrentLimit,
+    stallTimeout,
+    poolSize,
     circuitBreaker: {
       threshold,
+      windowSeconds,
       cooldown,
     },
   };
@@ -199,7 +211,11 @@ export async function editProvider(state: WizardState): Promise<ScreenAction> {
       boxLine('Timeout:', `${provider.timeout}ms`),
       boxLine('TTFB timeout:', `${provider.ttfbTimeout}ms`),
       boxLine('CB threshold:', `${provider.circuitBreaker.threshold}`),
+      boxLine('CB window:', `${provider.circuitBreaker.windowSeconds}s`),
       boxLine('CB cooldown:', `${provider.circuitBreaker.cooldown}s`),
+      boxLine('Concurrent limit:', `${provider.concurrentLimit ?? 3}`),
+      boxLine('Stall timeout:', `${provider.stallTimeout ?? 15000}ms`),
+      boxLine('Pool size:', String(provider.poolSize ?? 10)),
       boxLine('Auth type:', provider.authType),
       '',
       '  Select field to edit:',
@@ -213,7 +229,11 @@ export async function editProvider(state: WizardState): Promise<ScreenAction> {
       { title: 'Timeout', value: 'timeout' },
       { title: 'TTFB timeout', value: 'ttfbTimeout' },
       { title: 'CB threshold', value: 'threshold' },
+      { title: 'CB window', value: 'window' },
       { title: 'CB cooldown', value: 'cooldown' },
+      { title: 'Concurrent limit', value: 'concurrentLimit' },
+      { title: 'Stall timeout', value: 'stallTimeout' },
+      { title: 'Pool size', value: 'poolSize' },
       { title: 'Back', value: 'back' },
     ]);
 
@@ -255,10 +275,50 @@ export async function editProvider(state: WizardState): Promise<ScreenAction> {
         check('Threshold updated.');
         break;
       }
+      case 'window': {
+        const val = await promptNumber('Circuit breaker window (s)', provider.circuitBreaker.windowSeconds ?? 120);
+        if (val < 1) {
+          fail('Window must be at least 1 second');
+          break;
+        }
+        provider.circuitBreaker.windowSeconds = val;
+        check('CB window updated.');
+        break;
+      }
       case 'cooldown': {
         const val = await promptNumber('Circuit breaker cooldown (s)', provider.circuitBreaker.cooldown);
         provider.circuitBreaker.cooldown = val;
         check('Cooldown updated.');
+        break;
+      }
+      case 'concurrentLimit': {
+        const val = await promptNumber('Concurrent limit', provider.concurrentLimit ?? 3);
+        if (val < 1) {
+          fail('Concurrent limit must be at least 1');
+          break;
+        }
+        provider.concurrentLimit = val;
+        check('Concurrent limit updated.');
+        break;
+      }
+      case 'stallTimeout': {
+        const val = await promptNumber('Stall timeout (ms)', provider.stallTimeout ?? 15000);
+        if (val <= 0) {
+          fail('Stall timeout must be positive');
+          break;
+        }
+        provider.stallTimeout = val;
+        check('Stall timeout updated.');
+        break;
+      }
+      case 'poolSize': {
+        const val = await promptNumber('Connection pool size', provider.poolSize ?? 10);
+        if (val < 1) {
+          fail('Pool size must be at least 1');
+          break;
+        }
+        provider.poolSize = val;
+        check('Pool size updated.');
         break;
       }
     }

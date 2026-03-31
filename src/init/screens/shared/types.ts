@@ -8,8 +8,12 @@ export interface WizardProvider {
   timeout: number;
   ttfbTimeout: number;
   authType: 'anthropic' | 'bearer';
+  concurrentLimit?: number;
+  stallTimeout?: number;
+  poolSize?: number;
   circuitBreaker: {
     threshold: number;
+    windowSeconds: number;
     cooldown: number;
   };
 }

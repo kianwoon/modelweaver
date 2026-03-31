@@ -94,10 +94,14 @@ function buildStateFromConfig(): WizardState {
       envKey: provider.envKey,
       apiKey: process.env[provider.envKey] ?? '',
       timeout: provider.timeout,
-      ttfbTimeout: provider.ttfbTimeout ?? 15000,
+      ttfbTimeout: provider.ttfbTimeout ?? 8000,
       authType: provider.authType,
+      concurrentLimit: provider.concurrentLimit ?? 3,
+      stallTimeout: provider.stallTimeout ?? 15000,
+      poolSize: provider.poolSize ?? 10,
       circuitBreaker: {
         threshold: provider.circuitBreaker?.threshold ?? 5,
+        windowSeconds: provider.circuitBreaker?.windowSeconds ?? 120,
         cooldown: provider.circuitBreaker?.cooldown ?? 60,
       },
     });
