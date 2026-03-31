@@ -148,10 +148,11 @@ const VALID_TRANSITIONS: Record<StreamState, StreamState[]> = {
   error: [],
 };
 
-/** Validate StreamState transitions — warns on invalid transitions and returns the requested next state. */
+/** Validate StreamState transitions — rejects invalid transitions by returning current state (no-op). */
 export function nextState(current: StreamState, next: StreamState, ctx?: string): StreamState {
   if (!VALID_TRANSITIONS[current].includes(next)) {
     console.warn(`[StreamState] Invalid transition: ${current} → ${next}`, ctx ?? "");
+    return current;
   }
   return next;
 }
