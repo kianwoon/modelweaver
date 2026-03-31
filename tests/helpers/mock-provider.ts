@@ -19,11 +19,22 @@ export function createMockProvider() {
     }
 
     if (behavior === "stall") {
-      // Send headers immediately (satisfies TTFB) but never send body data
+      // Send one initial SSE chunk (to trigger pipe data flow and stall timer setup),
+      // then stall indefinitely — simulating a provider that starts streaming but then
+      // goes silent, triggering the stall timer to fire and inject an SSE error event.
       return new Response(
         new ReadableStream({
           start(controller) {
-            // Never enqueue or close — simulates a stalled stream
+            // Enqueue one valid SSE chunk to trigger the pipe's data flow setup,
+            // then never send more data or close — the stall timer will handle cleanup.
+            controller.enqueue(
+              new Uint8Array(
+                new TextEncoder().encode(
+                  "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stall\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"test\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"
+                )
+              )
+            );
+            // Do NOT close — simulate a stream that stalls after headers/initial data
           },
         }),
         {
