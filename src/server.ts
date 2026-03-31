@@ -3,7 +3,8 @@ import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
 import { forwardWithFallback, type FallbackResult, recordProviderLatency } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
-import type { AppConfig, ProviderConfig, RequestContext } from "./types.js";
+import type { AppConfig, ProviderConfig, RequestContext, StreamState } from "./types.js";
+import { nextState } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { gzip } from "node:zlib";
 import { promisify } from "node:util";
@@ -86,7 +87,7 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
  * For non-streaming JSON responses, uses a bounded sliding-window regex scan.
  */
 function createMetricsTransform(
-  ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race"; sessionId?: string },
+  ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race"; sessionId?: string; _streamState?: StreamState },
   provider: string,
   targetProvider: string,
   actualModel: string | undefined,
@@ -247,11 +248,13 @@ function createMetricsTransform(
       // Broadcast completion event
       const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
       setImmediate(() => {
+        const prevState = ctx._streamState ?? "streaming";
+        ctx._streamState = nextState(prevState, "complete", ctx.requestId);
         broadcastStreamEvent({
           requestId: ctx.requestId,
           model: actualModel || ctx.model,
           tier: ctx.tier,
-          state: "complete",
+          state: ctx._streamState,
           status,
           latencyMs: Date.now() - ctx.startTime,
           inputTokens: inp,
@@ -301,11 +304,15 @@ function createMetricsTransform(
         firstChunk = false;
         const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
         setImmediate(() => {
+          if (ctx._streamState !== "streaming") {
+            const prevState = ctx._streamState ?? "start";
+            ctx._streamState = nextState(prevState, "streaming", ctx.requestId);
+          }
           broadcastStreamEvent({
             requestId: ctx.requestId,
             model: actualModel || ctx.model,
             tier: ctx.tier,
-            state: "streaming",
+            state: ctx._streamState ?? "streaming",
             outputTokens: tokens.output,
             timestamp: now,
             preview: responsePreview,
@@ -333,11 +340,15 @@ function createMetricsTransform(
         firstChunk = false;
         const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
         setImmediate(() => {
+          if (ctx._streamState !== "streaming") {
+            const prevState = ctx._streamState ?? "start";
+            ctx._streamState = nextState(prevState, "streaming", ctx.requestId);
+          }
           broadcastStreamEvent({
             requestId: ctx.requestId,
             model: actualModel || ctx.model,
             tier: ctx.tier,
-            state: "streaming",
+            state: ctx._streamState ?? "streaming",
             outputTokens,
             timestamp: nowJson,
             preview: responsePreview,
@@ -466,11 +477,12 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     });
 
     // Broadcast stream start event
+    ctx._streamState = "start"; // initialization — skip transition validation
     broadcastStreamEvent({
       requestId,
       model: ctx.providerChain[0]?.model || ctx.model,
       tier: ctx.tier,
-      state: "start",
+      state: ctx._streamState,
       provider: ctx.providerChain[0]?.provider ?? "unknown",
       timestamp: Date.now(),
     });
@@ -498,11 +510,13 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error("Forward failed", { requestId, error: errMsg });
       setImmediate(() => {
+        const prevState = ctx._streamState ?? "start";
+        ctx._streamState = nextState(prevState, "error", ctx.requestId);
         broadcastStreamEvent({
           requestId,
           model: ctx.providerChain[0]?.model || ctx.model,
           tier: ctx.tier,
-          state: "error",
+          state: ctx._streamState,
           status: 502,
           message: errMsg,
           timestamp: Date.now(),
@@ -531,11 +545,13 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       response.headers.forEach((v, k) => { headerSize += k.length + v.length + 4; });
       headerSize += 2; // trailing CRLF
       setImmediate(() => {
+        const prevState = ctx._streamState ?? "start";
+        ctx._streamState = nextState(prevState, "ttfb", ctx.requestId);
         broadcastStreamEvent({
           requestId,
           model: ctx.providerChain[0]?.model || ctx.model,
           tier: ctx.tier,
-          state: "ttfb",
+          state: ctx._streamState,
           status: response.status,
           headerSize,
           timestamp: Date.now(),
@@ -546,11 +562,13 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     // Broadcast error event for non-2xx responses
     if (response.status >= 400) {
       setImmediate(() => {
+        const prevState = ctx._streamState ?? "start";
+        ctx._streamState = nextState(prevState, "error", ctx.requestId);
         broadcastStreamEvent({
           requestId,
           model: ctx.providerChain[0]?.model || ctx.model,
           tier: ctx.tier,
-          state: "error",
+          state: ctx._streamState,
           status: response.status,
           message: `HTTP ${response.status}`,
           timestamp: Date.now(),
@@ -568,11 +586,13 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       // No metricsStore — broadcast complete directly so the GUI progress bar finishes
       const latencyMs = Date.now() - ctx.startTime;
       setImmediate(() => {
+        const prevState = ctx._streamState ?? "start";
+        ctx._streamState = nextState(prevState, "complete", ctx.requestId);
         broadcastStreamEvent({
           requestId,
           model: result.actualModel || ctx.providerChain[0]?.model || ctx.model,
           tier: ctx.tier,
-          state: "complete",
+          state: ctx._streamState,
           status: response.status,
           latencyMs,
           outputTokens: 0,
@@ -710,10 +730,10 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         }
       }
 
+      await Promise.all(closePromises);
       config = newConfig;
       clearRoutingCache();
       clearHedgeStats();
-      await Promise.all(closePromises);
     },
     closeAgents: async () => {
       const closePromises: Promise<void>[] = [];

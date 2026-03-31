@@ -37,6 +37,12 @@ export class MetricsStore {
   private _modelStatsDirty = true;
   private _cachedModelStats: ModelPerformanceStats[] = [];
 
+  // Incremental min tracking for pruneMap — avoids O(n) scan on every eviction
+  private _modelMapMin = { current: null as string | null };
+  private _providerMapMin = { current: null as string | null };
+  private _providerErrorsMin = { current: null as string | null };
+  private _sessionMapMin = { current: null as string | null };
+
   constructor(maxSize: number = 1000) {
     this.buffer = new Array(maxSize).fill(null);
     this.maxSize = maxSize;
@@ -44,19 +50,37 @@ export class MetricsStore {
     this.createdAt = Date.now();
   }
 
-  /** Evict the entry with the lowest count when the map exceeds MAX_MAP_SIZE. */
-  private pruneMap<V>(map: Map<string, V>, getCount: (v: V) => number): void {
+  /** Evict the entry with the lowest count when the map exceeds MAX_MAP_SIZE.
+   *  Uses incremental min tracking — O(1) on normal evictions, O(n) only when
+   *  evicting the current minimum (rare). */
+  private pruneMap<K>(
+    map: Map<string, K>,
+    getCount: (v: K) => number,
+    minKeyRef: { current: string | null },
+  ): void {
     if (map.size <= MetricsStore.MAX_MAP_SIZE) return;
-    let minKey = '';
+
+    let minKey: string | null = null;
     let minVal = Infinity;
-    for (const [k, v] of map) {
-      const val = getCount(v);
-      if (val < minVal) {
-        minVal = val;
-        minKey = k;
-      }
+
+    // If we're not evicting the tracked minimum, we're O(1)
+    const evicting = minKeyRef.current;
+    if (evicting && map.has(evicting)) {
+      map.delete(evicting);
+      minKeyRef.current = null; // force rescan for next time
     }
-    if (minKey) map.delete(minKey);
+
+    // If we don't know the minimum, do a full scan (rare — only after evicting min)
+    if (minKeyRef.current === null) {
+      for (const [k, v] of map) {
+        const val = getCount(v);
+        if (val < minVal) {
+          minVal = val;
+          minKey = k;
+        }
+      }
+      minKeyRef.current = minKey;
+    }
   }
 
   recordRequest(metrics: RequestMetrics): void {
@@ -75,13 +99,20 @@ export class MetricsStore {
       const mEntry = this._modelMap.get(mKey);
       if (mEntry) {
         mEntry.count--;
-        if (mEntry.count <= 0) this._modelMap.delete(mKey);
+        if (mEntry.count <= 0) {
+          this._modelMap.delete(mKey);
+          if (this._modelMapMin.current === mKey) this._modelMapMin.current = null;
+        }
       }
 
       const pKey = evicted.targetProvider ?? evicted.provider;
       const pCount = this._providerMap.get(pKey) ?? 0;
-      if (pCount <= 1) this._providerMap.delete(pKey);
-      else this._providerMap.set(pKey, pCount - 1);
+      if (pCount <= 1) {
+        this._providerMap.delete(pKey);
+        if (this._providerMapMin.current === pKey) this._providerMapMin.current = null;
+      } else {
+        this._providerMap.set(pKey, pCount - 1);
+      }
 
       // Decrement provider error counters for evicted entry
       if (evicted.status < 200 || evicted.status >= 400) {
@@ -89,7 +120,10 @@ export class MetricsStore {
         if (pe) {
           pe.total--;
           if (pe.errors[evicted.status]) pe.errors[evicted.status]--;
-          if (pe.total <= 0) this._providerErrors.delete(pKey);
+          if (pe.total <= 0) {
+            this._providerErrors.delete(pKey);
+            if (this._providerErrorsMin.current === pKey) this._providerErrorsMin.current = null;
+          }
         }
       }
 
@@ -98,7 +132,10 @@ export class MetricsStore {
         const sEntry = this._sessionMap.get(evicted.sessionId);
         if (sEntry) {
           sEntry.count--;
-          if (sEntry.count <= 0) this._sessionMap.delete(evicted.sessionId);
+          if (sEntry.count <= 0) {
+            this._sessionMap.delete(evicted.sessionId);
+            if (this._sessionMapMin.current === evicted.sessionId) this._sessionMapMin.current = null;
+          }
         }
       }
     }
@@ -138,7 +175,7 @@ export class MetricsStore {
           errors: { [metrics.status]: 1 },
         });
       }
-      this.pruneMap(this._providerErrors, (e) => e.total);
+      this.pruneMap(this._providerErrors, (e) => e.total, this._providerErrorsMin);
     }
 
     // Increment session counter
@@ -150,12 +187,12 @@ export class MetricsStore {
       } else {
         this._sessionMap.set(metrics.sessionId, { count: 1, lastSeen: metrics.timestamp });
       }
-      this.pruneMap(this._sessionMap, (e) => e.count);
+      this.pruneMap(this._sessionMap, (e) => e.count, this._sessionMapMin);
     }
 
     // Enforce size caps on maps
-    this.pruneMap(this._modelMap, (e) => e.count);
-    this.pruneMap(this._providerMap, (v) => v);
+    this.pruneMap(this._modelMap, (e) => e.count, this._modelMapMin);
+    this.pruneMap(this._providerMap, (v) => v, this._providerMapMin);
 
     // Ring buffer: overwrite oldest entry when full
     this.buffer[index] = metrics;
