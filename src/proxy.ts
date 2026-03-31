@@ -784,6 +784,7 @@ export async function forwardRequest(
 
     // Broadcast error so the GUI progress bar doesn't stall on TTFB/total timeout
     setImmediate(() => {
+      if (ctx._streamState === "error" || ctx._streamState === "complete") return;
       const prevState = ctx._streamState ?? "start";
       ctx._streamState = nextState(prevState, "error", ctx.requestId);
       broadcastStreamEvent({
@@ -851,6 +852,10 @@ async function hedgedForwardRequest(
     const hedgeSignal = chainSignal
       ? AbortSignal.any([chainSignal, hedgeController.signal])
       : hedgeController.signal;
+    // Reset stream state per hedge copy — each copy races independently
+    // and may set _streamState/_stallFired via stall timers or error handlers.
+    ctx._streamState = "start";
+    (ctx as any)._stallFired = false;
     launched.push(
       forwardRequest(provider, entry, ctx, incomingRequest, hedgeSignal, index)
         .finally(() => inFlightCounter.decrement(provider.name))
@@ -1009,6 +1014,12 @@ export async function forwardWithFallback(
 
       onAttempt?.(entry.provider, i);
 
+      // Reset stream state for fallback — previous provider may have set
+      // _streamState to "error" and _stallFired to true, causing the next
+      // provider's TTFB/streaming/stall callbacks to hit invalid transitions.
+      ctx._streamState = "start";
+      (ctx as any)._stallFired = false;
+
       try {
         const response = await hedgedForwardRequest(
           provider, entry, ctx, incomingRequest, undefined, i, logger, hedging,
@@ -1099,6 +1110,11 @@ export async function forwardWithFallback(
     }
 
     onAttempt?.(entry.provider, index);
+
+    // Reset stream state for each racing provider — previous attempt may have
+    // set _streamState to "error" and _stallFired to true.
+    ctx._streamState = "start";
+    (ctx as any)._stallFired = false;
 
     try {
       const response = await hedgedForwardRequest(
