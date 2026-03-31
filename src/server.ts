@@ -473,7 +473,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     });
 
     // Broadcast stream start event
-    ctx._streamState = nextState(ctx._streamState ?? "start", "start", ctx.requestId);
+    ctx._streamState = "start"; // initialization — skip transition validation
     broadcastStreamEvent({
       requestId,
       model: ctx.providerChain[0]?.model || ctx.model,
@@ -726,10 +726,10 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         }
       }
 
-      clearRoutingCache();
-      clearHedgeStats();
       await Promise.all(closePromises);
       config = newConfig;
+      clearRoutingCache();
+      clearHedgeStats();
     },
     closeAgents: async () => {
       const closePromises: Promise<void>[] = [];
