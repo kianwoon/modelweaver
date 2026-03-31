@@ -220,7 +220,7 @@ describe("server", () => {
         ["my-custom-model", [{ provider: "mock", model: "claude-sonnet-4" }]],
       ]),
     });
-    setConfig(newConfig);
+    await setConfig(newConfig);
 
     // Verify config was updated
     expect(getConfig().modelRouting.has("my-custom-model")).toBe(true);
