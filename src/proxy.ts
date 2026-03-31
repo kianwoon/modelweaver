@@ -573,7 +573,7 @@ export async function forwardRequest(
   let removeAbortListener: (() => void) | undefined;
   let upstreamBody: import("node:stream").Readable | undefined;
   let passThrough: PassThrough | undefined;
-  let stallTimerRef: ReturnType<typeof setInterval> | undefined;
+  let stallTimerRef: ReturnType<typeof setTimeout> | undefined;
   if (externalSignal) {
     if (externalSignal.aborted) {
       // Already aborted — don't even start the request
@@ -588,7 +588,7 @@ export async function forwardRequest(
     const onExternalAbort = () => {
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
-      if (stallTimerRef) clearInterval(stallTimerRef);
+      if (stallTimerRef) clearTimeout(stallTimerRef);
       // Destroy upstream body and passThrough to free the connection back to the pool.
       // Deferred to avoid throwing inside AbortSignal event dispatch.
       setImmediate(() => {
@@ -628,7 +628,7 @@ export async function forwardRequest(
     // Guard against uncaught error events when the pipe is torn down
     // after passThrough.destroy() fires before upstreamBody.destroy().
     upstreamBody.on("error", () => {
-      if (stallTimerRef) clearInterval(stallTimerRef);
+      if (stallTimerRef) clearTimeout(stallTimerRef);
     });
 
     // For error status codes (4xx/5xx), consume body immediately without stall detection.
@@ -666,6 +666,10 @@ export async function forwardRequest(
     let lastDataTime = Date.now();
 
     const handleStall = () => {
+      // Guard: bail if already fired or stream is in a terminal state
+      if ((ctx as any)._stallFired) return;
+      if (ctx._streamState === "error" || ctx._streamState === "complete") return;
+      (ctx as any)._stallFired = true;
       provider._circuitBreaker?.recordResult(502);
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
       const prevState = ctx._streamState ?? "streaming";
@@ -697,25 +701,31 @@ export async function forwardRequest(
       passThrough!.end();
     };
 
-    stallTimerRef = setInterval(() => {
-      if (Date.now() - lastDataTime >= stallTimeout) {
-        clearInterval(stallTimerRef);
+    // One-shot stall timer: fires once after stallTimeout ms of no data.
+    // Re-schedules itself on each data event (see passThrough "data" handler below).
+    const scheduleStallTimer = () => {
+      if (stallTimerRef) clearTimeout(stallTimerRef);
+      stallTimerRef = setTimeout(() => {
         stallTimerRef = undefined;
-        handleStall();
-      }
-    }, Math.min(stallTimeout / 8, 1000));
+        if (Date.now() - lastDataTime >= stallTimeout) {
+          handleStall();
+        }
+      }, stallTimeout);
+    };
+    scheduleStallTimer();
 
-    // Monitor PassThrough for data events — just update timestamp (no timer churn)
+    // Monitor PassThrough for data events — update timestamp and reschedule one-shot stall timer
     passThrough!.on("data", () => {
       lastDataTime = Date.now();
+      scheduleStallTimer();
     });
 
     passThrough.on("end", () => {
-      if (stallTimerRef) { clearInterval(stallTimerRef); stallTimerRef = undefined; }
+      if (stallTimerRef) { clearTimeout(stallTimerRef); stallTimerRef = undefined; }
     });
 
     passThrough.on("error", () => {
-      if (stallTimerRef) { clearInterval(stallTimerRef); stallTimerRef = undefined; }
+      if (stallTimerRef) { clearTimeout(stallTimerRef); stallTimerRef = undefined; }
       try { passThrough!.destroy(); } catch { /* already destroyed */ }
     });
 
@@ -730,6 +740,8 @@ export async function forwardRequest(
       start(controller) {
         if (!passThrough) { controller.close(); return; }
         passThrough.on("data", (chunk: Buffer) => {
+          // Guard: don't enqueue data if stream is already in a terminal state
+          if (ctx._streamState === "error" || ctx._streamState === "complete") return;
           try { controller.enqueue(new Uint8Array(chunk)); } catch { /* already closed */ }
         });
         passThrough.on("end", () => {
@@ -754,7 +766,7 @@ export async function forwardRequest(
   } catch (error) {
     clearTimeout(timeout);
     if (ttfbTimer) clearTimeout(ttfbTimer);
-    if (stallTimerRef) clearInterval(stallTimerRef);
+    if (stallTimerRef) clearTimeout(stallTimerRef);
 
     // Network errors / timeouts — return a synthetic 502
     // If TTFB timer was still pending when we hit an AbortError, it means the
