@@ -20,7 +20,10 @@ export interface RoutingEntry {
   weight?: number;       // only for distribution
 }
 
+export type ConfigTarget = 'global' | 'project';
+
 export interface WizardState {
+  configTarget: ConfigTarget;
   providers: Map<string, WizardProvider>;
   models: string[];
   distribution: Map<string, RoutingEntry[]>;
@@ -39,6 +42,7 @@ export type ScreenId = 'main' | 'providers' | 'models' | 'distribution' | 'fallb
 
 export function createEmptyState(): WizardState {
   return {
+    configTarget: 'global',
     providers: new Map(),
     models: [],
     distribution: new Map(),

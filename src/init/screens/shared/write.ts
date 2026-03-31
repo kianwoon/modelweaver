@@ -69,6 +69,39 @@ export function buildYamlConfig(state: WizardState): string {
 }
 
 /**
+ * Builds a routing-only YAML config string (for project-level ./modelweaver.yaml).
+ * Contains only modelRouting — no providers, server, or credentials.
+ * Safe to commit to version control.
+ */
+export function buildRoutingYamlConfig(state: WizardState): string {
+  const modelRouting: Record<string, object[]> = {};
+
+  // Add distribution entries (with weight)
+  for (const [modelAlias, entries] of state.distribution) {
+    modelRouting[modelAlias] = entries.map((entry) => ({
+      provider: entry.provider,
+      model: entry.model,
+      weight: entry.weight,
+    }));
+  }
+
+  // Add fallback entries (without weight)
+  for (const [modelAlias, entries] of state.fallback) {
+    if (!modelRouting[modelAlias]) {
+      modelRouting[modelAlias] = [];
+    }
+    for (const entry of entries) {
+      modelRouting[modelAlias].push({
+        provider: entry.provider,
+        model: entry.model,
+      });
+    }
+  }
+
+  return stringify({ modelRouting });
+}
+
+/**
  * Writes .env file with API keys.
  * - If file exists, reads existing content and updates only keys present in state
  * - Preserves other environment variables
@@ -112,48 +145,74 @@ export function writeEnvFile(state: WizardState, envDir: string): void {
 
 /**
  * Writes WizardState to config files.
- * - Config dir: ~/.modelweaver/
- * - Writes config.yaml and .env
+ * - project mode: writes ./modelweaver.yaml with routing-only config, no .env
+ * - global mode: writes ~/.modelweaver/config.yaml and .env
  * - Skips writes when content is unchanged
  */
-export function writeStateToFiles(state: WizardState): void {
-  const configDir = join(homedir(), ".modelweaver");
+export function writeStateToFiles(state: WizardState, targetPath?: string): void {
   const messages: string[] = [];
 
   try {
-    // Create directory if it doesn't exist
-    if (!existsSync(configDir)) {
-      mkdirSync(configDir, { recursive: true });
-    }
+    if (state.configTarget === "project") {
+      // Project-level write: routing-only config to target path
+      const yamlPath = targetPath || join(process.cwd(), "modelweaver.yaml");
+      const yamlContent = buildRoutingYamlConfig(state);
 
-    // Write config.yaml — backup existing, skip if content unchanged
-    const yamlContent = buildYamlConfig(state);
-    const yamlPath = join(configDir, "config.yaml");
-    if (existsSync(yamlPath)) {
-      const currentYaml = readFileSync(yamlPath, "utf-8");
-      if (currentYaml !== yamlContent) {
-        // Create backup before overwriting
-        const backupPath = yamlPath + ".bak";
-        writeFileSync(backupPath, currentYaml, "utf-8");
-        writeFileSync(yamlPath, yamlContent, "utf-8");
-        messages.push("Updated config.yaml");
-      } else {
-        messages.push("No changes to config.yaml");
+      // Ensure parent directory exists
+      const yamlDir = yamlPath.includes("/") ? yamlPath.slice(0, yamlPath.lastIndexOf("/")) : ".";
+      if (!existsSync(yamlDir)) {
+        mkdirSync(yamlDir, { recursive: true });
       }
-    } else {
-      writeFileSync(yamlPath, yamlContent, "utf-8");
-      messages.push("Created config.yaml");
-    }
 
-    // Write .env — skip if content unchanged
-    const envPath = join(configDir, ".env");
-    const envBefore = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
-    writeEnvFile(state, configDir);
-    const envAfter = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
-    if (envAfter !== envBefore) {
-      messages.push("Updated .env");
+      if (existsSync(yamlPath)) {
+        const currentYaml = readFileSync(yamlPath, "utf-8");
+        if (currentYaml !== yamlContent) {
+          writeFileSync(yamlPath, yamlContent, "utf-8");
+          messages.push("Updated project routing");
+        } else {
+          messages.push("No changes to project routing");
+        }
+      } else {
+        writeFileSync(yamlPath, yamlContent, "utf-8");
+        messages.push("Created project routing");
+      }
+
+      // No .env for project config
     } else {
-      messages.push("No changes to .env");
+      // Global write: full config to ~/.modelweaver/
+      const configDir = join(homedir(), ".modelweaver");
+      if (!existsSync(configDir)) {
+        mkdirSync(configDir, { recursive: true });
+      }
+
+      const yamlContent = buildYamlConfig(state);
+      const yamlPath = join(configDir, "config.yaml");
+      if (existsSync(yamlPath)) {
+        const currentYaml = readFileSync(yamlPath, "utf-8");
+        if (currentYaml !== yamlContent) {
+          // Create backup before overwriting
+          const backupPath = yamlPath + ".bak";
+          writeFileSync(backupPath, currentYaml, "utf-8");
+          writeFileSync(yamlPath, yamlContent, "utf-8");
+          messages.push("Updated config.yaml");
+        } else {
+          messages.push("No changes to config.yaml");
+        }
+      } else {
+        writeFileSync(yamlPath, yamlContent, "utf-8");
+        messages.push("Created config.yaml");
+      }
+
+      // Write .env — skip if content unchanged
+      const envPath = join(configDir, ".env");
+      const envBefore = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
+      writeEnvFile(state, configDir);
+      const envAfter = existsSync(envPath) ? readFileSync(envPath, "utf-8") : "";
+      if (envAfter !== envBefore) {
+        messages.push("Updated .env");
+      } else {
+        messages.push("No changes to .env");
+      }
     }
 
     // Print summary

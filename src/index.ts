@@ -81,7 +81,9 @@ ModelWeaver — Multi-provider model orchestration proxy for Claude Code
 Usage: modelweaver [command] [options]
 
 Commands:
-  init [--quick]          Run interactive setup wizard (--quick for express mode)
+  init [--global] [--path <file>]   Run interactive setup wizard
+                                     --global: edit global config only
+                                     --path:   write to specific file
   start                   Start as background daemon
   stop                    Stop background daemon
   status                  Show daemon status
@@ -220,8 +222,15 @@ async function main() {
 
   // Handle 'init' subcommand — dynamic import to avoid loading prompts for normal startup
   if (process.argv[2] === 'init') {
+    const initArgs = process.argv.slice(3);
+    let initGlobal = false;
+    let initPath: string | undefined;
+    for (let i = 0; i < initArgs.length; i++) {
+      if (initArgs[i] === '--global') initGlobal = true;
+      if ((initArgs[i] === '--path') && initArgs[i + 1]) initPath = initArgs[++i];
+    }
     const { runInit } = await import('./init.js');
-    await runInit();
+    await runInit({ global: initGlobal, path: initPath });
     process.exit(0);
   }
 

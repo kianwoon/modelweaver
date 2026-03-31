@@ -271,6 +271,39 @@ export function peekConfig(
   return { configPath, providers, server, modelRouting };
 }
 
+// --- Project-level routing overlay ---
+
+/**
+ * Load modelRouting from a project-level config file (./modelweaver.yaml) without
+ * full validation. Returns null if the file doesn't exist or has no modelRouting.
+ * The project config may be routing-only (no providers) — only modelRouting matters.
+ */
+function loadProjectRoutingOverlay(cwd: string): Map<string, RoutingEntry[]> | null {
+  const localPath = join(cwd, "modelweaver.yaml");
+  if (!existsSync(localPath)) return null;
+
+  try {
+    const raw = readFileSync(localPath, "utf-8");
+    const parsed = parseYaml(raw) as Record<string, unknown> | null;
+    if (!parsed || !parsed.modelRouting) return null;
+
+    const modelRoutingRaw = parsed.modelRouting as Record<string, unknown>;
+    const overlay = new Map<string, RoutingEntry[]>();
+    for (const [alias, rawEntries] of Object.entries(modelRoutingRaw)) {
+      if (!Array.isArray(rawEntries)) continue;
+      const validated = z.array(routingEntrySchema).safeParse(rawEntries);
+      if (!validated.success) {
+        console.warn(`Skipping invalid modelRouting "${alias}" in project config`);
+        continue;
+      }
+      overlay.set(alias, validated.data);
+    }
+    return overlay.size > 0 ? overlay : null;
+  } catch {
+    return null;
+  }
+}
+
 // --- Load & validate ---
 
 export async function loadConfig(configPath?: string, cwd?: string): Promise<{ config: AppConfig; configPath: string }> {
@@ -436,6 +469,20 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       maxHedge: validated.hedging.maxHedge,
     } : undefined,
   };
+
+  // Apply project-level routing overlay when loading global config
+  if (path && !path.endsWith("modelweaver.yaml")) {
+    const localPath = join(cwd ?? process.cwd(), "modelweaver.yaml");
+    if (existsSync(localPath)) {
+      const projectRouting = loadProjectRoutingOverlay(cwd ?? process.cwd());
+      if (projectRouting) {
+        for (const [alias, entries] of projectRouting) {
+          config.modelRouting.set(alias, entries);
+        }
+      }
+    }
+  }
+
   return { config, configPath: path };
   } catch (e) {
     await Promise.allSettled(createdAgents.map(a => a.close()));

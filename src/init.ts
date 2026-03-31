@@ -2,7 +2,9 @@
 
 import { peekConfig } from './config.js';
 import { getPresets, getPreset, type ProviderPreset } from './presets.js';
-import { createEmptyState, type WizardState, type ScreenId, type ScreenAction } from './init/screens/shared/types.js';
+import { createEmptyState, type WizardState, type ScreenId, type ScreenAction, type ConfigTarget } from './init/screens/shared/types.js';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import { clearScreen, boxWithHeader, promptSelect, GoBackError } from './init/screens/shared/ui.js';
 import { renderProviders } from './init/screens/providers.js';
 import { renderModels } from './init/screens/models.js';
@@ -254,15 +256,52 @@ ${BOLD}${CYAN}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550
 // Main entry point
 // ---------------------------------------------------------------------------
 
-export async function runInit(): Promise<void> {
+export async function runInit(opts: { global?: boolean; path?: string } = {}): Promise<void> {
   // TTY check
   if (!process.stdin.isTTY) {
     console.error('Error: modelweaver init requires an interactive terminal.');
     process.exit(1);
   }
 
+  // Detect config file locations
+  const cwd = process.cwd();
+  const globalPath = join(process.env.HOME || process.env.USERPROFILE || '', '.modelweaver', 'config.yaml');
+  const localPath = join(cwd, 'modelweaver.yaml');
+  const hasLocal = existsSync(localPath);
+  const hasGlobal = existsSync(globalPath);
+
+  // Determine config target
+  let configTarget: ConfigTarget = 'global';
+  let targetPath: string | undefined;
+
+  if (opts.path) {
+    // Explicit path overrides — if it's not the global path, treat as project
+    targetPath = opts.path;
+    configTarget = (opts.path === globalPath || opts.path === join(cwd, '.modelweaver', 'config.yaml'))
+      ? 'global' : 'project';
+  } else if (opts.global) {
+    configTarget = 'global';
+  } else if (hasLocal && hasGlobal) {
+    // Both exist — ask user
+    const choice = await promptSelect('Config file detected:', [
+      { title: 'Edit global config', value: 'global' },
+      { title: 'Edit project routing', value: 'project' },
+    ]);
+    configTarget = choice === 'project' ? 'project' : 'global';
+    targetPath = configTarget === 'project' ? localPath : undefined;
+  } else if (hasLocal) {
+    // Only project-level exists
+    configTarget = 'project';
+    targetPath = localPath;
+    console.log(`  Detected project config: ${localPath}`);
+  } else {
+    // Neither exists — default to global
+    configTarget = 'global';
+  }
+
   // Build state from existing config (or empty if no config)
   let state = buildStateFromConfig();
+  state.configTarget = configTarget;
 
   // Welcome banner
   clearScreen();
@@ -280,52 +319,54 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     clearScreen();
     renderMain(state);
 
-    const choice = await promptSelect('Choose section:', [
-      { title: '1. Providers', value: '1' },
-      { title: '2. Models', value: '2' },
-      { title: '3. Distribution', value: '3' },
-      { title: '4. Fallback chains', value: '4' },
-      { title: '5. Server settings', value: '5' },
-      { title: 's. Save and exit', value: 's' },
-      { title: 'q. Quit without saving', value: 'q' },
-    ]);
+    const menuItems = [];
+    if (configTarget !== 'project') {
+      menuItems.push(
+        { title: '1. Providers', value: '1' },
+        { title: '2. Models', value: '2' },
+        { title: '3. Distribution', value: '3' },
+        { title: '4. Fallback chains', value: '4' },
+        { title: '5. Server settings', value: '5' },
+      );
+    } else {
+      // Project mode — routing only
+      menuItems.push(
+        { title: '1. Models', value: '1' },
+        { title: '2. Distribution', value: '2' },
+        { title: '3. Fallback chains', value: '3' },
+      );
+    }
+    menuItems.push({ title: 's. Save and exit', value: 's' });
+    menuItems.push({ title: 'q. Quit without saving', value: 'q' });
+
+    const choice = await promptSelect('Choose section:', menuItems);
+
+    const sectionMap: Record<string, ScreenId | 'save' | 'quit'> =
+      configTarget === 'project'
+        ? { '1': 'models', '2': 'distribution', '3': 'fallback', 's': 'save', 'q': 'quit' }
+        : { '1': 'providers', '2': 'models', '3': 'distribution', '4': 'fallback', '5': 'server', 's': 'save', 'q': 'quit' };
+
+    const actionKey = sectionMap[choice];
+
+    if (actionKey === 'save') {
+      const canSave = await handleValidation(state);
+      if (!canSave) {
+        await promptSelect('Press Enter to continue...', [
+          { title: 'Continue', value: 'ok' },
+        ]);
+        continue;
+      }
+      writeStateToFiles(state, targetPath);
+      showSuccess();
+      return;
+    }
+    if (actionKey === 'quit') return;
 
     let action: ScreenAction;
-
-    switch (choice) {
-      case '1':
-        action = await dispatch(state, 'providers');
-        break;
-      case '2':
-        action = await dispatch(state, 'models');
-        break;
-      case '3':
-        action = await dispatch(state, 'distribution');
-        break;
-      case '4':
-        action = await dispatch(state, 'fallback');
-        break;
-      case '5':
-        action = await dispatch(state, 'server');
-        break;
-      case 's':
-        // Validate first
-        const canSave = await handleValidation(state);
-        if (!canSave) {
-          // Stay on main menu, user needs to fix errors
-          await promptSelect('Press Enter to continue...', [
-            { title: 'Continue', value: 'ok' },
-          ]);
-          continue;
-        }
-        // Save and exit
-        writeStateToFiles(state);
-        showSuccess();
-        return;
-      case 'q':
-        return;
-      default:
-        action = { type: 'back' };
+    if (actionKey) {
+      action = await dispatch(state, actionKey);
+    } else {
+      action = { type: 'back' };
     }
 
     // Handle screen action
@@ -357,7 +398,7 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
           ]);
           continue;
         }
-        writeStateToFiles(state);
+        writeStateToFiles(state, targetPath);
         showSuccess();
         return;
       case 'quit':
