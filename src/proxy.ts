@@ -672,16 +672,7 @@ export async function forwardRequest(
       (ctx as any)._stallFired = true;
       provider._circuitBreaker?.recordResult(502);
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
-      const prevState = ctx._streamState ?? "streaming";
-      ctx._streamState = nextState(prevState, "error", ctx.requestId);
-      broadcastStreamEvent({
-        requestId: ctx.requestId,
-        model: String(ctx.actualModel ?? entry.model ?? ""),
-        tier: "",
-        state: ctx._streamState,
-        message: stallMsg,
-        timestamp: Date.now(),
-      });
+
       // Inject an Anthropic-compatible SSE error event so Claude Code's SDK
       // parses it as a retriable error and fires again automatically.
       // Format: "event: error\ndata: {"type":"error","error":{"type":"api_error","message":"..."}}\n\n"
@@ -693,12 +684,28 @@ export async function forwardRequest(
         },
       });
       const ssePayload = `event: error\ndata: ${sseError}\n\n`;
-      // Issue 2 & 4: Destroy upstream FIRST so no more data can enter the pipe,
+
+      // Destroy upstream FIRST so no more data can enter the pipe,
       // eliminating the race between SSE error write and late-arriving chunks.
       try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
-      // Now write the SSE error and end — no data can arrive after this since upstreamBody is destroyed
+
+      // Write the SSE error and end the passThrough BEFORE updating _streamState.
+      // The wrappedStream's data handler guards on _streamState === "error",
+      // so setting it before writing would block the SSE payload from being enqueued.
       passThrough!.write(ssePayload);
       passThrough!.end();
+
+      // Now update stream state — after SSE payload has been written to passThrough.
+      const prevState = ctx._streamState ?? "streaming";
+      ctx._streamState = nextState(prevState, "error", ctx.requestId);
+      broadcastStreamEvent({
+        requestId: ctx.requestId,
+        model: String(ctx.actualModel ?? entry.model ?? ""),
+        tier: "",
+        state: ctx._streamState,
+        message: stallMsg,
+        timestamp: Date.now(),
+      });
     };
 
     // One-shot stall timer: fires once after stallTimeout ms of no data.
