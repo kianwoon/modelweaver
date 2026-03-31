@@ -1,5 +1,6 @@
 // src/proxy.ts
 import type { HedgingConfig, ProviderConfig, RoutingEntry, RequestContext } from "./types.js";
+import { nextState } from "./types.js";
 import { request as undiciRequest } from "undici";
 import { PassThrough } from "node:stream";
 import fs from "node:fs";
@@ -667,11 +668,13 @@ export async function forwardRequest(
     const handleStall = () => {
       provider._circuitBreaker?.recordResult(502);
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
+      const prevState = ctx._streamState ?? "streaming";
+      ctx._streamState = nextState(prevState, "error", ctx.requestId);
       broadcastStreamEvent({
         requestId: ctx.requestId,
         model: String(ctx.actualModel ?? entry.model ?? ""),
         tier: "",
-        state: "error",
+        state: ctx._streamState,
         message: stallMsg,
         timestamp: Date.now(),
       });
@@ -769,11 +772,13 @@ export async function forwardRequest(
 
     // Broadcast error so the GUI progress bar doesn't stall on TTFB/total timeout
     setImmediate(() => {
+      const prevState = ctx._streamState ?? "start";
+      ctx._streamState = nextState(prevState, "error", ctx.requestId);
       broadcastStreamEvent({
         requestId: ctx.requestId,
         model: String(ctx.actualModel ?? entry.model ?? ctx.providerChain[0]?.model ?? ""),
         tier: ctx.tier,
-        state: "error",
+        state: ctx._streamState,
         status: 502,
         message,
         timestamp: Date.now(),

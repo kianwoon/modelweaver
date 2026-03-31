@@ -64,6 +64,8 @@ export interface RequestContext {
   sessionId?: string;
   fallbackMode?: "sequential" | "race";
   hasDistribution?: boolean;
+  /** Tracks current StreamState for transition validation */
+  _streamState?: StreamState;
 }
 
 export interface RequestMetrics {
@@ -136,6 +138,23 @@ export interface MetricsSummaryDelta {
 }
 
 export type StreamState = "start" | "ttfb" | "streaming" | "fallback" | "complete" | "error";
+
+const VALID_TRANSITIONS: Record<StreamState, StreamState[]> = {
+  start: ["ttfb", "streaming", "error"],
+  ttfb: ["streaming", "error"],
+  streaming: ["complete", "error", "fallback"],
+  fallback: ["streaming", "complete", "error"],
+  complete: [],
+  error: [],
+};
+
+/** Validate StreamState transitions — warns on invalid transitions and returns the requested next state. */
+export function nextState(current: StreamState, next: StreamState, ctx?: string): StreamState {
+  if (!VALID_TRANSITIONS[current].includes(next)) {
+    console.warn(`[StreamState] Invalid transition: ${current} → ${next}`, ctx ?? "");
+  }
+  return next;
+}
 
 export interface StreamEvent {
   requestId: string;
