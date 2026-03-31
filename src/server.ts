@@ -710,10 +710,10 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         }
       }
 
-      config = newConfig;
       clearRoutingCache();
       clearHedgeStats();
       await Promise.all(closePromises);
+      config = newConfig;
     },
     closeAgents: async () => {
       const closePromises: Promise<void>[] = [];

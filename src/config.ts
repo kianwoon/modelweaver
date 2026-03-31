@@ -360,7 +360,9 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
 
   // Build typed config — cache parsed URL components per provider (avoids per-request URL parsing)
   const providers = new Map<string, ProviderConfig>();
-  for (const [name, p] of Object.entries(validated.providers)) {
+  const createdAgents: import("undici").Agent[] = [];
+  try {
+    for (const [name, p] of Object.entries(validated.providers)) {
     const providerConfig: ProviderConfig = {
       name,
       baseUrl: p.baseUrl,
@@ -388,6 +390,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       connections: poolSize ?? 10,
       allowH2: true,
     });
+    createdAgents.push(providerConfig._agent);
     providerConfig.poolSize = poolSize ?? 10;
     // Create per-provider circuit breaker
     const cbConfig = p.circuitBreaker;
@@ -434,6 +437,10 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     } : undefined,
   };
   return { config, configPath: path };
+  } catch (e) {
+    await Promise.allSettled(createdAgents.map(a => a.close()));
+    throw e;
+  }
 }
 
 // --- Reload helper ---
