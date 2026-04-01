@@ -589,6 +589,7 @@ export async function forwardRequest(
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
       if (stallTimerRef) clearTimeout(stallTimerRef);
+      console.log(`[hedge] Cancelling provider "${provider.name}" — race winner found`);
       // Mark upstream as intentionally closed to prevent undici from
       // propagating "socket closed unexpectedly" during hedge cancellation
       if (upstreamBody && !upstreamBody.destroyed) {
@@ -632,8 +633,12 @@ export async function forwardRequest(
 
     // Guard against uncaught error events when the pipe is torn down
     // after passThrough.destroy() fires before upstreamBody.destroy().
-    upstreamBody.on("error", () => {
+    // When _intentionalClose is set (hedge cancel or stall abort), swallow
+    // undici's "socket closed unexpectedly" warning — the close is expected.
+    upstreamBody.on("error", (err: Error) => {
       if (stallTimerRef) clearTimeout(stallTimerRef);
+      if ((upstreamBody as any)._intentionalClose) return; // expected — suppress
+      console.warn(`[proxy] Upstream body error on "${provider.name}": ${err.message}`);
     });
 
     // For error status codes (4xx/5xx), consume body immediately without stall detection.
@@ -695,15 +700,17 @@ export async function forwardRequest(
       if (upstreamBody && !upstreamBody.destroyed) {
         (upstreamBody as any)._intentionalClose = true;
       }
-      // Destroy upstream FIRST so no more data can enter the pipe,
-      // eliminating the race between SSE error write and late-arriving chunks.
-      try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
 
-      // Write the SSE error and end the passThrough BEFORE updating _streamState.
+      // Write the SSE error and end the passThrough BEFORE destroying upstream.
+      // This ensures the client always receives the SSE error payload even if
+      // undici closes the socket quickly after destroy().
       // The wrappedStream's data handler guards on _streamState === "error",
       // so setting it before writing would block the SSE payload from being enqueued.
       passThrough!.write(ssePayload);
       passThrough!.end();
+
+      // Now destroy upstream — after SSE payload is flushed to passThrough.
+      try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
 
       // Now update stream state — after SSE payload has been written to passThrough.
       ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
