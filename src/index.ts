@@ -452,7 +452,7 @@ async function main() {
       }
     });
     server.listen(port, host);
-    attachWebSocket(server as any, metricsStore);
+    attachWebSocket(server as any, handle.getConfig(), metricsStore);
 
     // Graceful shutdown
     const shutdown = async () => {
@@ -531,7 +531,7 @@ async function main() {
     }
   });
   server.listen(port, host);
-  attachWebSocket(server as any, metricsStore);
+  attachWebSocket(server as any, config, metricsStore);
 
   // Hot-reload: watch config file for changes
   const fgConfigWatcherHandle = configPath
