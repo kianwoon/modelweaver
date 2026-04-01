@@ -53,6 +53,6 @@ export function createEmptyState(): WizardState {
     distribution: new Map(),
     fallback: new Map(),
     server: { port: 3456, host: 'localhost' },
-    hedging: { speculativeDelay: 1000, cvThreshold: 0.5, maxHedge: 4 },
+    hedging: { speculativeDelay: 500, cvThreshold: 0.5, maxHedge: 4 },
   };
 }
