@@ -511,6 +511,8 @@ body {
   justify-content: space-between;
   padding: 4px 0;
   font-size: 12px;
+  gap: 6px;
+  align-items: center;
 }
 
 .provider-row:not(:last-child) {
@@ -519,10 +521,33 @@ body {
 
 .provider-name {
   color: var(--text);
+  font-weight: 600;
+  min-width: 60px;
 }
 
 .provider-count {
   color: var(--text-dim);
+}
+
+.provider-dot {
+  font-size: 10px;
+  min-width: 10px;
+}
+
+.provider-state {
+  font-size: 11px;
+  min-width: 70px;
+  color: var(--text-dim);
+}
+
+.provider-error {
+  font-size: 11px;
+  color: #f59e0b;
+  min-width: 70px;
+}
+
+.provider-error:empty {
+  display: none;
 }
 
 /* Cap model and provider lists to prevent them from consuming all space */

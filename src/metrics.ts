@@ -1,5 +1,5 @@
 // src/metrics.ts
-import type { RequestMetrics, MetricsSummary, ModelPerformanceStats } from "./types.js";
+import type { RequestMetrics, MetricsSummary, ModelPerformanceStats, ProviderHealth, ProviderHealthEntry } from "./types.js";
 
 type Subscriber = (metrics: RequestMetrics) => void;
 
@@ -30,7 +30,7 @@ export class MetricsStore {
   private _totalCacheCreationTokens = 0;
   private _modelMap = new Map<string, ModelEntry>();
   private _providerMap = new Map<string, number>();
-  private _providerErrors = new Map<string, { total: number; errors: { [status: number]: number } }>();
+  private _providerErrors = new Map<string, { total: number; errors: { [status: number]: number }; lastErrorCode: number | null; lastErrorTime: number | null }>();
   private _sessionMap = new Map<string, { count: number; lastSeen: number }>();
 
   // Lazy cache for getModelStats() — invalidated on every recordRequest()
@@ -120,9 +120,16 @@ export class MetricsStore {
         if (pe) {
           pe.total--;
           if (pe.errors[evicted.status]) pe.errors[evicted.status]--;
+          // Remove oldest buffered error entry for this provider
+          const buf = this._providerErrorsBuffer.get(pKey);
+          if (buf && buf.length > 0) buf.shift();
           if (pe.total <= 0) {
             this._providerErrors.delete(pKey);
+            this._providerErrorsBuffer.delete(pKey);
             if (this._providerErrorsMin.current === pKey) this._providerErrorsMin.current = null;
+          } else {
+            // Recalculate lastErrorCode/lastErrorTime from remaining buffer
+            this._recalcProviderLastError(pKey, pe);
           }
         }
       }
@@ -169,12 +176,21 @@ export class MetricsStore {
       if (pe) {
         pe.total++;
         pe.errors[metrics.status] = (pe.errors[metrics.status] ?? 0) + 1;
+        pe.lastErrorCode = metrics.status;
+        pe.lastErrorTime = metrics.timestamp;
       } else {
         this._providerErrors.set(pKey, {
           total: 1,
           errors: { [metrics.status]: 1 },
+          lastErrorCode: metrics.status,
+          lastErrorTime: metrics.timestamp,
         });
       }
+      // Push to per-provider error timestamp buffer for recalc on eviction
+      let buf = this._providerErrorsBuffer.get(pKey);
+      if (!buf) { buf = []; this._providerErrorsBuffer.set(pKey, buf); }
+      buf.push({ status: metrics.status, timestamp: metrics.timestamp });
+      if (buf.length > 100) buf.shift();
       this.pruneMap(this._providerErrors, (e) => e.total, this._providerErrorsMin);
     }
 
@@ -357,6 +373,31 @@ export class MetricsStore {
     this._modelStatsDirty = false;
     this._cachedModelStats = stats;
     return this._cachedModelStats;
+  }
+
+  /** Recompute lastErrorCode and lastErrorTime for a provider from its error buffer.
+   *  Called when an old error entry is evicted so lastError stays accurate. */
+  private _recalcProviderLastError(provider: string, pe: { total: number; errors: { [status: number]: number }; lastErrorCode: number | null; lastErrorTime: number | null }): void {
+    // The errors map stores { statusCode: count }. We need the most recent entry.
+    // Since we only track counts (not timestamps per status code), we keep the
+    // last known timestamp per status in a separate parallel map.
+    const buffered = this._providerErrorsBuffer.get(provider);
+    if (buffered && buffered.length > 0) {
+      const mostRecent = buffered[buffered.length - 1];
+      pe.lastErrorCode = mostRecent.status;
+      pe.lastErrorTime = mostRecent.timestamp;
+    } else {
+      pe.lastErrorCode = null;
+      pe.lastErrorTime = null;
+    }
+  }
+
+  /** Ring buffer for per-status error timestamps — used to recompute lastError after eviction. */
+  private _providerErrorsBuffer = new Map<string, { status: number; timestamp: number }[]>();
+
+  /** Returns full provider health state (errors + circuit breaker state merged). */
+  getProviderErrors(): { [provider: string]: { total: number; errors: { [status: number]: number }; lastErrorCode: number | null; lastErrorTime: number | null } } {
+    return Object.fromEntries(this._providerErrors);
   }
 
   private getRecentRequests(): RequestMetrics[] {

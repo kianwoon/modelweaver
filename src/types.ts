@@ -119,7 +119,20 @@ export interface MetricsSummary {
   recentRequests: RequestMetrics[];
   modelStats: ModelPerformanceStats[];
   sessionStats: { sessionId: string; requestCount: number; lastSeen: number }[];
-  providerErrors: { [provider: string]: { total: number; errors: { [status: number]: number } } };
+  providerErrors: { [provider: string]: { total: number; errors: { [status: number]: number }; lastErrorCode: number | null; lastErrorTime: number | null } };
+}
+
+export interface ProviderHealthEntry {
+  state: string;
+  failures: number;
+  lastFailure: number | null;
+  lastErrorCode: number | null;
+  lastErrorTime: number | null;
+  errorCount: number;
+}
+
+export interface ProviderHealth {
+  [provider: string]: ProviderHealthEntry;
 }
 
 export interface MetricsSummaryDelta {
