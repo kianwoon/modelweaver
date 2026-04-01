@@ -784,6 +784,10 @@ export async function forwardRequest(
         });
         passThrough.on("end", safeClose);
         passThrough.on("error", safeError);
+        // Listen for "close" which fires on both end() and destroy(), ensuring
+        // the ReadableStream completes even if "end" doesn't fire (e.g. after
+        // unpipe + end on Node.js 20/22 where the pipe state prevents end event).
+        passThrough.on("close", safeClose);
       },
       cancel() {
         if (passThrough) { try { passThrough.destroy(); } catch { /* already done */ } }
