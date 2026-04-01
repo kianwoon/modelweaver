@@ -9,6 +9,7 @@ import os from "node:os";
 import { latencyTracker, inFlightCounter, computeHedgingCount, recordHedgeWin, recordHedgeLosses } from './hedging.js';
 import { warmupProvider } from './pool.js';
 import { resolveAdaptiveTTFB } from './adaptive-timeout.js';
+import { recordHealthEvent } from './health-score.js';
 import { broadcastStreamEvent } from './ws.js';
 
 // --- Per-provider latency metrics ---
@@ -1021,7 +1022,10 @@ export async function forwardWithFallback(
 
     onAttempt?.(entry.provider, 0);
 
+    const singleStart = Date.now();
     const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging);
+    const success = response.status >= 200 && response.status < 300;
+    recordHealthEvent(provider.name, success, Date.now() - singleStart);
 
     return { response, actualModel: entry.model, actualProvider: entry.provider };
   }
@@ -1063,10 +1067,15 @@ export async function forwardWithFallback(
       ctx._streamState = "start";
       (ctx as any)._stallFired = false;
 
+      const attemptStart = Date.now();
       try {
         const response = await hedgedForwardRequest(
           provider, entry, ctx, incomingRequest, undefined, i, logger, hedging,
         );
+
+        const attemptLatency = Date.now() - attemptStart;
+        const success = response.status >= 200 && response.status < 300;
+        recordHealthEvent(provider.name, success, attemptLatency);
 
         if (provider._circuitBreaker) {
           const prevCB = provider._circuitBreaker.getState();
@@ -1113,6 +1122,8 @@ export async function forwardWithFallback(
         });
         // continue loop
       } catch {
+        const attemptLatency = Date.now() - attemptStart;
+        recordHealthEvent(provider.name, false, attemptLatency);
         if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502, cbProbeId);
         logger?.warn("Provider failed with exception, falling back", {
           requestId: ctx.requestId,
@@ -1166,6 +1177,7 @@ export async function forwardWithFallback(
     ctx._streamState = "start";
     (ctx as any)._stallFired = false;
 
+    const attemptStart = Date.now();
     try {
       const response = await hedgedForwardRequest(
         provider,
@@ -1177,9 +1189,13 @@ export async function forwardWithFallback(
         logger,
         hedging,
       );
+      const attemptLatency = Date.now() - attemptStart;
+      const success = response.status >= 200 && response.status < 300;
+      recordHealthEvent(provider.name, success, attemptLatency);
       return { response, index };
     } catch {
       if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502, cbProbeId);
+      recordHealthEvent(provider.name, false, Date.now() - attemptStart);
       return {
         response: makeErrorResponse(502, "api_error", `Provider "${entry.provider}" failed`),
         index,

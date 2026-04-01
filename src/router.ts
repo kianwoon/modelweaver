@@ -1,5 +1,6 @@
 // src/router.ts
 import type { RoutingEntry, AppConfig, RequestContext } from "./types.js";
+import { getAllHealthScores } from "./health-score.js";
 
 const ROUTING_CACHE_MAX_SIZE = 200;
 
@@ -49,15 +50,22 @@ export function buildRoutingChain(
   return routing.get(tier) || [];
 }
 
+/** Blend factor: how much dynamic health score influences final weight. */
+const HEALTH_BLEND_DYNAMIC = 0.3;
+
 /**
  * Select a provider by weight for distribution routing.
  * Returns a reordered array: [selected, ...remaining as fallback].
  * Excludes circuit-opened providers and re-normalizes weights.
  * Falls back to original chain if all providers are circuit-opened.
+ *
+ * Health-weighted blending: finalWeight = (1-α)*static + α*healthScore
+ * where α = 0.3 (30% dynamic, 70% static).
  */
 export function selectByWeight(
   entries: RoutingEntry[],
-  openCircuitProviders: string[]
+  openCircuitProviders: string[],
+  healthScores?: Map<string, number>
 ): RoutingEntry[] {
   // If no weights present, return original chain unchanged
   if (!entries.some(e => e.weight !== undefined)) {
@@ -79,8 +87,16 @@ export function selectByWeight(
   const selectable = available.filter(e => (e.weight ?? 0) > 0);
   if (selectable.length === 0) return entries;
 
-  // Calculate total weight of selectable providers
-  const totalWeight = selectable.reduce((sum, e) => sum + (e.weight ?? 0), 0);
+  // Blend static weights with health scores: finalWeight = (1-α)*static + α*health
+  const blendedWeights = selectable.map(e => {
+    const staticWeight = e.weight ?? 1;
+    if (!healthScores) return staticWeight;
+    const healthScore = healthScores.get(e.provider) ?? 1; // assume healthy if no data
+    return (1 - HEALTH_BLEND_DYNAMIC) * staticWeight + HEALTH_BLEND_DYNAMIC * healthScore;
+  });
+
+  // Calculate total blended weight
+  const totalWeight = blendedWeights.reduce((sum, w) => sum + w, 0);
   if (totalWeight <= 0) return entries;
 
   // Weighted random selection
@@ -89,7 +105,7 @@ export function selectByWeight(
   let selectedIndex = 0;
 
   for (let i = 0; i < selectable.length; i++) {
-    cumulative += selectable[i].weight ?? 0;
+    cumulative += blendedWeights[i];
     if (rand < cumulative) {
       selectedIndex = i;
       break;
@@ -166,7 +182,9 @@ export function resolveRequest(
         openCircuits.push(entry.provider);
       }
     }
-    providerChain = selectByWeight(providerChain, openCircuits);
+    providerChain = selectByWeight(providerChain, openCircuits, getAllHealthScores(
+      providerChain.map(e => e.provider)
+    ));
   }
 
   // Cache the resolved tier + providerChain (only for non-distribution)
