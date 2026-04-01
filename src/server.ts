@@ -604,6 +604,33 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
           timestamp: Date.now(),
         });
       });
+    } else if (metricsStore && (response.status < 200 || response.status >= 400)) {
+      // Error / non-2xx responses — record metrics so provider error tracking
+      // picks them up (metricsStore.recordRequest → _providerErrors population).
+      // Without this, error responses were never recorded and the GUI showed 0 errors.
+      const errorProvider = successfulProvider || result.actualProvider || (ctx.providerChain[0]?.provider ?? "unknown");
+      const errorTarget = result.actualProvider || (ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : errorProvider);
+      const latencyMs = Date.now() - ctx.startTime;
+
+      metricsStore.recordRequest({
+        requestId: ctx.requestId,
+        model: ctx.model,
+        actualModel: ctx.actualModel || ctx.model,
+        tier: ctx.tier,
+        provider: errorProvider,
+        targetProvider: errorTarget,
+        status: response.status,
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs,
+        tokensPerSec: 0,
+        timestamp: Date.now(),
+        fallbackMode: ctx.fallbackMode,
+        sessionId: ctx.sessionId,
+      });
+
+      recordProviderLatency(errorProvider, latencyMs);
+      broadcastProviderHealth(buildProviderHealth(config, metricsStore));
     }
 
     // Add request ID to response (responses from fetch have immutable headers, so create new)
