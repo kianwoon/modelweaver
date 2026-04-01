@@ -86,11 +86,36 @@ function waitForMessage(ws: WebSocket, timeoutMs = 3000): Promise<string> {
   });
 }
 
+/** Wait for a message of a specific type, skipping any other messages (e.g. provider_health). */
+function waitForMessageType(ws: WebSocket, type: string, timeoutMs = 5000): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.removeAllListeners("message");
+      reject(new Error(`Timed out waiting for "${type}" message`));
+    }, timeoutMs);
+    function handler(data: any) {
+      const msg = data.toString();
+      try {
+        const parsed = JSON.parse(msg);
+        if (parsed.type === type) {
+          ws.removeListener("message", handler);
+          clearTimeout(timer);
+          resolve(msg);
+        }
+      } catch {
+        // ignore non-JSON messages
+      }
+    }
+    ws.on("message", handler);
+  });
+}
+
 describe("attachWebSocket", () => {
   // WebSocket tests need extra time due to async connection setup
   // Default vitest timeout (5s) is too tight for server lifecycle
   let server: Server;
   let metricsStore: MetricsStore;
+  const mockConfig = { providers: new Map() } as any;
 
   beforeEach(async () => {
     server = await createHttpServer();
@@ -102,7 +127,7 @@ describe("attachWebSocket", () => {
   }, 5000);
 
   it("sends initial summary on connection", async () => {
-    attachWebSocket(server, metricsStore);
+    attachWebSocket(server, mockConfig, metricsStore);
     const [ws, msg] = await connectAndReceive(server);
 
     const parsed = JSON.parse(msg);
@@ -117,7 +142,7 @@ describe("attachWebSocket", () => {
     metricsStore.recordRequest(makeMetrics({ requestId: "pre-1" }));
     metricsStore.recordRequest(makeMetrics({ requestId: "pre-2" }));
 
-    attachWebSocket(server, metricsStore);
+    attachWebSocket(server, mockConfig, metricsStore);
     const [ws, msg] = await connectAndReceive(server);
     const parsed = JSON.parse(msg);
 
@@ -128,12 +153,12 @@ describe("attachWebSocket", () => {
   });
 
   it("pushes request metrics to connected clients", async () => {
-    attachWebSocket(server, metricsStore);
+    attachWebSocket(server, mockConfig, metricsStore);
     const [ws] = await connectAndReceive(server);
 
     metricsStore.recordRequest(makeMetrics({ requestId: "live-1" }));
 
-    const msg = await waitForMessage(ws);
+    const msg = await waitForMessageType(ws, "request");
     const parsed = JSON.parse(msg);
 
     expect(parsed.type).toBe("request");
@@ -144,7 +169,7 @@ describe("attachWebSocket", () => {
   });
 
   it("pushes metrics to multiple connected clients", async () => {
-    attachWebSocket(server, metricsStore);
+    attachWebSocket(server, mockConfig, metricsStore);
 
     const [ws1] = await connectAndReceive(server);
     const [ws2] = await connectAndReceive(server);
@@ -152,8 +177,8 @@ describe("attachWebSocket", () => {
     metricsStore.recordRequest(makeMetrics({ requestId: "multi-1" }));
 
     const [msg1, msg2] = await Promise.all([
-      waitForMessage(ws1),
-      waitForMessage(ws2),
+      waitForMessageType(ws1, "request"),
+      waitForMessageType(ws2, "request"),
     ]);
 
     expect(JSON.parse(msg1).type).toBe("request");
@@ -166,7 +191,7 @@ describe("attachWebSocket", () => {
   });
 
   it("does not send to a closed client when metrics are recorded", async () => {
-    attachWebSocket(server, metricsStore);
+    attachWebSocket(server, mockConfig, metricsStore);
     const [ws] = await connectAndReceive(server);
 
     ws.close();
@@ -179,7 +204,7 @@ describe("attachWebSocket", () => {
 
   describe("backpressure handling", () => {
     it("skips individual messages when bufferedAmount exceeds threshold and sends debounced summary", async () => {
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
       const [ws] = await connectAndReceive(server);
 
       // Record many metrics rapidly to build up buffer
@@ -215,7 +240,7 @@ describe("attachWebSocket", () => {
 
   describe("ping/pong heartbeat", () => {
     it("keeps connection alive and responds to pongs", async () => {
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
       const [ws] = await connectAndReceive(server);
 
       expect(ws.readyState).toBe(ws.OPEN);
@@ -223,7 +248,7 @@ describe("attachWebSocket", () => {
     });
 
     it("terminates connection when terminate is called (missed pong path)", async () => {
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
       const [ws] = await connectAndReceive(server);
 
       const closePromise = new Promise<void>((resolve) => {
@@ -240,7 +265,7 @@ describe("attachWebSocket", () => {
 
   describe("connection cleanup", () => {
     it("cleans up subscription when client disconnects", async () => {
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
       const [ws] = await connectAndReceive(server);
 
       ws.close();
@@ -251,7 +276,7 @@ describe("attachWebSocket", () => {
     });
 
     it("handles rapid connect/disconnect without leaks", async () => {
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
 
       for (let i = 0; i < 10; i++) {
         const ws = new WebSocket(getWsUrl(server));
@@ -279,7 +304,7 @@ describe("attachWebSocket", () => {
     });
 
     it("only accepts connections on the /ws path", async () => {
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
 
       const addr = server.address() as { port: number };
       const wrongPathWs = new WebSocket(`ws://127.0.0.1:${addr.port}/other-path`);
@@ -300,7 +325,7 @@ describe("attachWebSocket", () => {
       metricsStore.recordRequest(makeMetrics({ requestId: "m-1", inputTokens: 100, outputTokens: 50 }));
       metricsStore.recordRequest(makeMetrics({ requestId: "m-2", inputTokens: 200, outputTokens: 100 }));
 
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
       const [ws, msg] = await connectAndReceive(server);
       const parsed = JSON.parse(msg);
 
@@ -317,7 +342,7 @@ describe("attachWebSocket", () => {
       metricsStore.recordRequest(makeMetrics({ requestId: "p-2", provider: "provider-a", targetProvider: "provider-a" }));
       metricsStore.recordRequest(makeMetrics({ requestId: "p-3", provider: "provider-b", targetProvider: "provider-b" }));
 
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
       const [ws, msg] = await connectAndReceive(server);
       const parsed = JSON.parse(msg);
 
@@ -337,7 +362,7 @@ describe("attachWebSocket", () => {
       metricsStore.recordRequest(makeMetrics({ requestId: "am-2", model: "claude-sonnet-4" }));
       metricsStore.recordRequest(makeMetrics({ requestId: "am-3", model: "claude-opus-4" }));
 
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
       const [ws, msg] = await connectAndReceive(server);
       const parsed = JSON.parse(msg);
 
@@ -353,7 +378,7 @@ describe("attachWebSocket", () => {
     });
 
     it("includes uptime in summary", async () => {
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
       const [ws, msg] = await connectAndReceive(server);
       const parsed = JSON.parse(msg);
 
@@ -364,7 +389,7 @@ describe("attachWebSocket", () => {
     });
 
     it("sends live request metrics with correct shape", async () => {
-      attachWebSocket(server, metricsStore);
+      attachWebSocket(server, mockConfig, metricsStore);
       const [ws] = await connectAndReceive(server);
 
       const metric = makeMetrics({
@@ -383,7 +408,7 @@ describe("attachWebSocket", () => {
 
       metricsStore.recordRequest(metric);
 
-      const msg = await waitForMessage(ws);
+      const msg = await waitForMessageType(ws, "request");
       const parsed = JSON.parse(msg);
 
       expect(parsed.type).toBe("request");
@@ -395,6 +420,7 @@ describe("attachWebSocket", () => {
   describe("broadcastStreamEvent", () => {
     let server: Server;
     let store: MetricsStore;
+    const mockConfig = { providers: new Map() } as any;
 
     beforeEach(async () => {
       server = await createHttpServer();
@@ -406,7 +432,7 @@ describe("attachWebSocket", () => {
     }, 5000);
 
     it("broadcasts stream events to all connected clients", async () => {
-      attachWebSocket(server, store);
+      attachWebSocket(server, mockConfig, store);
       const [ws1] = await connectAndReceive(server);
       const [ws2] = await connectAndReceive(server);
 
@@ -421,8 +447,8 @@ describe("attachWebSocket", () => {
       broadcastStreamEvent(event);
 
       const [msg1, msg2] = await Promise.all([
-        waitForMessage(ws1),
-        waitForMessage(ws2),
+        waitForMessageType(ws1, "stream"),
+        waitForMessageType(ws2, "stream"),
       ]);
 
       expect(JSON.parse(msg1).type).toBe("stream");
@@ -436,7 +462,7 @@ describe("attachWebSocket", () => {
     });
 
     it("caps pendingDrains queue at MAX_DRAIN_QUEUE and drops oldest", async () => {
-      attachWebSocket(server, store);
+      attachWebSocket(server, mockConfig, store);
       const [ws] = await connectAndReceive(server);
 
       // Artificially inflate bufferedAmount to trigger backpressure path
@@ -477,7 +503,7 @@ describe("attachWebSocket", () => {
     });
 
     it("skips closed clients when broadcasting", async () => {
-      attachWebSocket(server, store);
+      attachWebSocket(server, mockConfig, store);
       const [ws1] = await connectAndReceive(server);
       const [ws2] = await connectAndReceive(server);
 
