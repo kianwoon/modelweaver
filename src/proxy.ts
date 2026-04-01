@@ -589,6 +589,7 @@ export async function forwardRequest(
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
       if (stallTimerRef) clearTimeout(stallTimerRef);
+      console.log(`[hedge] Cancelling provider "${provider.name}" — race winner found`);
       // Mark upstream as intentionally closed to prevent undici from
       // propagating "socket closed unexpectedly" during hedge cancellation
       if (upstreamBody && !upstreamBody.destroyed) {
@@ -632,8 +633,12 @@ export async function forwardRequest(
 
     // Guard against uncaught error events when the pipe is torn down
     // after passThrough.destroy() fires before upstreamBody.destroy().
-    upstreamBody.on("error", () => {
+    // When _intentionalClose is set (hedge cancel or stall abort), swallow
+    // undici's "socket closed unexpectedly" warning — the close is expected.
+    upstreamBody.on("error", (err: Error) => {
       if (stallTimerRef) clearTimeout(stallTimerRef);
+      if ((upstreamBody as any)._intentionalClose) return; // expected — suppress
+      console.warn(`[proxy] Upstream body error on "${provider.name}": ${err.message}`);
     });
 
     // For error status codes (4xx/5xx), consume body immediately without stall detection.
@@ -695,15 +700,19 @@ export async function forwardRequest(
       if (upstreamBody && !upstreamBody.destroyed) {
         (upstreamBody as any)._intentionalClose = true;
       }
-      // Destroy upstream FIRST so no more data can enter the pipe,
-      // eliminating the race between SSE error write and late-arriving chunks.
-      try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
 
-      // Write the SSE error and end the passThrough BEFORE updating _streamState.
-      // The wrappedStream's data handler guards on _streamState === "error",
-      // so setting it before writing would block the SSE payload from being enqueued.
+      // Unpipe upstream body FIRST so it can't inject data after SSE error write.
+      try { undiciResponse.body.unpipe(passThrough!); } catch { /* not piped */ }
+      // Mark passThrough as intentional close so safeError delegates to safeClose
+      // instead of propagating the destroy error to the ReadableStream.
+      (passThrough! as any)._intentionalClose = true;
+      // Write SSE error payload, then destroy (not .end()) — destroy() always
+      // fires "close" event even when piped source is still active (Node 20/22).
       passThrough!.write(ssePayload);
-      passThrough!.end();
+      passThrough!.destroy();
+
+      // Destroy upstream — after passThrough has flushed the SSE error.
+      try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
 
       // Now update stream state — after SSE payload has been written to passThrough.
       ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
@@ -765,6 +774,10 @@ export async function forwardRequest(
         };
         const safeError = (err: Error) => {
           if (controllerClosed) return;
+          // When handleStall() intentionally destroys passThrough, don't propagate
+          // the error — the SSE payload was already written and "close" will
+          // safely complete the ReadableStream via safeClose.
+          if ((passThrough as any)._intentionalClose) return;
           controllerClosed = true;
           try { controller.error(err); } catch { /* already closed */ }
         };
@@ -776,6 +789,10 @@ export async function forwardRequest(
         });
         passThrough.on("end", safeClose);
         passThrough.on("error", safeError);
+        // Listen for "close" which fires on both end() and destroy(), ensuring
+        // the ReadableStream completes even if "end" doesn't fire (e.g. after
+        // unpipe + end on Node.js 20/22 where the pipe state prevents end event).
+        passThrough.on("close", safeClose);
       },
       cancel() {
         if (passThrough) { try { passThrough.destroy(); } catch { /* already done */ } }
