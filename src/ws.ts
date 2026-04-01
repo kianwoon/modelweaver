@@ -129,6 +129,7 @@ export function buildProviderHealth(config: AppConfig, metricsStore: MetricsStor
       lastErrorCode: errEntry?.lastErrorCode ?? null,
       lastErrorTime: errEntry?.lastErrorTime ?? null,
       errorCount: errEntry?.total ?? 0,
+      errorBreakdown: errEntry ?? null,
     };
   }
   return health;

@@ -755,13 +755,12 @@ function handleProviderHealth(data) {
   const distArr = cachedFullSummary?.providerDistribution || [];
   const distMap = {};
   for (const d of distArr) distMap[d.provider] = d.count;
-  const providerErrors = cachedFullSummary?.providerErrors || {};
   const merged = {};
   for (const [name, entry] of Object.entries(data)) {
     merged[name] = {
       ...entry,
       totalRequests: distMap[name] || 0,
-      errorBreakdown: providerErrors[name] || null,
+      errorBreakdown: entry.errorBreakdown || null,
     };
   }
   providerHealthCache = merged;
