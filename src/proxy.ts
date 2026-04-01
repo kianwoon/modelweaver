@@ -701,14 +701,15 @@ export async function forwardRequest(
         (upstreamBody as any)._intentionalClose = true;
       }
 
-      // Unpipe upstream body FIRST so it can't inject data between write() and end().
-      // Then write the SSE error payload and end passThrough — this fires the "end"
-      // event so the wrappedStream's safeClose() completes the ReadableStream,
-      // allowing the client to read the SSE error text via response.text().
-      // Finally destroy upstream to free the connection.
+      // Unpipe upstream body FIRST so it can't inject data after SSE error write.
       try { undiciResponse.body.unpipe(passThrough!); } catch { /* not piped */ }
+      // Mark passThrough as intentional close so safeError delegates to safeClose
+      // instead of propagating the destroy error to the ReadableStream.
+      (passThrough! as any)._intentionalClose = true;
+      // Write SSE error payload, then destroy (not .end()) — destroy() always
+      // fires "close" event even when piped source is still active (Node 20/22).
       passThrough!.write(ssePayload);
-      passThrough!.end();
+      passThrough!.destroy();
 
       // Destroy upstream — after passThrough has flushed the SSE error.
       try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
@@ -773,6 +774,10 @@ export async function forwardRequest(
         };
         const safeError = (err: Error) => {
           if (controllerClosed) return;
+          // When handleStall() intentionally destroys passThrough, don't propagate
+          // the error — the SSE payload was already written and "close" will
+          // safely complete the ReadableStream via safeClose.
+          if ((passThrough as any)._intentionalClose) return;
           controllerClosed = true;
           try { controller.error(err); } catch { /* already closed */ }
         };
