@@ -33,6 +33,7 @@ export interface WizardState {
   distribution: Map<string, RoutingEntry[]>;
   fallback: Map<string, RoutingEntry[]>;
   server: { port: number; host: string };
+  hedging: { speculativeDelay: number; cvThreshold: number; maxHedge: number };
 }
 
 export type ScreenAction =
@@ -42,7 +43,7 @@ export type ScreenAction =
   | { type: 'navigate'; section: ScreenId }
   | { type: 'error'; message: string };
 
-export type ScreenId = 'main' | 'providers' | 'models' | 'distribution' | 'fallback' | 'server';
+export type ScreenId = 'main' | 'providers' | 'models' | 'distribution' | 'fallback' | 'server' | 'hedging';
 
 export function createEmptyState(): WizardState {
   return {
@@ -52,5 +53,6 @@ export function createEmptyState(): WizardState {
     distribution: new Map(),
     fallback: new Map(),
     server: { port: 3456, host: 'localhost' },
+    hedging: { speculativeDelay: 500, cvThreshold: 0.5, maxHedge: 4 },
   };
 }
