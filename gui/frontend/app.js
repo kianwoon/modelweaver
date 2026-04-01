@@ -28,6 +28,9 @@ const activeRequests = new Map();
 const STALE_BAR_TIMEOUT_MS = 120_000; // 2 minutes
 const barLifecycle = new Map(); // requestId -> 'active' | 'closing' | 'removed'
 
+// Provider health cache (from provider_health WS messages)
+let providerHealthCache = null;
+
 // Keyed DOM diffing Maps for updateSummary
 const modelRows = new Map();
 const providerRows = new Map();
@@ -835,6 +838,83 @@ function handleStreamEvent(data) {
   }
 }
 
+function handleProviderHealth(data) {
+  providerHealthCache = data;
+  renderProviders();
+}
+
+function renderProviders() {
+  if (!providerHealthCache) return;
+  const health = providerHealthCache;
+  const keys = Object.keys(health);
+  // Remove rows for providers no longer in health
+  for (const [key, row] of providerRows) {
+    if (!keys.includes(key)) {
+      row.remove();
+      providerRows.delete(key);
+    }
+  }
+  const empty = providersEl.querySelector('.empty');
+  if (empty) empty.remove();
+  for (const [name, entry] of Object.entries(health)) {
+    let row = providerRows.get(name);
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'provider-row';
+      row.setAttribute('data-provider', name);
+      // name + dot + state + error + count
+      const nameEl = document.createElement('span');
+      nameEl.className = 'provider-name';
+      nameEl.textContent = name;
+      const dotEl = document.createElement('span');
+      dotEl.className = 'provider-dot';
+      const stateEl = document.createElement('span');
+      stateEl.className = 'provider-state';
+      const errEl = document.createElement('span');
+      errEl.className = 'provider-error';
+      const countEl = document.createElement('span');
+      countEl.className = 'provider-count';
+      row.appendChild(nameEl);
+      row.appendChild(dotEl);
+      row.appendChild(stateEl);
+      row.appendChild(errEl);
+      row.appendChild(countEl);
+      providersEl.appendChild(row);
+      row._nameEl = nameEl;
+      row._dotEl = dotEl;
+      row._stateEl = stateEl;
+      row._errEl = errEl;
+      row._countEl = countEl;
+      providerRows.set(name, row);
+    }
+    // Circuit breaker state dot and label
+    const stateMap = { closed: '\uD83D\uDD35 CLOSED', 'half-open': '\uD83D\uDFE1 HALF-OPEN', open: '\uD83D\uDD34 OPEN' };
+    row._dotEl.textContent = stateMap[entry.state] || entry.state || '\u2014';
+    row._stateEl.textContent = '';
+    // Last error
+    if (entry.lastErrorCode) {
+      const t = entry.lastErrorTime ? new Date(entry.lastErrorTime) : null;
+      const timeStr = t ? ' @ ' + (t.getHours() + '').padStart(2, '0') + ':' + (t.getMinutes() + '').padStart(2, '0') : '';
+      row._errEl.textContent = entry.lastErrorCode + timeStr;
+    } else {
+      row._errEl.textContent = '\u2014';
+    }
+    // Error count
+    const ec = entry.errorCount;
+    row._countEl.textContent = ec > 0 ? ec + ' error' + (ec !== 1 ? 's' : '') : '';
+  }
+  // Re-sort: providers with errors first, then by name
+  const rows = Array.from(providersEl.querySelectorAll('.provider-row'));
+  rows.sort((a, b) => {
+    const aHasErr = providerHealthCache[a.getAttribute('data-provider')]?.errorCount > 0;
+    const bHasErr = providerHealthCache[b.getAttribute('data-provider')]?.errorCount > 0;
+    if (aHasErr && !bHasErr) return -1;
+    if (!aHasErr && bHasErr) return 1;
+    return a.getAttribute('data-provider').localeCompare(b.getAttribute('data-provider'));
+  });
+  rows.forEach(r => providersEl.appendChild(r));
+}
+
 function connectWebSocket(port) {
   if (ws && ws.readyState === WebSocket.OPEN) return;
   // Clear any pending reconnect timer from a previous close event
@@ -905,6 +985,8 @@ function connectWebSocket(port) {
         handleStreamEvent(msg.data);
       } else if (msg.type === 'config_error') {
         showConfigError(msg.data.fieldErrors);
+      } else if (msg.type === 'provider_health') {
+        handleProviderHealth(msg.data);
       }
     } catch (err) {
       console.error('[WebSocket] parse error:', err);

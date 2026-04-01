@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
 import { forwardWithFallback, type FallbackResult, recordProviderLatency } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
-import type { AppConfig, ProviderConfig, RequestContext, StreamState } from "./types.js";
+import type { AppConfig, ProviderConfig, RequestContext, StreamState, ProviderHealth } from "./types.js";
 import { nextState } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { gzip } from "node:zlib";
@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 
 import type { MetricsStore } from "./metrics.js";
 import { latencyTracker, inFlightCounter, getHedgeStats, clearHedgeStats } from "./hedging.js";
-import { broadcastStreamEvent } from "./ws.js";
+import { broadcastStreamEvent, broadcastProviderHealth } from "./ws.js";
 
 const gzipAsync = promisify(gzip);
 
@@ -80,6 +80,36 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
   return { inputTokens: inp, outputTokens: out, cacheReadTokens: cacheRead, cacheCreationTokens: cacheCreation };
 }
 
+/** Build provider health snapshot by merging metrics errors with circuit breaker state. */
+function buildProviderHealth(config: AppConfig, metricsStore: MetricsStore): import("./types.js").ProviderHealth {
+  const health: import("./types.js").ProviderHealth = {};
+  const errors = metricsStore.getProviderErrors();
+  for (const [name, provider] of config.providers) {
+    const breaker = provider._circuitBreaker;
+    const breakerStatus = breaker ? breaker.getStatus() : undefined;
+    const errEntry = errors[name];
+    health[name] = {
+      state: breakerStatus?.state ?? "closed",
+      failures: breakerStatus?.failures ?? 0,
+      lastFailure: breakerStatus?.lastFailure ?? null,
+      lastErrorCode: errEntry?.lastErrorCode ?? null,
+      lastErrorTime: errEntry?.lastErrorTime ?? null,
+      errorCount: errEntry?.total ?? 0,
+    };
+  }
+  return health;
+}
+
+/** Broadcast provider health to all connected GUI clients. */
+function broadcastProviderHealthFromConfig(config: AppConfig, metricsStore: MetricsStore): void {
+  try {
+    const health = buildProviderHealth(config, metricsStore);
+    broadcastProviderHealth(health);
+  } catch {
+    // Broadcast errors must not affect request handling
+  }
+}
+
 /**
  * Creates a TransformStream that forwards chunks unchanged while extracting
  * token counts for metrics inline (no tee() or separate reader needed).
@@ -92,6 +122,7 @@ function createMetricsTransform(
   targetProvider: string,
   actualModel: string | undefined,
   metricsStore: MetricsStore,
+  config: AppConfig,
   status: number,
   contentType: string,
 ): TransformStream<Uint8Array, Uint8Array> {
@@ -244,6 +275,11 @@ function createMetricsTransform(
 
       // Record per-provider latency for percentile logging
       recordProviderLatency(provider, latencyMs);
+
+      // Broadcast provider health on errors
+      if (status >= 400 || status < 200) {
+        broadcastProviderHealthFromConfig(config, metricsStore);
+      }
 
       // Broadcast completion event
       const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
@@ -592,7 +628,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     let responseBody: ReadableStream<Uint8Array> | null = response.body;
     if (response.body && response.status >= 200 && response.status < 300 && metricsStore) {
       const targetProvider = result.actualProvider || (ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider);
-      const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, result.actualModel, metricsStore, response.status, response.headers.get("content-type") || "");
+      const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, result.actualModel, metricsStore, config, response.status, response.headers.get("content-type") || "");
       responseBody = response.body.pipeThrough(transform) as typeof responseBody;
     } else if (response.status >= 200 && response.status < 300 && !metricsStore) {
       // No metricsStore — broadcast complete directly so the GUI progress bar finishes
@@ -707,6 +743,14 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   });
 
   let inFlightCount = 0;
+
+  // Periodically broadcast provider health to all connected GUI clients
+  const healthInterval = setInterval(() => {
+    if (metricsStore) {
+      broadcastProviderHealthFromConfig(config, metricsStore);
+    }
+  }, 5000);
+  healthInterval.unref();
 
   return {
     app,
