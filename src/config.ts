@@ -217,7 +217,7 @@ export function findConfigFile(cwd: string = process.cwd(), { skipGlobal = false
  *  Used by init wizard to show existing providers and offer add/edit. */
 export function peekConfig(
   cwd?: string,
-): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; concurrentLimit?: number; stallTimeout?: number; poolSize?: number; circuitBreaker?: { threshold?: number; windowSeconds?: number; cooldown?: number } }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string; weight?: number }[]> } | null {
+): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; concurrentLimit?: number; stallTimeout?: number; poolSize?: number; circuitBreaker?: { threshold?: number; windowSeconds?: number; cooldown?: number } }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string; weight?: number }[]>; hedging?: { speculativeDelay: number; cvThreshold: number; maxHedge: number } } | null {
   const configPath = findConfigFile(cwd);
   if (!configPath) return null;
 
@@ -272,7 +272,15 @@ export function peekConfig(
     }
   }
 
-  return { configPath, providers, server, modelRouting };
+  // Parse hedging config if present
+  const hedgingRaw = parsed?.hedging as Record<string, unknown> | undefined;
+  const hedging = hedgingRaw ? {
+    speculativeDelay: Number(hedgingRaw.speculativeDelay ?? 500),
+    cvThreshold: Number(hedgingRaw.cvThreshold ?? 0.5),
+    maxHedge: Number(hedgingRaw.maxHedge ?? 4),
+  } : undefined;
+
+  return { configPath, providers, server, modelRouting, hedging };
 }
 
 // --- Project-level routing overlay ---

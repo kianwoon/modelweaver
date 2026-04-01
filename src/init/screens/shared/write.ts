@@ -67,6 +67,7 @@ export function buildYamlConfig(state: WizardState): string {
     },
     providers,
     modelRouting,
+    hedging: state.hedging,
   };
 
   return stringify(config);

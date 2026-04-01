@@ -11,6 +11,7 @@ import { renderModels } from './init/screens/models.js';
 import { renderDistribution } from './init/screens/distribution.js';
 import { renderFallback } from './init/screens/fallback.js';
 import { renderServer } from './init/screens/server.js';
+import { renderHedging } from './init/screens/hedging.js';
 import { validateState } from './init/screens/shared/validate.js';
 import { writeStateToFiles } from './init/screens/shared/write.js';
 import { BOLD, CYAN, GREEN, RED, RESET } from './init/screens/shared/ui.js';
@@ -137,6 +138,11 @@ function buildStateFromConfig(): WizardState {
     state.server = { ...existing.server };
   }
 
+  // Convert hedging config
+  if (existing.hedging) {
+    state.hedging = { ...existing.hedging };
+  }
+
   return state;
 }
 
@@ -173,6 +179,7 @@ function renderMain(state: WizardState): string[] {
   lines.push(`  3. Distribution       ${distStatus}`);
   lines.push(`  4. Fallback chains    ${fallbackStatus}`);
   lines.push(`  5. Server settings`);
+  lines.push(`  6. Hedging config     ${CYAN}delay=${state.hedging.speculativeDelay} cv=${state.hedging.cvThreshold} max=${state.hedging.maxHedge}${RESET}`);
   lines.push('');
   lines.push(`  ${BOLD}s${RESET}. Save and exit`);
   lines.push(`  ${BOLD}q${RESET}. Quit without saving`);
@@ -208,6 +215,8 @@ async function dispatch(state: WizardState, section: ScreenId): Promise<ScreenAc
       return await renderFallback(state);
     case 'server':
       return await renderServer(state);
+    case 'hedging':
+      return await renderHedging(state);
     default:
       return { type: 'back' };
   }
@@ -331,6 +340,7 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
         { title: '3. Distribution', value: '3' },
         { title: '4. Fallback chains', value: '4' },
         { title: '5. Server settings', value: '5' },
+        { title: '6. Hedging config', value: '6' },
       );
     } else {
       // Project mode — routing only
@@ -348,7 +358,7 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     const sectionMap: Record<string, ScreenId | 'save' | 'quit'> =
       configTarget === 'project'
         ? { '1': 'models', '2': 'distribution', '3': 'fallback', 's': 'save', 'q': 'quit' }
-        : { '1': 'providers', '2': 'models', '3': 'distribution', '4': 'fallback', '5': 'server', 's': 'save', 'q': 'quit' };
+        : { '1': 'providers', '2': 'models', '3': 'distribution', '4': 'fallback', '5': 'server', '6': 'hedging', 's': 'save', 'q': 'quit' };
 
     const actionKey = sectionMap[choice];
 
@@ -371,6 +381,7 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
       action = await dispatch(state, actionKey);
     } else {
       action = { type: 'back' };
+    }
     }
 
     // Handle screen action
