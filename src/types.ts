@@ -167,12 +167,49 @@ const VALID_TRANSITIONS: Record<StreamState, StreamState[]> = {
   error: [],
 };
 
-/** Validate StreamState transitions — rejects invalid transitions by returning current state (no-op). */
+/**
+ * Validate StreamState transitions — rejects invalid transitions by returning current state (no-op).
+ *
+ * NOTE: Prefer transitionStreamState() for all ctx-bound transitions.
+ * This pure function is only safe when the caller owns exclusive access to the state.
+ */
 export function nextState(current: StreamState, next: StreamState, ctx?: string): StreamState {
   if (!VALID_TRANSITIONS[current].includes(next)) {
     console.warn(`[StreamState] Invalid transition: ${current} → ${next}`, ctx ?? "");
     return current;
   }
+  return next;
+}
+
+/**
+ * Compare-and-swap transition on ctx._streamState.
+ *
+ * Prevents race conditions between concurrent async callbacks (timeout handlers,
+ * stall timers, hedge aborts, fallback retries) that can all read a non-terminal
+ * state before any of them writes the terminal state.
+ *
+ * Returns the new state if transition succeeded, or the current state if blocked
+ * (already terminal or invalid transition).
+ */
+export function transitionStreamState(
+  ctx: { _streamState?: StreamState },
+  next: StreamState,
+  requestId?: string,
+): StreamState {
+  const current = ctx._streamState ?? "start";
+
+  // Terminal states — no transitions allowed
+  if (current === "complete" || current === "error") {
+    return current;
+  }
+
+  // Validate transition
+  if (!VALID_TRANSITIONS[current].includes(next)) {
+    console.warn(`[StreamState] Invalid transition: ${current} → ${next}`, requestId ?? "");
+    return current;
+  }
+
+  ctx._streamState = next;
   return next;
 }
 

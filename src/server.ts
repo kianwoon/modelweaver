@@ -4,7 +4,7 @@ import { resolveRequest, clearRoutingCache } from "./router.js";
 import { forwardWithFallback, type FallbackResult, recordProviderLatency } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
 import type { AppConfig, ProviderConfig, RequestContext, StreamState } from "./types.js";
-import { nextState } from "./types.js";
+import { transitionStreamState } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { gzip } from "node:zlib";
 import { promisify } from "node:util";
@@ -254,10 +254,8 @@ function createMetricsTransform(
       // Broadcast completion event
       const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
       setImmediate(() => {
-        // Guard: don't transition if already in a terminal state
-        if (ctx._streamState === "error" || ctx._streamState === "complete") return;
-        const prevState = ctx._streamState ?? "streaming";
-        ctx._streamState = nextState(prevState, "complete", ctx.requestId);
+        ctx._streamState = transitionStreamState(ctx, "complete", ctx.requestId);
+        if (ctx._streamState !== "complete") return; // blocked by terminal state
         broadcastStreamEvent({
           requestId: ctx.requestId,
           model: actualModel || ctx.model,
@@ -312,12 +310,10 @@ function createMetricsTransform(
         firstChunk = false;
         const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
         setImmediate(() => {
-          // Guard: skip broadcast if already in a terminal state
-          if (ctx._streamState === "error" || ctx._streamState === "complete") return;
           if (ctx._streamState !== "streaming") {
-            const prevState = ctx._streamState ?? "start";
-            ctx._streamState = nextState(prevState, "streaming", ctx.requestId);
+            ctx._streamState = transitionStreamState(ctx, "streaming", ctx.requestId);
           }
+          if (ctx._streamState === "error" || ctx._streamState === "complete") return;
           broadcastStreamEvent({
             requestId: ctx.requestId,
             model: actualModel || ctx.model,
@@ -350,12 +346,10 @@ function createMetricsTransform(
         firstChunk = false;
         const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
         setImmediate(() => {
-          // Guard: skip broadcast if already in a terminal state
-          if (ctx._streamState === "error" || ctx._streamState === "complete") return;
           if (ctx._streamState !== "streaming") {
-            const prevState = ctx._streamState ?? "start";
-            ctx._streamState = nextState(prevState, "streaming", ctx.requestId);
+            ctx._streamState = transitionStreamState(ctx, "streaming", ctx.requestId);
           }
+          if (ctx._streamState === "error" || ctx._streamState === "complete") return;
           broadcastStreamEvent({
             requestId: ctx.requestId,
             model: actualModel || ctx.model,
@@ -522,10 +516,8 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       const errMsg = err instanceof Error ? err.message : String(err);
       logger.error("Forward failed", { requestId, error: errMsg });
       setImmediate(() => {
-        // Guard: don't transition if already in a terminal state
-        if (ctx._streamState === "error" || ctx._streamState === "complete") return;
-        const prevState = ctx._streamState ?? "start";
-        ctx._streamState = nextState(prevState, "error", ctx.requestId);
+        ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
+        if (ctx._streamState !== "error") return;
         broadcastStreamEvent({
           requestId,
           model: ctx.providerChain[0]?.model || ctx.model,
@@ -559,10 +551,8 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       response.headers.forEach((v, k) => { headerSize += k.length + v.length + 4; });
       headerSize += 2; // trailing CRLF
       setImmediate(() => {
-        // Guard: don't transition if already in a terminal state
-        if (ctx._streamState === "error" || ctx._streamState === "complete") return;
-        const prevState = ctx._streamState ?? "start";
-        ctx._streamState = nextState(prevState, "ttfb", ctx.requestId);
+        ctx._streamState = transitionStreamState(ctx, "ttfb", ctx.requestId);
+        if (ctx._streamState !== "ttfb") return;
         broadcastStreamEvent({
           requestId,
           model: ctx.providerChain[0]?.model || ctx.model,
@@ -578,10 +568,8 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     // Broadcast error event for non-2xx responses
     if (response.status >= 400) {
       setImmediate(() => {
-        // Guard: don't transition if already in a terminal state
-        if (ctx._streamState === "error" || ctx._streamState === "complete") return;
-        const prevState = ctx._streamState ?? "start";
-        ctx._streamState = nextState(prevState, "error", ctx.requestId);
+        ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
+        if (ctx._streamState !== "error") return;
         broadcastStreamEvent({
           requestId,
           model: ctx.providerChain[0]?.model || ctx.model,
@@ -604,10 +592,8 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       // No metricsStore — broadcast complete directly so the GUI progress bar finishes
       const latencyMs = Date.now() - ctx.startTime;
       setImmediate(() => {
-        // Guard: don't transition if already in a terminal state
-        if (ctx._streamState === "error" || ctx._streamState === "complete") return;
-        const prevState = ctx._streamState ?? "start";
-        ctx._streamState = nextState(prevState, "complete", ctx.requestId);
+        ctx._streamState = transitionStreamState(ctx, "complete", ctx.requestId);
+        if (ctx._streamState !== "complete") return;
         broadcastStreamEvent({
           requestId,
           model: result.actualModel || ctx.providerChain[0]?.model || ctx.model,
