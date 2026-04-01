@@ -7,6 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { latencyTracker, inFlightCounter, computeHedgingCount, recordHedgeWin, recordHedgeLosses } from './hedging.js';
+import { warmupProvider } from './pool.js';
 import { broadcastStreamEvent } from './ws.js';
 
 // --- Per-provider latency metrics ---
@@ -1066,7 +1067,14 @@ export async function forwardWithFallback(
           provider, entry, ctx, incomingRequest, undefined, i, logger, hedging,
         );
 
-        if (provider._circuitBreaker) provider._circuitBreaker.recordResult(response.status, cbProbeId);
+        if (provider._circuitBreaker) {
+          const prevCB = provider._circuitBreaker.getState();
+          provider._circuitBreaker.recordResult(response.status, cbProbeId);
+          // Re-warm pool on circuit breaker recovery (half-open → closed)
+          if (prevCB === "half-open" && provider._circuitBreaker.getState() === "closed") {
+            warmupProvider(provider).catch(() => {});
+          }
+        }
 
         if (response.status >= 200 && response.status < 300) {
           return { response, actualModel: entry.model, actualProvider: entry.provider };
@@ -1219,7 +1227,12 @@ export async function forwardWithFallback(
         const winningEntry = chain[winner.index];
         const winningProvider = winningEntry ? providers.get(winningEntry.provider) : undefined;
         if (winningProvider?._circuitBreaker) {
+          const prevCB = winningProvider._circuitBreaker.getState();
           winningProvider._circuitBreaker.recordResult(winner.response.status);
+          // Re-warm pool on circuit breaker recovery (half-open → closed)
+          if (prevCB === "half-open" && winningProvider._circuitBreaker.getState() === "closed") {
+            warmupProvider(winningProvider).catch(() => {});
+          }
         }
         for (const f of failures) {
           void f.response.body?.cancel?.().catch(() => {});

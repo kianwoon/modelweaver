@@ -11,6 +11,7 @@ import { promisify } from "node:util";
 
 import type { MetricsStore } from "./metrics.js";
 import { latencyTracker, inFlightCounter, getHedgeStats, clearHedgeStats } from "./hedging.js";
+import { getPoolStats } from "./pool.js";
 import { broadcastStreamEvent, broadcastProviderHealth, buildProviderHealth } from "./ws.js";
 
 const gzipAsync = promisify(gzip);
@@ -721,6 +722,12 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         hedgeLosses: hs.hedgeLosses,
       };
     }
+    return c.json(stats);
+  });
+
+  // Connection pool stats: pool size, in-flight, estimated free, warmup status
+  app.get("/api/pool", (c) => {
+    const stats = getPoolStats(config.providers, inFlightCounter);
     return c.json(stats);
   });
 
