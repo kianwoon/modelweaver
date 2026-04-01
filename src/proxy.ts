@@ -1,6 +1,6 @@
 // src/proxy.ts
-import type { HedgingConfig, ProviderConfig, RoutingEntry, RequestContext } from "./types.js";
-import { nextState } from "./types.js";
+import type { HedgingConfig, ProviderConfig, RequestContext, RoutingEntry, StreamState } from "./types.js";
+import { transitionStreamState } from "./types.js";
 import { request as undiciRequest } from "undici";
 import { PassThrough } from "node:stream";
 import fs from "node:fs";
@@ -673,7 +673,7 @@ export async function forwardRequest(
     const handleStall = () => {
       // Guard: bail if already fired or stream is in a terminal state
       if ((ctx as any)._stallFired) return;
-      if (ctx._streamState === "error" || ctx._streamState === "complete") return;
+      if (ctx._streamState === "error" || ctx._streamState === "complete") return; // fast-path for _stallFired
       (ctx as any)._stallFired = true;
       provider._circuitBreaker?.recordResult(502);
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
@@ -706,13 +706,12 @@ export async function forwardRequest(
       passThrough!.end();
 
       // Now update stream state — after SSE payload has been written to passThrough.
-      const prevState = ctx._streamState ?? "streaming";
-      ctx._streamState = nextState(prevState, "error", ctx.requestId);
+      ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
       broadcastStreamEvent({
         requestId: ctx.requestId,
         model: String(ctx.actualModel ?? entry.model ?? ""),
         tier: "",
-        state: ctx._streamState,
+        state: ctx._streamState!,
         message: stallMsg,
         timestamp: Date.now(),
       });
@@ -771,6 +770,7 @@ export async function forwardRequest(
         };
         passThrough.on("data", (chunk: Buffer) => {
           // Guard: don't enqueue data if stream is already in a terminal state
+          // (this is a pure read guard, no transition — safe as-is)
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
           try { controller.enqueue(new Uint8Array(chunk)); } catch { /* already closed */ }
         });
@@ -810,14 +810,12 @@ export async function forwardRequest(
 
     // Broadcast error so the GUI progress bar doesn't stall on TTFB/total timeout
     setImmediate(() => {
-      if (ctx._streamState === "error" || ctx._streamState === "complete") return;
-      const prevState = ctx._streamState ?? "start";
-      ctx._streamState = nextState(prevState, "error", ctx.requestId);
+      ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
       broadcastStreamEvent({
         requestId: ctx.requestId,
         model: String(ctx.actualModel ?? entry.model ?? ctx.providerChain[0]?.model ?? ""),
         tier: ctx.tier,
-        state: ctx._streamState,
+        state: ctx._streamState!,
         status: 502,
         message,
         timestamp: Date.now(),
