@@ -8,6 +8,7 @@ import path from "node:path";
 import os from "node:os";
 import { latencyTracker, inFlightCounter, computeHedgingCount, recordHedgeWin, recordHedgeLosses } from './hedging.js';
 import { warmupProvider } from './pool.js';
+import { resolveAdaptiveTTFB } from './adaptive-timeout.js';
 import { broadcastStreamEvent } from './ws.js';
 
 // --- Per-provider latency metrics ---
@@ -554,7 +555,7 @@ export async function forwardRequest(
   const timeout = setTimeout(() => controller.abort(), provider.timeout);
 
   // TTFB timeout: fail if no response headers received within ttfbTimeout ms
-  const ttfbTimeout = provider.ttfbTimeout ?? 8000;
+  const ttfbTimeout = resolveAdaptiveTTFB(provider, latencyTracker);
   let ttfbTimedOut = false;
   let ttfbTimer: ReturnType<typeof setTimeout> | null = null;
 
