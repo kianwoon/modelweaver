@@ -589,6 +589,11 @@ export async function forwardRequest(
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
       if (stallTimerRef) clearTimeout(stallTimerRef);
+      // Mark upstream as intentionally closed to prevent undici from
+      // propagating "socket closed unexpectedly" during hedge cancellation
+      if (upstreamBody && !upstreamBody.destroyed) {
+        (upstreamBody as any)._intentionalClose = true;
+      }
       // Destroy upstream body and passThrough to free the connection back to the pool.
       // Deferred to avoid throwing inside AbortSignal event dispatch.
       setImmediate(() => {
@@ -685,6 +690,11 @@ export async function forwardRequest(
       });
       const ssePayload = `event: error\ndata: ${sseError}\n\n`;
 
+      // Mark upstream as intentionally closed to prevent undici from
+      // propagating "socket closed unexpectedly" during stall abort
+      if (upstreamBody && !upstreamBody.destroyed) {
+        (upstreamBody as any)._intentionalClose = true;
+      }
       // Destroy upstream FIRST so no more data can enter the pipe,
       // eliminating the race between SSE error write and late-arriving chunks.
       try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
@@ -746,17 +756,26 @@ export async function forwardRequest(
     const wrappedStream = new ReadableStream({
       start(controller) {
         if (!passThrough) { controller.close(); return; }
+        // Guard against double controller.close() race between 'end' event
+        // and cancel handler (undici ERR_INVALID_STATE).
+        let controllerClosed = false;
+        const safeClose = () => {
+          if (controllerClosed) return;
+          controllerClosed = true;
+          try { controller.close(); } catch { /* already closed — undici bug */ }
+        };
+        const safeError = (err: Error) => {
+          if (controllerClosed) return;
+          controllerClosed = true;
+          try { controller.error(err); } catch { /* already closed */ }
+        };
         passThrough.on("data", (chunk: Buffer) => {
           // Guard: don't enqueue data if stream is already in a terminal state
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
           try { controller.enqueue(new Uint8Array(chunk)); } catch { /* already closed */ }
         });
-        passThrough.on("end", () => {
-          try { controller.close(); } catch { /* already closed — undici bug */ }
-        });
-        passThrough.on("error", (err: Error) => {
-          try { controller.error(err); } catch { /* already closed */ }
-        });
+        passThrough.on("end", safeClose);
+        passThrough.on("error", safeError);
       },
       cancel() {
         if (passThrough) { try { passThrough.destroy(); } catch { /* already done */ } }
