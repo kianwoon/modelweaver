@@ -365,6 +365,7 @@ async function main() {
     const { createWriteStream, watch } = await import('node:fs');
     const { createLogger } = await import('./logger.js');
     const { broadcastConfigError } = await import('./ws.js');
+    const { warmupAll, startRefreshLoop } = await import('./pool.js');
     const logger = createLogger(logLevel);
 
     // Prevent silent crashes from killing the daemon worker
@@ -454,10 +455,15 @@ async function main() {
     server.listen(port, host);
     attachWebSocket(server as any, handle.getConfig(), metricsStore);
 
+    // Connection pool warmup (fire-and-forget — non-blocking)
+    warmupAll(handle.getConfig().providers).catch(() => {});
+    const refreshLoop = startRefreshLoop(() => handle.getConfig().providers);
+
     // Graceful shutdown
     const shutdown = async () => {
       configWatcherHandle.cleanup();
       closeWebSocket();
+      refreshLoop.stop();
 
       // Drain in-flight requests — wait up to 10s for them to complete
       const drainStart = Date.now();
@@ -483,6 +489,7 @@ async function main() {
   // --- Foreground mode ---
   const { reloadConfig } = await import('./config.js');
   const { watch: fsWatch } = await import('node:fs');
+  const { warmupAll, startRefreshLoop } = await import('./pool.js');
   const handle = createApp(config, logLevel, metricsStore, VERSION);
 
   // Prevent silent crashes — log uncaught exceptions instead of crashing silently
@@ -533,6 +540,10 @@ async function main() {
   server.listen(port, host);
   attachWebSocket(server as any, config, metricsStore);
 
+  // Connection pool warmup (fire-and-forget — non-blocking)
+  warmupAll(handle.getConfig().providers).catch(() => {});
+  const fgRefreshLoop = startRefreshLoop(() => handle.getConfig().providers);
+
   // Hot-reload: watch config file for changes
   const fgConfigWatcherHandle = configPath
     ? setupConfigWatcher({
@@ -570,6 +581,7 @@ async function main() {
   const shutdown = async () => {
     console.log("\n  Shutting down...");
     fgConfigWatcherHandle.cleanup();
+    fgRefreshLoop.stop();
     closeWebSocket();
     await handle.closeAgents();
     process.exit(0);
