@@ -4,13 +4,11 @@
 
 # ModelWeaver
 
-Multi-provider model orchestration proxy for Claude Code. Route different agent roles to different model providers with automatic fallback, exact model routing, config hot-reload, and crash recovery.
+Multi-provider LLM proxy for Claude Code. Route different agent roles to different model providers with automatic fallback, racing, circuit breakers, and a native desktop GUI.
 
-[![CI](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml) [![CodeQL](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml) [![Release](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![GitHub stars](https://img.shields.io/github/stars/kianwoon/modelweaver?style=social)](https://github.com/kianwoon/modelweaver/stargazers)
+[![CI](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml) [![CodeQL](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml) [![Release](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![npm](https://img.shields.io/npm/v/@kianwoon/modelweaver)](https://www.npmjs.com/package/@kianwoon/modelweaver) [![GitHub stars](https://img.shields.io/github/stars/kianwoon/modelweaver?style=social)](https://github.com/kianwoon/modelweaver/stargazers)
 
-
-<img width="358" height="479" alt="Screenshot 2026-03-20 at 5 11 55 AM" src="https://github.com/user-attachments/assets/a973a707-0cd7-4701-8d19-f6cd028f6c56" />
-
+<img width="358" height="479" alt="Screenshot 2026-03-20 at 5 11 55 AM" src="https://github.com/user-attachments/assets/a973a707-0cd7-4701-8d19-f6cd028f6c56" />
 
 ## How It Works
 
@@ -23,6 +21,7 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
               1. Match exact model name (modelRouting)
               2. Match tier via substring (tierPatterns)
               3. Fallback on 429 / 5xx errors
+              4. Race remaining providers on 429
 ```
 
 ## Features
@@ -30,24 +29,20 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 - **Tier-based routing** — route by model family (sonnet/opus/haiku) using substring pattern matching
 - **Exact model routing** — route specific model names to dedicated providers (checked first)
 - **Automatic fallback** — transparent failover on rate limits (429) and server errors (5xx)
+- **Adaptive racing** — on 429, automatically races remaining providers simultaneously
 - **Model name rewriting** — each provider in the chain can use a different model name
-- **Interactive setup wizard** — guided configuration with API key validation
-- **Config hot-reload** — changes to config file are picked up automatically, no restart needed
-- **Daemon mode** — run as a background process with start/stop/status/remove commands
-- **Crash recovery** — auto-restarts on crash with rate limiting (max 5 restarts/60s)
-- **Multiple auth types** — supports `x-api-key` (Anthropic) and `Bearer` token auth
-- **Per-provider timeouts** — configurable timeout with AbortController
-- **Structured logging** — JSON logs with request IDs for tracing
-- **Env var substitution** — config references like `${API_KEY}` resolved from environment
+- **Weighted distribution** — spread traffic across providers by weight percentage
 - **Circuit breaker** — per-provider circuit breaker with closed/open/half-open states, prevents hammering unhealthy providers
-- **Adaptive fallback** — on 429 rate limits, automatically races remaining providers simultaneously instead of sequential fallback
-- **Connection pooling** — per-provider undici Agent dispatcher with configurable pool size, closes old agents on config reload
-- **Health endpoint** — `/api/status` returns circuit breaker state and uptime
-- **Adaptive request hedging** — sends multiple copies of requests when a provider shows high latency variance (CV > 0.5), returns the fastest response
+- **Request hedging** — sends multiple copies when a provider shows high latency variance (CV > 0.5), returns the fastest response
 - **TTFB timeout** — fails slow providers before full timeout elapses (configurable per provider)
-- **Observability endpoints** — `/api/metrics/summary` (aggregated stats), `/api/circuit-breaker` (per-provider state), `/api/hedging/stats` (hedge win/loss)
-- **Weighted distribution** — route to multiple providers simultaneously with weight-based distribution
-- **Desktop GUI** — native app with one-command launch (`modelweaver gui`), auto-downloads from GitHub Releases
+- **Stall detection** — detects stalled streams and aborts them, triggering fallback
+- **Connection pooling** — per-provider undici Agent dispatcher with configurable pool size
+- **Provider error tracking** — per-provider error counts with status code breakdown, displayed in GUI in real-time
+- **Concurrent limits** — cap concurrent requests per provider
+- **Interactive setup wizard** — guided configuration with API key validation, hedging config, and provider editing
+- **Config hot-reload** — changes to config file are picked up automatically, no restart needed
+- **Daemon mode** — background process with auto-restart, launchd integration, and reload support
+- **Desktop GUI** — native Tauri app with real-time progress bars, provider health, error breakdown, and recent request history
 
 ## Prerequisites
 
@@ -75,8 +70,8 @@ npx @kianwoon/modelweaver init
 The wizard guides you through:
 - Selecting from 6 preset providers (Anthropic, OpenRouter, Together AI, GLM/Z.ai, Minimax, Fireworks)
 - Testing API keys to verify connectivity
-- Setting up model routing tiers
-- Creating `~/.modelweaver/config.yaml` and `~/.modelweaver/.env` for configuration
+- Setting up model routing tiers and hedging config
+- Creating `~/.modelweaver/config.yaml` and `~/.modelweaver/.env`
 
 ### 2. Start ModelWeaver
 
@@ -86,6 +81,9 @@ npx @kianwoon/modelweaver
 
 # Background daemon (auto-restarts on crash)
 npx @kianwoon/modelweaver start
+
+# Install as launchd service (auto-start at login)
+npx @kianwoon/modelweaver install
 ```
 
 ### 3. Point Claude Code to ModelWeaver
@@ -102,8 +100,11 @@ claude
 npx @kianwoon/modelweaver init              # Interactive setup wizard
 npx @kianwoon/modelweaver start             # Start as background daemon
 npx @kianwoon/modelweaver stop              # Stop background daemon
-npx @kianwoon/modelweaver status            # Show daemon status
+npx @kianwoon/modelweaver status            # Show daemon status + service state
 npx @kianwoon/modelweaver remove            # Stop daemon + remove PID and log files
+npx @kianwoon/modelweaver reload            # Reload daemon worker (after rebuild)
+npx @kianwoon/modelweaver install           # Install launchd service (auto-start at login)
+npx @kianwoon/modelweaver uninstall         # Uninstall launchd service
 npx @kianwoon/modelweaver gui               # Launch desktop GUI (auto-downloads binary)
 npx @kianwoon/modelweaver [options]         # Run in foreground
 ```
@@ -117,6 +118,13 @@ npx @kianwoon/modelweaver [options]         # Run in foreground
   -h, --help               Show help
 ```
 
+### Init Options
+
+```
+  --global                 Edit global config only
+  --path <file>            Write config to a specific file
+```
+
 ## Daemon Mode
 
 Run ModelWeaver as a background process that survives terminal closure and auto-recovers from crashes.
@@ -124,8 +132,11 @@ Run ModelWeaver as a background process that survives terminal closure and auto-
 ```bash
 npx @kianwoon/modelweaver start             # Start (forks monitor + daemon)
 npx @kianwoon/modelweaver status            # Check if running
-npx @kianwoon/modelweaver stop               # Graceful stop (SIGTERM → SIGKILL after 5s)
-npx @kianwoon/modelweaver remove             # Stop + remove PID file + log file
+npx @kianwoon/modelweaver reload            # Reload worker after rebuild
+npx @kianwoon/modelweaver stop              # Graceful stop (SIGTERM → SIGKILL after 5s)
+npx @kianwoon/modelweaver remove            # Stop + remove PID file + log file
+npx @kianwoon/modelweaver install           # Install launchd service
+npx @kianwoon/modelweaver uninstall         # Uninstall launchd service
 ```
 
 **How it works**: `start` forks a lightweight monitor process that owns the PID file. The monitor spawns the actual daemon worker. If the worker crashes, the monitor auto-restarts it after a 2-second delay (up to 5 restarts per 60-second window to prevent crash loops).
@@ -142,13 +153,20 @@ modelweaver.pid        → Monitor process (handles signals, watches child)
 
 ## Desktop GUI
 
-ModelWeaver ships a native desktop GUI built with Tauri. No Rust toolchain needed — the binary is auto-downloaded from GitHub Releases.
+ModelWeaver ships a native desktop GUI built with Tauri (v1.0.0). No Rust toolchain needed — the binary is auto-downloaded from GitHub Releases.
 
 ```bash
 npx @kianwoon/modelweaver gui
 ```
 
 First run downloads the latest binary for your platform (~10-30 MB). Subsequent launches use the cached version.
+
+**GUI features:**
+- Real-time progress bars with provider name and model info
+- Provider health cards with error counts and status code breakdown
+- Recent request history sorted by timestamp
+- Config validation error banner
+- Auto-reconnect on daemon restart
 
 **Supported platforms:**
 
@@ -176,25 +194,47 @@ server:
   port: 3456                  # Server port          (default: 3456)
   host: localhost             # Bind address         (default: localhost)
 
+# Adaptive request hedging
+hedging:
+  speculativeDelay: 500       # ms before starting backup providers  (default: 500)
+  cvThreshold: 0.5            # latency CV threshold for hedging    (default: 0.5)
+  maxHedge: 4                 # max concurrent copies per request    (default: 4)
+
 providers:
   anthropic:
     baseUrl: https://api.anthropic.com
     apiKey: ${ANTHROPIC_API_KEY}  # Env var substitution
     timeout: 30000                # Request timeout in ms  (default: 30000)
-    ttfbTimeout: 15000            # TTFB timeout in ms (default: 15000)
-    poolSize: 10                  # Connection pool size (default: varies by provider)
+    ttfbTimeout: 15000            # TTFB timeout in ms     (default: 15000)
+    stallTimeout: 15000           # Stall detection timeout (default: 15000)
+    poolSize: 10                  # Connection pool size   (default: varies by provider)
+    concurrentLimit: 10           # Max concurrent requests (default: unlimited)
     authType: anthropic           # "anthropic" | "bearer"  (default: anthropic)
     circuitBreaker:               # Per-provider circuit breaker
       threshold: 5                # Failures before opening circuit (default: 5)
+      windowSeconds: 60           # Time window for failure count (default: 60)
       cooldown: 30000             # Cooldown before half-open (default: 30000ms)
-    concurrentLimit: 10           # Max concurrent requests (default: unlimited)
   openrouter:
     baseUrl: https://openrouter.ai/api
     apiKey: ${OPENROUTER_API_KEY}
     authType: bearer
     timeout: 60000
 
-# Tier-based routing (substring pattern matching)
+# Exact model name routing (checked FIRST, before tier patterns)
+modelRouting:
+  "glm-5-turbo":
+    - provider: anthropic
+  "MiniMax-M2.7":
+    - provider: openrouter
+      model: minimax/MiniMax-M2.7        # With model name rewrite
+  # Weighted distribution example:
+  # "claude-sonnet-4":
+  #   - provider: anthropic
+  #     weight: 70
+  #   - provider: openrouter
+  #     weight: 30
+
+# Tier-based routing (fallback chain)
 routing:
   sonnet:
     - provider: anthropic
@@ -213,14 +253,6 @@ tierPatterns:
   sonnet: ["sonnet", "3-5-sonnet", "3.5-sonnet"]
   opus: ["opus", "3-opus", "3.5-opus"]
   haiku: ["haiku", "3-haiku", "3.5-haiku"]
-
-# Exact model name routing (checked FIRST, before tier patterns)
-modelRouting:
-  "glm-5-turbo":
-    - provider: anthropic               # Route to specific provider
-  "MiniMax-M2.7":
-    - provider: openrouter
-      model: minimax/MiniMax-M2.7        # With model name rewrite
 ```
 
 ### Routing priority
@@ -233,9 +265,9 @@ modelRouting:
 ### Provider chain behavior
 
 - **First provider is primary**, rest are fallbacks
-- **Fallback triggers** on: 429 (rate limit), 5xx (server error), network timeout
+- **Fallback triggers** on: 429 (rate limit), 5xx (server error), network timeout, stream stall
 - **Adaptive race mode** — when a 429 is received, remaining providers are raced simultaneously (not sequentially) for faster recovery
-- **Circuit breaker** — providers that repeatedly fail are temporarily skipped (auto-recovers after cooldown)
+- **Circuit breaker** — providers that repeatedly fail are temporarily skipped (auto-recovers after cooldown, configurable window)
 - **No fallback on**: 4xx (bad request, auth failure, forbidden) — returned immediately
 - **Model rewriting**: each provider entry can override the `model` field in the request body
 
@@ -260,7 +292,13 @@ In daemon mode, ModelWeaver watches the config file for changes and reloads auto
 kill -SIGHUP $(cat ~/.modelweaver/modelweaver.pid)
 ```
 
-Or just re-run `npx @kianwoon/modelweaver init` — it automatically signals the running daemon to reload.
+Or use the CLI:
+
+```bash
+npx @kianwoon/modelweaver reload
+```
+
+Re-running `npx @kianwoon/modelweaver init` also signals the running daemon to reload.
 
 ## API
 
@@ -304,7 +342,7 @@ ModelWeaver uses the model name to determine which agent tier is calling, then r
 
 ```bash
 npm install          # Install dependencies
-npm test             # Run tests (205 tests)
+npm test             # Run tests (213 tests)
 npm run build        # Build for production (tsup)
 npm run dev          # Run in dev mode (tsx)
 ```
