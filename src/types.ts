@@ -129,6 +129,12 @@ export interface ProviderHealthEntry {
   lastErrorCode: number | null;
   lastErrorTime: number | null;
   errorCount: number;
+  errorBreakdown?: {
+    total: number;
+    errors: { [status: number]: number };
+    lastErrorCode: number | null;
+    lastErrorTime: number | null;
+  };
 }
 
 export interface ProviderHealth {
