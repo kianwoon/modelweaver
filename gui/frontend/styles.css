@@ -505,55 +505,62 @@ body {
   white-space: nowrap;
 }
 
-/* Provider list */
-.provider-row {
-  display: flex;
-  justify-content: space-between;
-  padding: 4px 0;
-  font-size: 12px;
-  gap: 6px;
-  align-items: center;
+/* Provider card list */
+.provider-card {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 6px;
+  padding: 6px 10px;
 }
 
-.provider-row:not(:last-child) {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+.provider-card-row1 {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 2px;
 }
 
 .provider-name {
   color: var(--text);
   font-weight: 600;
-  min-width: 60px;
-}
-
-.provider-count {
-  color: var(--text-dim);
-}
-
-.provider-dot {
-  font-size: 10px;
-  min-width: 10px;
 }
 
 .provider-state {
   font-size: 11px;
-  min-width: 70px;
   color: var(--text-dim);
 }
 
-.provider-error {
+.provider-stats {
+  display: block;
+  color: var(--text-dim);
   font-size: 11px;
-  color: #f59e0b;
-  min-width: 70px;
+  margin-bottom: 1px;
 }
 
-.provider-error:empty {
-  display: none;
+.provider-errs {
+  display: block;
+  font-size: 11px;
+  font-weight: 500;
 }
+
+.provider-errs .err-429 { color: #f59e0b; margin-right: 8px; }
+.provider-errs .err-5xx { color: #ef4444; margin-right: 8px; }
+.provider-errs .no-errors { color: var(--text-dim); }
 
 /* Cap model and provider lists to prevent them from consuming all space */
 #models,
 #providers {
   overflow-y: auto;
+}
+
+#providers {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+#providers .provider-card {
+  margin-bottom: 0;
 }
 
 /* Recent requests */

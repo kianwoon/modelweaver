@@ -3,7 +3,7 @@ import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
 import { forwardWithFallback, type FallbackResult, recordProviderLatency } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
-import type { AppConfig, ProviderConfig, RequestContext, StreamState, ProviderHealth } from "./types.js";
+import type { AppConfig, ProviderConfig, RequestContext, StreamState } from "./types.js";
 import { nextState } from "./types.js";
 import { randomUUID } from "node:crypto";
 import { gzip } from "node:zlib";
@@ -11,7 +11,7 @@ import { promisify } from "node:util";
 
 import type { MetricsStore } from "./metrics.js";
 import { latencyTracker, inFlightCounter, getHedgeStats, clearHedgeStats } from "./hedging.js";
-import { broadcastStreamEvent, broadcastProviderHealth } from "./ws.js";
+import { broadcastStreamEvent, broadcastProviderHealth, buildProviderHealth } from "./ws.js";
 
 const gzipAsync = promisify(gzip);
 
@@ -78,36 +78,6 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
   const cacheCreation = (usage.cache_creation_input_tokens as number | undefined) ?? 0;
 
   return { inputTokens: inp, outputTokens: out, cacheReadTokens: cacheRead, cacheCreationTokens: cacheCreation };
-}
-
-/** Build provider health snapshot by merging metrics errors with circuit breaker state. */
-function buildProviderHealth(config: AppConfig, metricsStore: MetricsStore): import("./types.js").ProviderHealth {
-  const health: import("./types.js").ProviderHealth = {};
-  const errors = metricsStore.getProviderErrors();
-  for (const [name, provider] of config.providers) {
-    const breaker = provider._circuitBreaker;
-    const breakerStatus = breaker ? breaker.getStatus() : undefined;
-    const errEntry = errors[name];
-    health[name] = {
-      state: breakerStatus?.state ?? "closed",
-      failures: breakerStatus?.failures ?? 0,
-      lastFailure: breakerStatus?.lastFailure ?? null,
-      lastErrorCode: errEntry?.lastErrorCode ?? null,
-      lastErrorTime: errEntry?.lastErrorTime ?? null,
-      errorCount: errEntry?.total ?? 0,
-    };
-  }
-  return health;
-}
-
-/** Broadcast provider health to all connected GUI clients. */
-function broadcastProviderHealthFromConfig(config: AppConfig, metricsStore: MetricsStore): void {
-  try {
-    const health = buildProviderHealth(config, metricsStore);
-    broadcastProviderHealth(health);
-  } catch {
-    // Broadcast errors must not affect request handling
-  }
 }
 
 /**
@@ -278,7 +248,7 @@ function createMetricsTransform(
 
       // Broadcast provider health on errors
       if (status >= 400 || status < 200) {
-        broadcastProviderHealthFromConfig(config, metricsStore);
+        broadcastProviderHealth(buildProviderHealth(config, metricsStore));
       }
 
       // Broadcast completion event
@@ -747,7 +717,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   // Periodically broadcast provider health to all connected GUI clients
   const healthInterval = setInterval(() => {
     if (metricsStore) {
-      broadcastProviderHealthFromConfig(config, metricsStore);
+      broadcastProviderHealth(buildProviderHealth(config, metricsStore));
     }
   }, 5000);
   healthInterval.unref();

@@ -2,8 +2,9 @@
 import { WebSocketServer, type WebSocket } from "ws";
 import type { Server } from "node:http";
 import type { MetricsStore } from "./metrics.js";
-import type { RequestMetrics, MetricsSummary, MetricsSummaryDelta, StreamEvent, ProviderHealthEntry, ProviderHealth } from "./types.js";
+import type { RequestMetrics, MetricsSummary, MetricsSummaryDelta, StreamEvent, ProviderHealth } from "./types.js";
 import type { ConfigFieldError } from "./config.js";
+import type { AppConfig } from "./types.js";
 
 interface WsMessage {
   type: "request" | "summary" | "summary_delta" | "provider_health";
@@ -113,7 +114,27 @@ function maybeLogBackpressure(source: string): void {
   }
 }
 
-export function attachWebSocket(server: Server, metricsStore: MetricsStore): void {
+/** Build provider health snapshot by merging metrics errors with circuit breaker state. */
+export function buildProviderHealth(config: AppConfig, metricsStore: MetricsStore): ProviderHealth {
+  const health: ProviderHealth = {};
+  const errors = metricsStore.getProviderErrors();
+  for (const [name, provider] of config.providers) {
+    const breaker = provider._circuitBreaker;
+    const breakerStatus = breaker ? breaker.getStatus() : undefined;
+    const errEntry = errors[name];
+    health[name] = {
+      state: breakerStatus?.state ?? "closed",
+      failures: breakerStatus?.failures ?? 0,
+      lastFailure: breakerStatus?.lastFailure ?? null,
+      lastErrorCode: errEntry?.lastErrorCode ?? null,
+      lastErrorTime: errEntry?.lastErrorTime ?? null,
+      errorCount: errEntry?.total ?? 0,
+    };
+  }
+  return health;
+}
+
+export function attachWebSocket(server: Server, config: AppConfig, metricsStore: MetricsStore): void {
   const wss = new WebSocketServer({ server, path: "/ws" });
   wssInstance = wss;
 
@@ -123,6 +144,7 @@ export function attachWebSocket(server: Server, metricsStore: MetricsStore): voi
     lastSummarySent.set(ws, summary);
     const initialMsg: WsMessage = { type: "summary", data: summary };
     ws.send(JSON.stringify(initialMsg));
+    broadcastProviderHealth(buildProviderHealth(config, metricsStore));
 
     let pendingSummaryTimer: ReturnType<typeof setTimeout> | undefined;
     let missedPongs = 0;

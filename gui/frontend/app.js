@@ -36,8 +36,7 @@ const modelRows = new Map();
 const providerRows = new Map();
 const recentRows = new Map();
 
-// Pending provider distribution from updateSummary
-let pendingProviderDist = null;
+// Provider rendering: renderProviders() reads cachedFullSummary directly
 
 // Global stale check interval (replaces per-bar timers)
 const STALE_CHECK_INTERVAL_MS = 5000;
@@ -215,30 +214,6 @@ function shortModel(model) {
     .replace(/-latest$/, '');
 }
 
-function updateProviderDistribution(data) {
-  if (!data || !data.providerDistribution) return;
-  pendingProviderDist = data;
-  applyProviderDistribution();
-}
-
-function applyProviderDistribution() {
-  if (!pendingProviderDist) return;
-  const { providerDistribution, providerErrors } = pendingProviderDist;
-  if (!providerDistribution) return;
-  const total = providerDistribution.reduce((s, p) => s + p.count, 0);
-  for (const p of providerDistribution) {
-    const row = providerRows.get(p.provider);
-    if (row && row._countEl) {
-      const pct = total > 0 ? Math.round(p.count / total * 100) : 0;
-      const errs = providerErrors?.[p.provider];
-      const err429 = errs?.errors?.[429] ?? 0;
-      const countText = err429 > 0
-        ? p.count + ' req \u00b7 ' + err429 + ' \u00d7 429'
-        : p.count + ' (' + pct + '%)';
-      if (row._countEl.textContent !== countText) row._countEl.textContent = countText;
-    }
-  }
-}
 
 function updateSummary(data) {
   statSpeed.textContent = (data.avgTokensPerSec || 0).toFixed(1);
@@ -355,8 +330,7 @@ function updateSummary(data) {
       if (row._cacheEl.textContent !== cacheText) row._cacheEl.textContent = cacheText;
     }
   }
-  // --- Providers: delegate to renderProviders + applyProviderDistribution ---
-  updateProviderDistribution(data);
+  // --- Providers: renderProviders reads cachedFullSummary directly, called by handleProviderHealth ---
   // --- Recent requests: keyed DOM diffing (cap 10) ---
   const recentRequests = (data.recentRequests || [])
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
@@ -456,6 +430,9 @@ function appendRequestMetric(r) {
     statSpeed.textContent = (oldAvg + (r.tokensPerSec - oldAvg) / newTotal).toFixed(1);
   }
 
+  // Deduplicate — skip DOM creation if this requestId was already rendered
+  if (recentRows.has(r.requestId)) return;
+
   // Prepend to recent requests list (cap at 10 visible)
   const emptyEl = recentEl.querySelector('.empty');
   if (emptyEl) emptyEl.remove();
@@ -489,6 +466,7 @@ function appendRequestMetric(r) {
   item.appendChild(provider);
   item.appendChild(tokens);
   recentEl.prepend(item);
+  recentRows.set(r.requestId, item);
 
   // Cap visible items at 10
   while (recentEl.children.length > 10) {
@@ -774,7 +752,19 @@ function handleStreamEvent(data) {
 }
 
 function handleProviderHealth(data) {
-  providerHealthCache = data;
+  const distArr = cachedFullSummary?.providerDistribution || [];
+  const distMap = {};
+  for (const d of distArr) distMap[d.provider] = d.count;
+  const providerErrors = cachedFullSummary?.providerErrors || {};
+  const merged = {};
+  for (const [name, entry] of Object.entries(data)) {
+    merged[name] = {
+      ...entry,
+      totalRequests: distMap[name] || 0,
+      errorBreakdown: providerErrors[name] || null,
+    };
+  }
+  providerHealthCache = merged;
   renderProviders();
 }
 
@@ -782,7 +772,6 @@ function renderProviders() {
   if (!providerHealthCache) return;
   const health = providerHealthCache;
   const keys = Object.keys(health);
-  // Remove rows for providers no longer in health
   for (const [key, row] of providerRows) {
     if (!keys.includes(key)) {
       row.remove();
@@ -791,64 +780,61 @@ function renderProviders() {
   }
   const empty = providersEl.querySelector('.empty');
   if (empty) empty.remove();
+  const stateMap = { closed: '\uD83D\uDFE2 OK', 'half-open': '\uD83D\uDFE1 Resuming', open: '\uD83D\uDD34 Not OK' };
   for (const [name, entry] of Object.entries(health)) {
     let row = providerRows.get(name);
     if (!row) {
       row = document.createElement('div');
-      row.className = 'provider-row';
+      row.className = 'provider-card';
       row.setAttribute('data-provider', name);
-      // name + dot + state + error + count
+      const row1 = document.createElement('div');
+      row1.className = 'provider-card-row1';
       const nameEl = document.createElement('span');
       nameEl.className = 'provider-name';
       nameEl.textContent = name;
-      const dotEl = document.createElement('span');
-      dotEl.className = 'provider-dot';
       const stateEl = document.createElement('span');
       stateEl.className = 'provider-state';
-      const errEl = document.createElement('span');
-      errEl.className = 'provider-error';
-      const countEl = document.createElement('span');
-      countEl.className = 'provider-count';
-      row.appendChild(nameEl);
-      row.appendChild(dotEl);
-      row.appendChild(stateEl);
-      row.appendChild(errEl);
-      row.appendChild(countEl);
+      row1.appendChild(nameEl);
+      row1.appendChild(stateEl);
+      row.appendChild(row1);
+      const statsEl = document.createElement('span');
+      statsEl.className = 'provider-stats';
+      row.appendChild(statsEl);
+      const errsEl = document.createElement('span');
+      errsEl.className = 'provider-errs';
+      row.appendChild(errsEl);
       providersEl.appendChild(row);
       row._nameEl = nameEl;
-      row._dotEl = dotEl;
       row._stateEl = stateEl;
-      row._errEl = errEl;
-      row._countEl = countEl;
+      row._statsEl = statsEl;
+      row._errsEl = errsEl;
       providerRows.set(name, row);
     }
-    // Circuit breaker state dot and label
-    const stateMap = { closed: '\uD83D\uDD35 CLOSED', 'half-open': '\uD83D\uDFE1 HALF-OPEN', open: '\uD83D\uDD34 OPEN' };
-    row._dotEl.textContent = stateMap[entry.state] || entry.state || '\u2014';
-    row._stateEl.textContent = '';
-    // Last error
-    if (entry.lastErrorCode) {
-      const t = entry.lastErrorTime ? new Date(entry.lastErrorTime) : null;
-      const timeStr = t ? ' @ ' + (t.getHours() + '').padStart(2, '0') + ':' + (t.getMinutes() + '').padStart(2, '0') : '';
-      row._errEl.textContent = entry.lastErrorCode + timeStr;
-    } else {
-      row._errEl.textContent = '\u2014';
+    row._nameEl.textContent = name;
+    row._stateEl.textContent = stateMap[entry.state] || entry.state || '\u2014';
+    const total = entry.totalRequests || 0;
+    const errTotal = entry.errorBreakdown?.total || 0;
+    const successRate = total > 0 ? Math.round((total - errTotal) / total * 100) : null;
+    row._statsEl.textContent = total + ' req \u00B7 ' + (successRate !== null ? successRate + '% success' : '\u2014 success');
+    const errs = entry.errorBreakdown?.errors || {};
+    let chips = '';
+    if (errs[429] > 0) chips += '<span class="err-429">' + errs[429] + '\u00D7 429</span> ';
+    for (const [code, count] of Object.entries(errs)) {
+      if (parseInt(code) >= 500 && code !== '429' && count > 0) {
+        chips += '<span class="err-5xx">' + count + '\u00D7 ' + code + '</span> ';
+      }
     }
-    // Error count
-    const ec = entry.errorCount;
-    row._countEl.textContent = ec > 0 ? ec + ' error' + (ec !== 1 ? 's' : '') : '';
+    row._errsEl.innerHTML = chips.trim() || '<span class="no-errors">\u2014</span>';
   }
-  applyProviderDistribution();
-  // Re-sort: providers with errors first, then by name
-  const rows = Array.from(providersEl.querySelectorAll('.provider-row'));
-  rows.sort((a, b) => {
-    const aHasErr = providerHealthCache[a.getAttribute('data-provider')]?.errorCount > 0;
-    const bHasErr = providerHealthCache[b.getAttribute('data-provider')]?.errorCount > 0;
+  const cards = Array.from(providersEl.querySelectorAll('.provider-card'));
+  cards.sort((a, b) => {
+    const aHasErr = providerHealthCache[a.getAttribute('data-provider')]?.errorBreakdown?.total > 0;
+    const bHasErr = providerHealthCache[b.getAttribute('data-provider')]?.errorBreakdown?.total > 0;
     if (aHasErr && !bHasErr) return -1;
     if (!aHasErr && bHasErr) return 1;
     return a.getAttribute('data-provider').localeCompare(b.getAttribute('data-provider'));
   });
-  rows.forEach(r => providersEl.appendChild(r));
+  cards.forEach(r => providersEl.appendChild(r));
 }
 
 function connectWebSocket(port) {
