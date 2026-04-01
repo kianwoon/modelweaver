@@ -701,15 +701,16 @@ export async function forwardRequest(
         (upstreamBody as any)._intentionalClose = true;
       }
 
-      // Write the SSE error and end the passThrough BEFORE destroying upstream.
-      // This ensures the client always receives the SSE error payload even if
-      // undici closes the socket quickly after destroy().
-      // The wrappedStream's data handler guards on _streamState === "error",
-      // so setting it before writing would block the SSE payload from being enqueued.
+      // Unpipe upstream body FIRST so it can't inject data between write() and end().
+      // Then write the SSE error payload and end passThrough — this fires the "end"
+      // event so the wrappedStream's safeClose() completes the ReadableStream,
+      // allowing the client to read the SSE error text via response.text().
+      // Finally destroy upstream to free the connection.
+      try { undiciResponse.body.unpipe(passThrough!); } catch { /* not piped */ }
       passThrough!.write(ssePayload);
       passThrough!.end();
 
-      // Now destroy upstream — after SSE payload is flushed to passThrough.
+      // Destroy upstream — after passThrough has flushed the SSE error.
       try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
 
       // Now update stream state — after SSE payload has been written to passThrough.
