@@ -1,7 +1,6 @@
 // tests/helpers/mock-provider.ts
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
-import type { Server } from "node:http";
 
 /**
  * Creates a mock Anthropic-compatible provider server for testing.
@@ -103,7 +102,12 @@ export function createMockProvider() {
 
   return {
     url,
-    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+        // Force resolve after 2s to prevent afterEach hangs when connections are dangling
+        setTimeout(() => resolve(), 2000);
+      }),
     setBehavior: (b: typeof behavior) => { behavior = b; },
   };
 }
