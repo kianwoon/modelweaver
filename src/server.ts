@@ -90,7 +90,6 @@ function createMetricsTransform(
   ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race"; sessionId?: string; _streamState?: StreamState },
   provider: string,
   targetProvider: string,
-  actualModel: string | undefined,
   metricsStore: MetricsStore,
   config: AppConfig,
   status: number,
@@ -258,7 +257,7 @@ function createMetricsTransform(
         if (ctx._streamState !== "complete") return; // blocked by terminal state
         broadcastStreamEvent({
           requestId: ctx.requestId,
-          model: actualModel || ctx.model,
+          model: ctx.actualModel || ctx.model,
           tier: ctx.tier,
           state: ctx._streamState,
           status,
@@ -316,7 +315,7 @@ function createMetricsTransform(
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
           broadcastStreamEvent({
             requestId: ctx.requestId,
-            model: actualModel || ctx.model,
+            model: ctx.actualModel || ctx.model,
             tier: ctx.tier,
             state: ctx._streamState ?? "streaming",
             outputTokens: tokens.output,
@@ -352,7 +351,7 @@ function createMetricsTransform(
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
           broadcastStreamEvent({
             requestId: ctx.requestId,
-            model: actualModel || ctx.model,
+            model: ctx.actualModel || ctx.model,
             tier: ctx.tier,
             state: ctx._streamState ?? "streaming",
             outputTokens,
@@ -586,7 +585,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     let responseBody: ReadableStream<Uint8Array> | null = response.body;
     if (response.body && response.status >= 200 && response.status < 300 && metricsStore) {
       const targetProvider = result.actualProvider || (ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider);
-      const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, result.actualModel, metricsStore, config, response.status, response.headers.get("content-type") || "");
+      const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, metricsStore, config, response.status, response.headers.get("content-type") || "");
       responseBody = response.body.pipeThrough(transform) as typeof responseBody;
     } else if (response.status >= 200 && response.status < 300 && !metricsStore) {
       // No metricsStore — broadcast complete directly so the GUI progress bar finishes
