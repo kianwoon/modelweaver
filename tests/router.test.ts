@@ -1,6 +1,7 @@
 // tests/router.test.ts
-import { describe, it, expect, beforeEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { matchTier, buildRoutingChain, resolveRequest, clearRoutingCache, selectByWeight } from "../src/router.js";
+import { clearHealthScores } from "../src/health-score.js";
 import type { RoutingEntry, AppConfig } from "../src/types.js";
 
 describe("matchTier", () => {
@@ -66,6 +67,10 @@ describe("buildRoutingChain", () => {
 describe("resolveRequest", () => {
   beforeEach(() => {
     clearRoutingCache();
+    clearHealthScores();
+  });
+  afterEach(() => {
+    clearHealthScores();
   });
 
   const baseConfig: AppConfig = {
@@ -287,5 +292,66 @@ describe("selectByWeight", () => {
     ];
     const result = selectByWeight(entries, []);
     expect(result).toEqual(entries);
+  });
+
+  it("health blending shifts traffic toward healthier provider", () => {
+    // Equal static weights, but provider-b is fully healthy (score 1),
+    // provider-a is severely degraded (score 0)
+    const scores = new Map<string, number>([
+      ["a", 0.0],
+      ["b", 1.0],
+    ]);
+    const entries: RoutingEntry[] = [
+      { provider: "a", weight: 50 },
+      { provider: "b", weight: 50 },
+    ];
+    const counts = { a: 0, b: 0 };
+    for (let i = 0; i < 5000; i++) {
+      const result = selectByWeight(entries, [], scores);
+      counts[result[0].provider as "a" | "b"]++;
+    }
+    // a: 0.7*50 + 0.3*0 = 35, b: 0.7*50 + 0.3*1 = 38
+    // Ratio: a ≈ 47.9%, b ≈ 52.1%
+    const bPct = counts.b / 5000;
+    expect(bPct).toBeGreaterThan(0.49); // b should get more than static 50%
+  });
+
+  it("health blending without healthScores falls back to static weights", () => {
+    const entries: RoutingEntry[] = [
+      { provider: "a", weight: 70 },
+      { provider: "b", weight: 30 },
+    ];
+    const counts = { a: 0, b: 0 };
+    for (let i = 0; i < 5000; i++) {
+      const result = selectByWeight(entries, [], undefined);
+      counts[result[0].provider as "a" | "b"]++;
+    }
+    const aPct = counts.a / 5000;
+    expect(aPct).toBeGreaterThan(0.65);
+    expect(aPct).toBeLessThan(0.75);
+  });
+
+  it("severely degraded provider loses traffic significantly", () => {
+    // a has 90% weight but 0 health score
+    // b has 10% weight but 1.0 health score
+    const healthScores = new Map<string, number>([
+      ["a", 0.0],
+      ["b", 1.0],
+    ]);
+    const entries: RoutingEntry[] = [
+      { provider: "a", weight: 90 },
+      { provider: "b", weight: 10 },
+    ];
+    const counts = { a: 0, b: 0 };
+    for (let i = 0; i < 5000; i++) {
+      const result = selectByWeight(entries, [], healthScores);
+      counts[result[0].provider as "a" | "b"]++;
+    }
+    // a: 0.7*90 + 0.3*0 = 63, b: 0.7*10 + 0.3*1 = 7.3
+    // Ratio: a ≈ 89.6%, b ≈ 10.4%
+    // a still wins but b gets more than static 10%
+    const bPct = counts.b / 5000;
+    expect(bPct).toBeGreaterThan(0.08); // more than the static 10%
+    expect(counts.a).toBeGreaterThan(counts.b); // a still dominates
   });
 });

@@ -12,6 +12,7 @@ import { promisify } from "node:util";
 import type { MetricsStore } from "./metrics.js";
 import { latencyTracker, inFlightCounter, getHedgeStats, clearHedgeStats } from "./hedging.js";
 import { getPoolStats } from "./pool.js";
+import { getAllHealthScores } from "./health-score.js";
 import { broadcastStreamEvent, broadcastProviderHealth, buildProviderHealth } from "./ws.js";
 
 const gzipAsync = promisify(gzip);
@@ -729,6 +730,13 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   app.get("/api/pool", (c) => {
     const stats = getPoolStats(config.providers, inFlightCounter);
     return c.json(stats);
+  });
+
+  // Health scores: real-time per-provider health (success rate + latency)
+  app.get("/api/health-scores", (c) => {
+    const providerNames = [...config.providers.values()].map(p => p.name);
+    const scores = getAllHealthScores(providerNames);
+    return c.json(Object.fromEntries(scores));
   });
 
   let inFlightCount = 0;
