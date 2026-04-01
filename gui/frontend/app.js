@@ -36,6 +36,9 @@ const modelRows = new Map();
 const providerRows = new Map();
 const recentRows = new Map();
 
+// Pending provider distribution from updateSummary
+let pendingProviderDist = null;
+
 // Global stale check interval (replaces per-bar timers)
 const STALE_CHECK_INTERVAL_MS = 5000;
 let staleCheckTimer = null;
@@ -212,6 +215,31 @@ function shortModel(model) {
     .replace(/-latest$/, '');
 }
 
+function updateProviderDistribution(data) {
+  if (!data || !data.providerDistribution) return;
+  pendingProviderDist = data;
+  applyProviderDistribution();
+}
+
+function applyProviderDistribution() {
+  if (!pendingProviderDist) return;
+  const { providerDistribution, providerErrors } = pendingProviderDist;
+  if (!providerDistribution) return;
+  const total = providerDistribution.reduce((s, p) => s + p.count, 0);
+  for (const p of providerDistribution) {
+    const row = providerRows.get(p.provider);
+    if (row && row._countEl) {
+      const pct = total > 0 ? Math.round(p.count / total * 100) : 0;
+      const errs = providerErrors?.[p.provider];
+      const err429 = errs?.errors?.[429] ?? 0;
+      const countText = err429 > 0
+        ? p.count + ' req \u00b7 ' + err429 + ' \u00d7 429'
+        : p.count + ' (' + pct + '%)';
+      if (row._countEl.textContent !== countText) row._countEl.textContent = countText;
+    }
+  }
+}
+
 function updateSummary(data) {
   statSpeed.textContent = (data.avgTokensPerSec || 0).toFixed(1);
   statRequests.textContent = data.totalRequests || 0;
@@ -327,49 +355,8 @@ function updateSummary(data) {
       if (row._cacheEl.textContent !== cacheText) row._cacheEl.textContent = cacheText;
     }
   }
-  // --- Providers: keyed DOM diffing ---
-  const providers = data.providerDistribution || [];
-  const providerErrors = data.providerErrors || {};
-  const providerKeys = new Set(providers.map(p => p.provider));
-  // Remove rows for providers no longer present
-  for (const [key, row] of providerRows) {
-    if (!providerKeys.has(key)) {
-      row.remove();
-      providerRows.delete(key);
-    }
-  }
-  if (providers.length === 0) {
-    if (providerRows.size === 0 && !providersEl.querySelector('.empty')) {
-      providersEl.appendChild(createEmptyEl('No requests yet'));
-    }
-  } else {
-    const total = providers.reduce((s, p) => s + p.count, 0);
-    const empty = providersEl.querySelector('.empty');
-    if (empty) empty.remove();
-    for (const p of providers) {
-      const key = p.provider;
-      let row = providerRows.get(key);
-      if (!row) {
-        row = document.createElement('div');
-        row.className = 'provider-row';
-        row.setAttribute('data-provider', key);
-        row._nameEl = Object.assign(document.createElement('span'), { className: 'provider-name' });
-        row._countEl = Object.assign(document.createElement('span'), { className: 'provider-count' });
-        row.appendChild(row._nameEl);
-        row.appendChild(row._countEl);
-        providersEl.appendChild(row);
-        providerRows.set(key, row);
-      }
-      if (row._nameEl.textContent !== p.provider) row._nameEl.textContent = p.provider;
-      const pct = total > 0 ? Math.round(p.count / total * 100) : 0;
-      const errs = providerErrors[p.provider];
-      const err429 = errs?.errors?.[429] ?? 0;
-      const countText = err429 > 0
-        ? p.count + ' req \u00b7 ' + err429 + ' \u00d7 429'
-        : p.count + ' (' + pct + '%)';
-      if (row._countEl.textContent !== countText) row._countEl.textContent = countText;
-    }
-  }
+  // --- Providers: delegate to renderProviders + applyProviderDistribution ---
+  updateProviderDistribution(data);
   // --- Recent requests: keyed DOM diffing (cap 10) ---
   const recentRequests = (data.recentRequests || [])
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
@@ -511,58 +498,6 @@ function appendRequestMetric(r) {
   // Update active models list — model bar UI is now replaced by perf-row from modelStats;
   // appendRequestMetric no longer updates the models section since updateSummary handles it
 
-  // Update providers list
-  const providerKey = r.targetProvider || r.provider || '';
-  if (providerKey) {
-    let providerRow = providersEl.querySelector(`[data-provider="${CSS.escape(providerKey)}"]`);
-    if (providerRow) {
-      const countEl = providerRow.querySelector('.provider-count');
-      const currentMatch = countEl.textContent.match(/^(\d+)/);
-      const currentCount = currentMatch ? parseInt(currentMatch[1], 10) : 0;
-      const newCount = currentCount + 1;
-
-      // Recalculate all provider percentages (total = existing sum + 1 for this request)
-      const allRows = Array.from(providersEl.querySelectorAll('.provider-row'));
-      const totalNew = allRows.reduce((s, row) => {
-        const m = row.querySelector('.provider-count').textContent.match(/^(\d+)/);
-        return s + (m ? parseInt(m[1], 10) : 0);
-      }, 0) + 1;
-      allRows.forEach(row => {
-        const match = row.querySelector('.provider-count').textContent.match(/^(\d+)/);
-        const existingCount = match ? parseInt(match[1], 10) : 0;
-        const count = row === providerRow ? newCount : existingCount;
-        row.querySelector('.provider-count').textContent = count + ' (' + Math.round(count / totalNew * 100) + '%)';
-      });
-    } else {
-      const emptyEl = providersEl.querySelector('.empty');
-      if (emptyEl) emptyEl.remove();
-
-      providerRow = document.createElement('div');
-      providerRow.className = 'provider-row';
-      providerRow.setAttribute('data-provider', providerKey);
-
-      const name = document.createElement('span');
-      name.className = 'provider-name';
-      name.textContent = providerKey;
-
-      const count = document.createElement('span');
-      count.className = 'provider-count';
-      count.textContent = '1 (100%)';
-
-      providerRow.appendChild(name);
-      providerRow.appendChild(count);
-      providersEl.appendChild(providerRow);
-    }
-
-    // Re-sort provider rows by count (descending)
-    const providerRows = Array.from(providersEl.querySelectorAll('.provider-row'));
-    providerRows.sort((a, b) => {
-      const aMatch = a.querySelector('.provider-count').textContent.match(/^(\d+)/);
-      const bMatch = b.querySelector('.provider-count').textContent.match(/^(\d+)/);
-      return (bMatch ? parseInt(bMatch[1], 10) : 0) - (aMatch ? parseInt(aMatch[1], 10) : 0);
-    });
-    providerRows.forEach(row => providersEl.appendChild(row));
-  }
 }
 
 // --- Activity progress bar helpers ---
@@ -903,6 +838,7 @@ function renderProviders() {
     const ec = entry.errorCount;
     row._countEl.textContent = ec > 0 ? ec + ' error' + (ec !== 1 ? 's' : '') : '';
   }
+  applyProviderDistribution();
   // Re-sort: providers with errors first, then by name
   const rows = Array.from(providersEl.querySelectorAll('.provider-row'));
   rows.sort((a, b) => {
@@ -971,9 +907,18 @@ function connectWebSocket(port) {
           const merged = Object.assign({}, cachedFullSummary, msg.data);
           // Handle recentRequests delta: only new entries, append
           if (msg.data.recentRequests && cachedFullSummary.recentRequests) {
-            const prevIds = new Set(cachedFullSummary.recentRequests.map(r => r.requestId));
-            const newOnly = msg.data.recentRequests.filter(r => !prevIds.has(r.requestId));
-            merged.recentRequests = [...newOnly, ...cachedFullSummary.recentRequests.filter(r => !new Set(msg.data.recentRequests.map(r => r.requestId)).has(r.requestId))];
+            const combined = [...msg.data.recentRequests, ...cachedFullSummary.recentRequests];
+            const seen = new Set();
+            const deduped = [];
+            for (const r of combined) {
+              if (r.requestId && !seen.has(r.requestId)) {
+                seen.add(r.requestId);
+                deduped.push(r);
+              }
+            }
+            merged.recentRequests = deduped
+              .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0))
+              .slice(0, 10);
           }
           cachedFullSummary = merged;
           scheduleSummaryUpdate(merged);
