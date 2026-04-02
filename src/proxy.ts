@@ -952,13 +952,6 @@ export async function forwardRequest(
 
     console.warn(`[proxy] ${message}`);
 
-    // Record connection-level error for GUI counters (does NOT affect health scores)
-    if (isTTFB) {
-      _metricsStore?.recordConnectionError(provider.name, "ttfbTimeouts");
-    } else if (!isAbort) {
-      _metricsStore?.recordConnectionError(provider.name, "connectionErrors");
-    }
-
     // Broadcast error so the GUI progress bar doesn't stall on TTFB/total timeout
     setImmediate(() => {
       ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
@@ -1054,6 +1047,15 @@ async function forwardWithRetry(
 
   // All retries exhausted — return the last connection error as 502.
   // Caller (fallback chain) will try the next provider.
+  // Record connection-level error once per request (not per attempt) for accurate GUI counters.
+  const lastBody = await lastResult!.text().catch(() => "");
+  if (lastBody.includes("timed out")) {
+    _metricsStore?.recordConnectionError(provider.name, "ttfbTimeouts");
+  } else if (lastBody.includes("connection failed")) {
+    _metricsStore?.recordConnectionError(provider.name, "connectionErrors");
+  }
+  // Stall errors are recorded in handleStall() (per-request, no retry amplification).
+
   console.warn(`[proxy] All ${CONNECTION_RETRY_MAX + 1} attempts failed for "${provider.name}" — escalating to fallback`);
   return lastResult!;
 }
