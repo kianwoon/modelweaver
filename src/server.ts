@@ -476,6 +476,43 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     const sessionId = c.req.header("x-session-id") || c.req.header("x-claude-code-session-id");
     if (sessionId) ctx.sessionId = sessionId;
 
+    // Global backoff: all providers in the chain are unhealthy (health < 0.5).
+    // Skip the entire fallback chain and return 503 immediately.
+    if (ctx._globalBackoff) {
+      logger.warn("Global backoff — all providers unhealthy", {
+        requestId,
+        model,
+        tier: ctx.tier,
+        providers: ctx.providerChain.map(e => e.provider),
+      });
+      broadcastStreamEvent({
+        requestId,
+        model: ctx.providerChain[0]?.model || ctx.model,
+        tier: ctx.tier,
+        state: "error",
+        provider: ctx.providerChain[0]?.provider ?? "unknown",
+        timestamp: Date.now(),
+        message: "All providers unhealthy — global backoff",
+      });
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "api_error",
+            message: `All providers for model "${model}" are currently unhealthy. Please retry later.`,
+          },
+        }),
+        {
+          status: 503,
+          headers: {
+            "content-type": "application/json",
+            "retry-after": "30",
+            "x-request-id": requestId,
+          },
+        }
+      );
+    }
+
     logger.info("Routing request", {
       requestId,
       model,

@@ -45,6 +45,9 @@ export interface ServerConfig {
   host: string;
   streamBufferMs?: number;       // 0/unset = disabled, > 0 = time-based flush threshold (ms)
   streamBufferBytes?: number;    // 0/unset = disabled, > 0 = size-based flush threshold (bytes)
+  retryBaseDelayMs?: number;     // Base delay (ms) between fallback retries — default 500
+  retryMaxDelayMs?: number;      // Max delay (ms) between fallback retries — default 5000
+  retryMultiplier?: number;      // Exponential backoff multiplier — default 2
 }
 
 export interface AppConfig {
@@ -69,6 +72,11 @@ export interface RequestContext {
   hasDistribution?: boolean;
   /** Tracks current StreamState for transition validation */
   _streamState?: StreamState;
+  /** Retry-after value (seconds) from the last provider 429/503 response */
+  _retryAfterMs?: number;
+  /** Set when all providers in the chain have health < UNHEALTHY_THRESHOLD.
+   *  Triggers immediate 503 response without attempting the chain. */
+  _globalBackoff?: boolean;
 }
 
 export interface RequestMetrics {

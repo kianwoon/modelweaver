@@ -3,6 +3,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createMockProvider } from "./helpers/mock-provider.js";
 import { createApp } from "../src/server.js";
 import { clearRoutingCache } from "../src/router.js";
+import { clearHealthScores } from "../src/health-score.js";
 import { MetricsStore } from "../src/metrics.js";
 import type { AppConfig } from "../src/types.js";
 
@@ -30,11 +31,13 @@ describe("server", () => {
 
   beforeEach(async () => {
     clearRoutingCache();
+    clearHealthScores();
     mock = createMockProvider();
   });
 
   afterEach(async () => {
     await mock.close();
+    clearHealthScores();
   });
 
   it("routes requests to the correct provider and streams response", async () => {

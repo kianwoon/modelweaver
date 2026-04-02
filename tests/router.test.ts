@@ -1,7 +1,7 @@
 // tests/router.test.ts
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { matchTier, buildRoutingChain, resolveRequest, clearRoutingCache, selectByWeight } from "../src/router.js";
-import { clearHealthScores } from "../src/health-score.js";
+import { recordHealthEvent, clearHealthScores } from "../src/health-score.js";
 import type { RoutingEntry, AppConfig } from "../src/types.js";
 
 describe("matchTier", () => {
@@ -211,6 +211,97 @@ describe("resolveRequest", () => {
     expect(ctx!.hasDistribution).toBeFalsy();
     expect(ctx!.providerChain[0].provider).toBe("primary");
     expect(ctx!.providerChain[1].provider).toBe("fallback");
+  });
+});
+
+describe("resolveRequest — global backoff", () => {
+  beforeEach(() => {
+    clearRoutingCache();
+    clearHealthScores();
+  });
+  afterEach(() => {
+    clearHealthScores();
+  });
+
+  it("sets _globalBackoff when all providers in chain are unhealthy", () => {
+    const config: AppConfig = {
+      server: { port: 13000, host: "localhost" },
+      providers: new Map(),
+      routing: new Map([
+        ["sonnet", [{ provider: "p1" }, { provider: "p2" }]],
+      ]),
+      tierPatterns: new Map([["sonnet", ["sonnet"]]]),
+      modelRouting: new Map(),
+    };
+
+    // Make both providers unhealthy (score < 0.5)
+    for (let i = 0; i < 20; i++) {
+      recordHealthEvent("p1", false, 500);
+      recordHealthEvent("p2", false, 500);
+    }
+
+    const ctx = resolveRequest("claude-sonnet-4", "req-gb-1", config, "{}");
+    expect(ctx).not.toBeNull();
+    expect(ctx!._globalBackoff).toBe(true);
+  });
+
+  it("does not set _globalBackoff when at least one provider is healthy", () => {
+    const config: AppConfig = {
+      server: { port: 13000, host: "localhost" },
+      providers: new Map(),
+      routing: new Map([
+        ["sonnet", [{ provider: "p1" }, { provider: "p2" }]],
+      ]),
+      tierPatterns: new Map([["sonnet", ["sonnet"]]]),
+      modelRouting: new Map(),
+    };
+
+    // p1 unhealthy, p2 healthy
+    for (let i = 0; i < 20; i++) {
+      recordHealthEvent("p1", false, 500);
+      recordHealthEvent("p2", true, 500);
+    }
+
+    const ctx = resolveRequest("claude-sonnet-4", "req-gb-2", config, "{}");
+    expect(ctx).not.toBeNull();
+    expect(ctx!._globalBackoff).toBe(false);
+  });
+
+  it("does not set _globalBackoff when no health data exists", () => {
+    const config: AppConfig = {
+      server: { port: 13000, host: "localhost" },
+      providers: new Map(),
+      routing: new Map([
+        ["sonnet", [{ provider: "p1" }, { provider: "p2" }]],
+      ]),
+      tierPatterns: new Map([["sonnet", ["sonnet"]]]),
+      modelRouting: new Map(),
+    };
+
+    const ctx = resolveRequest("claude-sonnet-4", "req-gb-3", config, "{}");
+    expect(ctx).not.toBeNull();
+    expect(ctx!._globalBackoff).toBe(false);
+  });
+
+  it("sets _globalBackoff for single-provider chain when unhealthy", () => {
+    const config: AppConfig = {
+      server: { port: 13000, host: "localhost" },
+      providers: new Map(),
+      routing: new Map([
+        ["sonnet", [{ provider: "p1" }]],
+      ]),
+      tierPatterns: new Map([["sonnet", ["sonnet"]]]),
+      modelRouting: new Map(),
+    };
+
+    for (let i = 0; i < 20; i++) {
+      recordHealthEvent("p1", false, 500);
+    }
+
+    const ctx = resolveRequest("claude-sonnet-4", "req-gb-4", config, "{}");
+    expect(ctx).not.toBeNull();
+    // Single unhealthy provider — skip it immediately (no point burning 15s)
+    expect(ctx!._globalBackoff).toBe(true);
   });
 });
 

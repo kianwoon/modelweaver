@@ -10,6 +10,7 @@ describe("CircuitBreaker", () => {
       failureThreshold: 3,
       windowSeconds: 60,
       cooldownSeconds: 1, // Short for tests
+      rateLimitCooldownSeconds: 1, // Match cooldown for 429 tests
     });
   });
 
@@ -135,6 +136,69 @@ describe("CircuitBreaker", () => {
       custom.recordResult(429);
       custom.recordResult(429);
       expect(custom.getState()).toBe("open");
+    });
+  });
+
+  describe("escalating cooldown", () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it("doubles cooldown on second open (1 flap)", async () => {
+      // Open first time
+      breaker.recordResult(429);
+      breaker.recordResult(429);
+      breaker.recordResult(429);
+      expect(breaker.getState()).toBe("open");
+
+      // Advance past first cooldown (1s)
+      vi.advanceTimersByTime(1100);
+      await Promise.resolve();
+
+      // Probe fails — goes back to open (1 flap)
+      breaker.canProceed();
+      breaker.recordResult(429);
+      expect(breaker.getState()).toBe("open");
+
+      // After 1 flap, cooldown = 1s * 2^1 = 2s
+      // Advance 2.1s from now (past the 2s cooldown)
+      vi.advanceTimersByTime(2100);
+      await Promise.resolve();
+
+      expect(breaker.canProceed().allowed).toBe(true);
+    });
+
+    it("resets flap count after 5 consecutive successes", async () => {
+      // Open, flap, go half-open
+      breaker.recordResult(429);
+      breaker.recordResult(429);
+      breaker.recordResult(429);
+      vi.advanceTimersByTime(1100);
+      await Promise.resolve();
+      breaker.canProceed();
+      breaker.recordResult(429); // back to open — flap count = 1
+
+      vi.advanceTimersByTime(2100); // 2x cooldown elapsed
+      await Promise.resolve();
+      breaker.canProceed();
+
+      // Now succeed 5 times in a row
+      breaker.recordResult(200);
+      breaker.recordResult(200);
+      breaker.recordResult(200);
+      breaker.recordResult(200);
+      breaker.recordResult(200);
+
+      expect(breaker.getState()).toBe("closed");
+      // Flap count should be reset — next failure should be at 1x cooldown
+      breaker.recordResult(429);
+      breaker.recordResult(429);
+      breaker.recordResult(429);
+      expect(breaker.getState()).toBe("open");
     });
   });
 

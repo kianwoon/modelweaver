@@ -2,6 +2,7 @@
 
 import type { ProviderConfig } from "./types.js";
 import type { LatencyTracker } from "./hedging.js";
+import { getHealthScore } from "./health-score.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -16,20 +17,27 @@ const TTFB_FLOOR_MS = 2000;
  */
 const MIN_SAMPLES = 5;
 
+/**
+ * Minimum health score multiplier floor.
+ * Even a very unhealthy provider (score → 0) gets at least 20% of configured TTFB.
+ */
+const HEALTH_TTFB_MIN_MULTIPLIER = 0.2;
+
 // ---------------------------------------------------------------------------
 // Adaptive TTFB timeout
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve an adaptive TTFB timeout for a provider based on observed latency.
+ * Resolve an adaptive TTFB timeout for a provider.
  *
- * Uses the LatencyTracker's rolling window (30 samples) to compute an
- * approximate p95, then clamps it:
- *   - Floor: TTFB_FLOOR_MS (2s) — prevents overly aggressive timeouts
- *   - Ceiling: the configured static `ttfbTimeout` — user knows best
+ * Composes two independent signals via min():
+ *   1. Latency-based: uses LatencyTracker's rolling window to compute approximate p95.
+ *      Tightens timeout for consistently slow providers.
+ *   2. Health-based: scales configured TTFB by max(healthScore, HEALTH_TTFB_MIN_MULTIPLIER).
+ *      Fails unhealthy providers faster so the fallback chain can start sooner.
  *
- * This means adaptive tuning can only TIGHTEN the timeout, never loosen it.
- * If a provider gets persistently slow, the circuit breaker handles it.
+ * Taking the min() of both signals means a provider gets fast-failed if it's
+ * either slow OR unhealthy — whichever is more aggressive.
  *
  * Falls back to the static configured value when there aren't enough samples.
  *
@@ -39,16 +47,26 @@ const MIN_SAMPLES = 5;
  */
 export function resolveAdaptiveTTFB(provider: ProviderConfig, tracker: LatencyTracker): number {
   const base = provider.ttfbTimeout ?? 8000;
+
+  // Signal 1: latency-based (from existing implementation)
   const stats = tracker.getStats(provider.name);
+  let latencyBased = base;
+  if (stats.count >= MIN_SAMPLES) {
+    // Approximate p95 using mean + 2*stddev (normal distribution).
+    // cv = stddev / mean, so stddev = cv * mean.
+    // p95 ≈ mean * (1 + 2*cv)
+    const p95Approx = Math.round(stats.mean * (1 + 2 * stats.cv));
+    latencyBased = Math.max(TTFB_FLOOR_MS, Math.min(base, p95Approx));
+  }
 
-  // Not enough data — use static config
-  if (stats.count < MIN_SAMPLES) return base;
+  // Signal 2: health-score-based
+  // Scale TTFB by health score, floor at 20% of base to avoid too-aggressive timeouts.
+  // Provider at 100% health → full base
+  // Provider at 30% health → 30% of base (or HEALTH_TTFB_MIN_MULTIPLIER, whichever is higher)
+  const healthScore = getHealthScore(provider.name);
+  const healthMultiplier = Math.max(healthScore, HEALTH_TTFB_MIN_MULTIPLIER);
+  const healthBased = Math.round(base * healthMultiplier);
 
-  // Approximate p95 using mean + 2*stddev (normal distribution).
-  // cv = stddev / mean, so stddev = cv * mean.
-  // p95 ≈ mean * (1 + 2*cv)
-  const p95Approx = Math.round(stats.mean * (1 + 2 * stats.cv));
-
-  // Clamp: floor safety, ceiling is the configured static value
-  return Math.max(TTFB_FLOOR_MS, Math.min(base, p95Approx));
+  // Compose: use the tighter of the two signals
+  return Math.min(latencyBased, healthBased);
 }

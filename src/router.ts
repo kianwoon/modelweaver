@@ -4,6 +4,57 @@ import { getAllHealthScores } from "./health-score.js";
 
 const ROUTING_CACHE_MAX_SIZE = 200;
 
+/** Health score threshold below which a provider gets deprioritized in fallback chains. */
+const UNHEALTHY_THRESHOLD = 0.5;
+
+/**
+ * Reorder a fallback chain based on real-time health scores.
+ *
+ * Providers scoring below UNHEALTHY_THRESHOLD are moved to the end of the chain,
+ * while preserving relative order among healthy and unhealthy groups.
+ * Circuit-opened providers are NOT filtered here (that's done separately
+ * in resolveRequest/selectByWeight).
+ *
+ * This ensures that when a provider like GLM is having a bad day (50%+ failure rate),
+ * healthier providers get tried first, while still available as fallback.
+ *
+ * When no health data exists (< 5 events), returns the original chain unchanged.
+ */
+function reorderChainByHealth(
+  entries: RoutingEntry[],
+): RoutingEntry[] {
+  const providerNames = entries.map(e => e.provider);
+  const scores = getAllHealthScores(providerNames);
+
+  // Check if we have meaningful health data for any provider
+  let hasHealthData = false;
+  for (const score of scores.values()) {
+    if (score < 1) { hasHealthData = true; break; }
+  }
+  if (!hasHealthData) return entries;
+
+  const healthy: RoutingEntry[] = [];
+  const unhealthy: RoutingEntry[] = [];
+
+  for (const entry of entries) {
+    const score = scores.get(entry.provider) ?? 1;
+    if (score < UNHEALTHY_THRESHOLD) {
+      unhealthy.push(entry);
+    } else {
+      healthy.push(entry);
+    }
+  }
+
+  // If all are healthy or all unhealthy, preserve original order
+  if (healthy.length === 0 || unhealthy.length === 0) return entries;
+
+  // Within each group, sort by health score descending (healthiest first)
+  healthy.sort((a, b) => (scores.get(b.provider) ?? 1) - (scores.get(a.provider) ?? 1));
+  unhealthy.sort((a, b) => (scores.get(b.provider) ?? 1) - (scores.get(a.provider) ?? 1));
+
+  return [...healthy, ...unhealthy];
+}
+
 interface RoutingCacheEntry {
   tier: string;
   providerChain: RoutingEntry[];
@@ -170,6 +221,31 @@ export function resolveRequest(
     providerChain = buildRoutingChain(tier, config.routing);
   }
 
+  // Health-aware reordering: sort fallback chain so unhealthy providers
+  // get deprioritized to the end. This applies to ALL routing modes
+  // (fixed chains + distribution), not just weighted models.
+  if (providerChain.length > 1) {
+    providerChain = reorderChainByHealth(providerChain);
+  }
+
+  // Global backoff: if ALL providers are unhealthy (health < 0.5),
+  // skip the chain entirely and return 503 immediately.
+  // No point burning 15s+ per request when all providers are degraded.
+  let globalBackoff = false;
+  const allScores = getAllHealthScores(providerChain.map(e => e.provider));
+  let hasHealthData = false;
+  for (const score of allScores.values()) {
+    if (score < 1) { hasHealthData = true; break; }
+  }
+  if (hasHealthData) {
+    const allUnhealthy = providerChain.every(
+      e => (allScores.get(e.provider) ?? 1) < UNHEALTHY_THRESHOLD
+    );
+    if (allUnhealthy) {
+      globalBackoff = true;
+    }
+  }
+
   // Apply distribution if weights are present
   let hasDistribution = false;
   if (providerChain.some(e => e.weight !== undefined)) {
@@ -206,5 +282,6 @@ export function resolveRequest(
     rawBody,
     hasDistribution,
     fallbackMode: hasDistribution ? "sequential" : undefined,
+    _globalBackoff: globalBackoff,
   };
 }
