@@ -397,13 +397,13 @@ describe("selectByWeight", () => {
       { provider: "b", weight: 50 },
     ];
     const counts = { a: 0, b: 0 };
-    for (let i = 0; i < 5000; i++) {
+    for (let i = 0; i < 20000; i++) {
       const result = selectByWeight(entries, [], scores);
       counts[result[0].provider as "a" | "b"]++;
     }
     // a: 0.7*50 + 0.3*0 = 35, b: 0.7*50 + 0.3*1 = 38
     // Ratio: a ≈ 47.9%, b ≈ 52.1%
-    const bPct = counts.b / 5000;
+    const bPct = counts.b / 20000;
     expect(bPct).toBeGreaterThan(0.49); // b should get more than static 50%
   });
 
