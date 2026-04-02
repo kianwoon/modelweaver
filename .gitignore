@@ -3,6 +3,7 @@ dist/
 .claude/
 *.tmp-config-test/
 .env
+.worktrees/
 *.log
 modelweaver.yaml
 gui/target/
