@@ -161,6 +161,8 @@ const rawConfigSchema = z.object({
     .object({
       port: z.number().int().min(1).max(65535).default(3456),
       host: z.string().default("localhost"),
+      streamBufferMs: z.number().min(0).optional(),
+      streamBufferBytes: z.number().min(0).optional(),
     })
     .default({ port: 3456, host: "localhost" }),
   providers: z.record(z.string(), providerSchema),

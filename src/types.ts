@@ -42,6 +42,8 @@ export interface HedgingConfig {
 export interface ServerConfig {
   port: number;
   host: string;
+  streamBufferMs?: number;       // 0/unset = disabled, > 0 = time-based flush threshold (ms)
+  streamBufferBytes?: number;    // 0/unset = disabled, > 0 = size-based flush threshold (bytes)
 }
 
 export interface AppConfig {
