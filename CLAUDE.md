@@ -12,18 +12,21 @@ LLM proxy with Tauri GUI. Routes requests to multiple upstream providers with fa
 
 ## Build & Restart (MANDATORY after any code change)
 
-After modifying `src/**/*.ts` or `gui/frontend/**`:
+After modifying `src/**/*.ts`:
 
 ```bash
-# 1. Stop daemon (free port 3456 first — prevents "Port already in use" errors)
-npx modelweaver stop
-
-# 2. Rebuild daemon
+# 1. Rebuild daemon (tsup replaces dist/ atomically)
 npm run build
 
-# 3. Start daemon
-npx modelweaver order
+# 2. Reload worker in-place (no port drop, no connection reset)
+npx modelweaver reload
 ```
+
+> **WARNING:** Do NOT use `stop` then `start` from within a Claude Code session
+> that routes through ModelWeaver — stopping the proxy kills in-flight API calls
+> and causes "API Error: 400 (no body)". Use `reload` instead.
+>
+> **Full restart** (only if reload fails): `npx modelweaver stop && npm run build && npx modelweaver start`
 
 After modifying `gui/frontend/**` (HTML/CSS/JS):
 
