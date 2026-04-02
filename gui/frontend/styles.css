@@ -742,30 +742,19 @@ body.glow-active #app {
 }
 
 /* === Section Reorder Context Menu === */
-.context-menu {
-  position: fixed;
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 4px;
-  z-index: 1000;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-  min-width: 180px;
-}
-
-.context-menu button {
-  display: block;
-  width: 100%;
-  text-align: left;
-  padding: 6px 10px;
-  font-size: 12px;
+.reset-order-btn {
   background: none;
-  border: none;
-  color: var(--text);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 1px 5px;
   border-radius: 4px;
   cursor: pointer;
+  margin-left: 6px;
+  transition: color 0.15s, border-color 0.15s;
 }
 
-.context-menu button:hover {
-  background: var(--border);
+.reset-order-btn:hover {
+  color: var(--text);
+  border-color: var(--text-dim);
 }
