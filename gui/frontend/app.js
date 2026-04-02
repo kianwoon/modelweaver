@@ -998,6 +998,120 @@ let reconnectTimer = null;
 const WS_MAX_BACKOFF = 30000;
 const WS_CONNECT_TIMEOUT = 5000;
 
+// --- Section Reorder ---
+const DEFAULT_SECTION_ORDER = ['models-section', 'providers-section', 'recent-section'];
+const SECTION_ORDER_KEY = 'sectionOrder';
+
+function initSectionOrder() {
+  let order = DEFAULT_SECTION_ORDER;
+  try {
+    const saved = localStorage.getItem(SECTION_ORDER_KEY);
+    if (saved) order = JSON.parse(saved);
+  } catch (e) {}
+  applySectionOrder(order);
+}
+
+function applySectionOrder(order) {
+  order.forEach((sectionId, index) => {
+    const section = document.getElementById(sectionId);
+    if (section) section.style.order = index;
+  });
+}
+
+function saveSectionOrder(order) {
+  try {
+    localStorage.setItem(SECTION_ORDER_KEY, JSON.stringify(order));
+  } catch (e) {}
+}
+
+function getCurrentSectionOrder() {
+  const sections = document.querySelectorAll('#app > .section[draggable="true"]');
+  return Array.from(sections).sort((a, b) => (a.style.order || 0) - (b.style.order || 0)).map(s => s.id);
+}
+
+(function initSectionDragDrop() {
+  let draggedSection = null;
+
+  document.querySelectorAll('.section[draggable="true"]').forEach(section => {
+    section.addEventListener('dragstart', (e) => {
+      draggedSection = section;
+      section.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', section.id);
+    });
+
+    section.addEventListener('dragend', () => {
+      section.classList.remove('dragging');
+      document.querySelectorAll('.section').forEach(s => {
+        s.classList.remove('drag-over-top', 'drag-over-bottom');
+      });
+      draggedSection = null;
+    });
+
+    section.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const rect = section.getBoundingClientRect();
+      const midY = rect.top + rect.height / 2;
+      section.classList.remove('drag-over-top', 'drag-over-bottom');
+      section.classList.add(e.clientY < midY ? 'drag-over-top' : 'drag-over-bottom');
+    });
+
+    section.addEventListener('dragleave', () => {
+      section.classList.remove('drag-over-top', 'drag-over-bottom');
+    });
+
+    section.addEventListener('drop', (e) => {
+      e.preventDefault();
+      if (section === draggedSection) return;
+
+      const rect = section.getBoundingClientRect();
+      const insertBefore = e.clientY < rect.top + rect.height / 2;
+      const currentOrder = getCurrentSectionOrder();
+
+      const draggedId = draggedSection.id;
+      const targetId = section.id;
+      const fromIdx = currentOrder.indexOf(draggedId);
+      const toIdx = currentOrder.indexOf(targetId);
+
+      currentOrder.splice(fromIdx, 1);
+      currentOrder.splice(insertBefore ? toIdx : toIdx + 1, 0, draggedId);
+
+      applySectionOrder(currentOrder);
+      saveSectionOrder(currentOrder);
+    });
+
+    // Right-click context menu
+    section.addEventListener('contextmenu', (e) => {
+      // Only on the section header area
+      if (!e.target.closest('.section-title')) return;
+      e.preventDefault();
+      const menu = document.getElementById('section-context-menu');
+      menu.style.left = e.clientX + 'px';
+      menu.style.top = e.clientY + 'px';
+      menu.classList.remove('hidden');
+
+      const closeMenu = (ev) => {
+        if (!menu.contains(ev.target)) {
+          menu.classList.add('hidden');
+          document.removeEventListener('click', closeMenu);
+        }
+      };
+      setTimeout(() => document.addEventListener('click', closeMenu), 0);
+    });
+  });
+
+  // Reset button
+  document.getElementById('reset-section-order').addEventListener('click', () => {
+    applySectionOrder(DEFAULT_SECTION_ORDER);
+    saveSectionOrder(DEFAULT_SECTION_ORDER);
+    document.getElementById('section-context-menu').classList.add('hidden');
+  });
+})();
+
+// Apply saved section order on load
+initSectionOrder();
+
 // Set custom titlebar version from the native window title (set by Rust backend)
 if (window.__TAURI__) {
   const titleEl = document.querySelector('.titlebar .title');

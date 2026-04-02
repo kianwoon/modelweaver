@@ -345,6 +345,54 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.5px;
   margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Drag handle — hidden by default, visible on section hover */
+.drag-handle {
+  opacity: 0;
+  cursor: grab;
+  font-size: 14px;
+  color: var(--text-dim);
+  transition: opacity 0.15s ease;
+  user-select: none;
+  flex-shrink: 0;
+}
+
+.section:hover .drag-handle {
+  opacity: 1;
+}
+
+.drag-handle:active {
+  cursor: grabbing;
+}
+
+/* Dragging state — dim the dragged section */
+.section.dragging {
+  opacity: 0.4;
+  outline: 2px dashed var(--border, #4a4a6a);
+  outline-offset: 2px;
+}
+
+/* Drop indicator — horizontal line between sections */
+.section.drag-over-top::before {
+  content: '';
+  display: block;
+  height: 2px;
+  background: #6366f1;
+  margin-bottom: -1px;
+  border-radius: 1px;
+}
+
+.section.drag-over-bottom::after {
+  content: '';
+  display: block;
+  height: 2px;
+  background: #6366f1;
+  margin-top: -1px;
+  border-radius: 1px;
 }
 
 .section-content {
@@ -691,4 +739,33 @@ body.glow-active #app {
 @media (prefers-reduced-motion: reduce) {
   body.glow-active { animation: none; box-shadow: none; border-color: var(--border); }
   body.glow-active #app { animation: none; box-shadow: none; }
+}
+
+/* === Section Reorder Context Menu === */
+.context-menu {
+  position: fixed;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  z-index: 1000;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+  min-width: 180px;
+}
+
+.context-menu button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  font-size: 12px;
+  background: none;
+  border: none;
+  color: var(--text);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.context-menu button:hover {
+  background: var(--border);
 }

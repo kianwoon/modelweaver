@@ -58,28 +58,42 @@
     </div>
 
     <!-- Active Models -->
-    <section class="section">
-      <h3 class="section-title">Active Models</h3>
+    <section class="section" id="models-section" draggable="true">
+      <h3 class="section-title">
+        <span class="drag-handle" title="Drag to reorder">⠿</span>
+        Active Models
+      </h3>
       <div id="models" class="section-content">
         <div class="empty">No requests yet</div>
       </div>
     </section>
 
     <!-- Providers -->
-    <section class="section" id="providers-section">
-      <h3 class="section-title">Providers <span class="dist-badge" title="Traffic distributed by weight when configured">%</span></h3>
+    <section class="section" id="providers-section" draggable="true">
+      <h3 class="section-title">
+        <span class="drag-handle" title="Drag to reorder">⠿</span>
+        Providers <span class="dist-badge" title="Traffic distributed by weight when configured">%</span>
+      </h3>
       <div id="providers" class="section-content">
         <div class="empty">No requests yet</div>
       </div>
     </section>
 
     <!-- Recent Requests -->
-    <section class="section" id="recent-section">
-      <h3 class="section-title">Recent</h3>
+    <section class="section" id="recent-section" draggable="true">
+      <h3 class="section-title">
+        <span class="drag-handle" title="Drag to reorder">⠿</span>
+        Recent
+      </h3>
       <div id="recent" class="section-content recent-list">
         <div class="empty">No requests yet</div>
       </div>
     </section>
+
+    <!-- Right-click context menu for section reorder -->
+    <div id="section-context-menu" class="context-menu hidden">
+      <button id="reset-section-order">Reset order to default</button>
+    </div>
 
     <div class="app-credit">
       <span class="app-credit__author">by kianwoon</span>
