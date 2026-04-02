@@ -449,6 +449,17 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     providers.set(name, providerConfig);
   }
 
+  // Wire server config to each provider so proxy.ts can access buffer settings
+  const serverConfig: ServerConfig = {
+    port: validated.server.port,
+    host: validated.server.host,
+    streamBufferMs: validated.server.streamBufferMs,
+    streamBufferBytes: validated.server.streamBufferBytes,
+  };
+  for (const [, provider] of providers) {
+    provider._serverConfig = serverConfig;
+  }
+
   const routing = new Map<string, RoutingEntry[]>();
   for (const [tier, entries] of Object.entries(validated.routing)) {
     routing.set(tier, entries);

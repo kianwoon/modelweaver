@@ -21,6 +21,7 @@ export interface ProviderConfig {
   _cachedPathname?: string;
   _agent?: import("undici").Agent;
   _circuitBreaker?: CircuitBreaker;
+  _serverConfig?: ServerConfig;
   poolSize?: number;
 }
 
