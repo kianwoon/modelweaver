@@ -48,15 +48,11 @@ export async function ensureDir(): Promise<void> {
 
 export async function writePidFile(pid: number): Promise<void> {
   await ensureDir();
-  try {
-    await writeFile(getPidPath(), `${pid}\n`, { flag: 'wx' });
-  } catch (err: unknown) {
-    if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
-      // PID file already exists — another instance is likely running
-      return;
-    }
-    throw err;
-  }
+  // Use 'w' (overwrite) instead of 'wx' (exclusive create).
+  // The caller (startMonitor) already removes stale PID files before calling
+  // this, but launchd's KeepAlive can respawn the monitor between the unlink
+  // and write — causing 'wx' to silently fail. Overwrite is always correct here.
+  await writeFile(getPidPath(), `${pid}\n`, 'utf-8');
 }
 
 export async function readPidFile(): Promise<number | null> {
@@ -128,6 +124,19 @@ export function isProcessAlive(pid: number): boolean {
 /** Find PIDs of processes listening on the given TCP port via lsof (async).
  *  NOTE: lsof is unavailable on Windows — port-based discovery silently skips on that platform.
  */
+/** Find the monitor PID from a list by checking process args for --monitor. */
+async function findMonitorPid(pids: number[]): Promise<number | null> {
+  if (pids.length === 0) return null;
+  const { execFileSync } = await import("node:child_process");
+  for (const pid of pids) {
+    try {
+      const out = execFileSync("ps", ["-o", "command=", "-p", String(pid)], { encoding: "utf8", timeout: 3000 });
+      if (out.includes("--monitor")) return pid;
+    } catch { /* skip */ }
+  }
+  return null;
+}
+
 export function findPidsOnPort(port: number): Promise<number[]> {
   return new Promise((resolve) => {
     if (isWindows()) {
@@ -356,12 +365,37 @@ export async function startDaemon(
     };
   }
 
+  // Re-enable launchd KeepAlive so it auto-restarts the daemon if killed
+  await reloadLaunchdService();
+
   return {
     success: true,
     pid,
     message: `ModelWeaver started in background (PID ${pid})`,
     logPath: getLogPath(),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Reload launchd service (macOS) — re-enables KeepAlive after stop unloads it
+// ---------------------------------------------------------------------------
+
+async function reloadLaunchdService(): Promise<void> {
+  if (process.platform !== "darwin") return;
+  try {
+    const { existsSync } = await import("node:fs");
+    const plistPath = join(
+      process.env.HOME || process.env.USERPROFILE || "",
+      "Library", "LaunchAgents", "com.modelweaver.daemon.plist"
+    );
+    if (existsSync(plistPath)) {
+      const { execFileSync } = await import("node:child_process");
+      execFileSync("launchctl", ["load", plistPath], { stdio: "pipe" });
+      console.warn("[daemon] Reloaded launchd service — KeepAlive re-enabled");
+    }
+  } catch {
+    // Not macOS or plist missing — skip
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -374,6 +408,24 @@ export interface DaemonStopResult {
 }
 
 export async function stopDaemon(portOverride?: number): Promise<DaemonStopResult> {
+  // Unload launchd service FIRST to prevent KeepAlive from respawning
+  // the daemon while we're trying to stop/rebuild it. Without this,
+  // launchd immediately restarts `node dist/index.js start` after we kill
+  // the monitor — loading stale code and disrupting the rebuild process.
+  if (process.platform === "darwin") {
+    try {
+      const { execFileSync } = await import('node:child_process');
+      const plistPath = join(
+        process.env.HOME || process.env.USERPROFILE || "",
+        "Library", "LaunchAgents", "com.modelweaver.daemon.plist"
+      );
+      execFileSync("launchctl", ["unload", plistPath], { stdio: "pipe" });
+      console.warn("[daemon] Unloaded launchd service to prevent auto-restart during stop");
+    } catch {
+      // Not loaded or not macOS — that's fine
+    }
+  }
+
   const pid = await readPidFile();
   if (pid === null) {
     // PID file missing — try to find the process by configured port
@@ -496,23 +548,29 @@ export async function removeDaemon(): Promise<DaemonStopResult> {
 export async function reloadDaemon(portOverride?: number): Promise<void> {
   const pid = await readPidFile();
   if (pid === null) {
-    // PID file missing — try to find the process by configured port
+    // PID file missing — try to find the monitor by configured port
     const port = portOverride ?? await getConfigPort();
     if (port !== null && port > 0) {
       const portPids = await findPidsOnPort(port);
       const livePids = portPids.filter((p) => isProcessAlive(p));
       if (livePids.length > 0) {
-        for (const p of livePids) {
-          try {
-            if (isWindows()) {
-              // SIGHUP not available on Windows — just inform user
-              console.log(`  Windows detected — reload signal not supported for PID ${p}. Use 'modelweaver stop && modelweaver start' instead.`);
-            } else {
-              process.kill(p, "SIGHUP");
-            }
-          } catch { /* ignore */ }
+        // Find the MONITOR process (has --monitor in argv) — only the monitor
+        // handles SIGHUP for reload. Sending SIGHUP to the worker would crash it.
+        const monitorPid = await findMonitorPid(livePids);
+        if (monitorPid) {
+          try { process.kill(monitorPid, "SIGHUP"); } catch { /* ignore */ }
+          console.log(`  Sent reload signal to monitor (PID ${monitorPid}) on port ${port}.`);
+          return;
         }
-        console.log(`  Sent reload signal to ${livePids.length} process(es) on port ${port}.`);
+        // Fallback: send SIGHUP to first PID (might be monitor or worker)
+        try {
+          if (isWindows()) {
+            console.log(`  Windows detected — reload signal not supported. Use 'modelweaver stop && modelweaver start' instead.`);
+          } else {
+            process.kill(livePids[0], "SIGHUP");
+          }
+          console.log(`  Sent reload signal to PID ${livePids[0]} on port ${port} (PID file missing, guessed monitor).`);
+        } catch { /* ignore */ }
         return;
       }
     }
