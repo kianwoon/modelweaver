@@ -997,7 +997,8 @@ async function forwardWithRetry(
 ): Promise<Response> {
   let lastResult: Response | undefined;
 
-  for (let attempt = 0; attempt <= CONNECTION_RETRY_MAX; attempt++) {
+  const maxRetries = provider._connectionRetries ?? CONNECTION_RETRY_MAX;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const result = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index);
 
     // Non-502 responses pass through immediately (success or upstream error)
@@ -1035,7 +1036,7 @@ async function forwardWithRetry(
       }
 
       const delay = CONNECTION_RETRY_BASE_MS * Math.pow(2, attempt);
-      console.warn(`[proxy] Connection error on "${provider.name}" (attempt ${attempt + 1}/${CONNECTION_RETRY_MAX}), retrying in ${delay}ms: ${body.slice(0, 200)}`);
+      console.warn(`[proxy] Connection error on "${provider.name}" (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms: ${body.slice(0, 200)}`);
 
       // Reset stream state for retry
       ctx._streamState = "start";
@@ -1056,7 +1057,7 @@ async function forwardWithRetry(
   }
   // Stall errors are recorded in handleStall() (per-request, no retry amplification).
 
-  console.warn(`[proxy] All ${CONNECTION_RETRY_MAX + 1} attempts failed for "${provider.name}" — escalating to fallback`);
+  console.warn(`[proxy] All ${maxRetries + 1} attempts failed for "${provider.name}" — escalating to fallback`);
   return lastResult!;
 }
 

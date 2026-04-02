@@ -23,6 +23,8 @@ export interface ProviderConfig {
   _circuitBreaker?: CircuitBreaker;
   _serverConfig?: ServerConfig;
   poolSize?: number;
+  /** Max connection-level retries (TTFB timeout/stall/connection failure) before escalating to fallback. Default: 3 */
+  _connectionRetries?: number;
 }
 
 export interface RoutingEntry {

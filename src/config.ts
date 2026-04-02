@@ -134,6 +134,7 @@ const providerSchema = z.object({
   modelLimits: modelLimitsSchema,
   concurrentLimit: z.number().int().min(1).optional(),
   poolSize: z.number().int().min(1).max(100).optional(),
+  connectionRetries: z.number().int().min(0).max(10).optional(),
   circuitBreaker: z.object({
     failureThreshold: z.number().int().min(1).optional(),
     windowSeconds: z.number().int().min(1).optional(),
@@ -222,7 +223,7 @@ export function findConfigFile(cwd: string = process.cwd(), { skipGlobal = false
  *  Used by init wizard to show existing providers and offer add/edit. */
 export function peekConfig(
   cwd?: string,
-): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; concurrentLimit?: number; stallTimeout?: number; poolSize?: number; circuitBreaker?: { threshold?: number; windowSeconds?: number; cooldown?: number } }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string; weight?: number }[]>; hedging?: { speculativeDelay: number; cvThreshold: number; maxHedge: number } } | null {
+): { configPath: string; providers: Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; concurrentLimit?: number; stallTimeout?: number; poolSize?: number; connectionRetries?: number; circuitBreaker?: { threshold?: number; windowSeconds?: number; cooldown?: number } }>; server: { port: number; host: string } | null; modelRouting: Map<string, { provider: string; model: string; weight?: number }[]>; hedging?: { speculativeDelay: number; cvThreshold: number; maxHedge: number } } | null {
   const configPath = findConfigFile(cwd);
   if (!configPath) return null;
 
@@ -230,7 +231,7 @@ export function peekConfig(
   const parsed = parseYaml(raw) as Record<string, unknown>;
   const providersRaw = (parsed?.providers ?? {}) as Record<string, Record<string, unknown>>;
 
-  const providers = new Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; concurrentLimit?: number; stallTimeout?: number; poolSize?: number; circuitBreaker?: { threshold?: number; windowSeconds?: number; cooldown?: number } }>();
+  const providers = new Map<string, { baseUrl: string; envKey: string; authType: "anthropic" | "bearer"; timeout: number; ttfbTimeout?: number; concurrentLimit?: number; stallTimeout?: number; poolSize?: number; connectionRetries?: number; circuitBreaker?: { threshold?: number; windowSeconds?: number; cooldown?: number } }>();
 
   for (const [id, config] of Object.entries(providersRaw)) {
     const apiKey = String(config.apiKey ?? "");
@@ -254,6 +255,7 @@ export function peekConfig(
       concurrentLimit: config.concurrentLimit !== undefined ? Number(config.concurrentLimit) : undefined,
       stallTimeout: config.stallTimeout !== undefined ? Number(config.stallTimeout) : undefined,
       poolSize: config.poolSize !== undefined ? Number(config.poolSize) : undefined,
+      connectionRetries: config.connectionRetries !== undefined ? Number(config.connectionRetries) : undefined,
       circuitBreaker,
     });
   }
@@ -442,6 +444,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     });
     createdAgents.push(providerConfig._agent);
     providerConfig.poolSize = poolSize ?? 10;
+    providerConfig._connectionRetries = p.connectionRetries;
     // Create per-provider circuit breaker
     const cbConfig = p.circuitBreaker;
     providerConfig._circuitBreaker = new CircuitBreaker(cbConfig ? {
