@@ -214,28 +214,53 @@ git commit -m "feat(proxy): add SSEBuffer class for optional stream chunk buffer
 
 ---
 
-## Task 4: Integrate SSEBuffer into proxy.ts
+## Task 4: Wire server config to providers
+
+**Files:**
+- Modify: `src/types.ts:~7` (`ProviderConfig` interface — add `_serverConfig?`)
+- Modify: `src/config.ts` (set `_serverConfig` on each provider after parsing)
+
+- [ ] **Step 1: Add `_serverConfig` to ProviderConfig**
+
+In `src/types.ts`, find the `ProviderConfig` interface. After the existing `_circuitBreaker` field (~line 23), add:
+
+```typescript
+  _serverConfig?: ServerConfig;
+```
+
+This follows the existing pattern of runtime-only cached fields prefixed with `_`.
+
+- [ ] **Step 2: Set `_serverConfig` on providers during config load**
+
+In `src/config.ts`, find where providers are set up after Zod parsing (search for where `providers` Map is populated). After all providers are created, add a loop:
+
+```typescript
+// Wire server config to each provider so proxy.ts can access buffer settings
+const server = parsed.server;
+for (const [, provider] of providers) {
+  provider._serverConfig = server;
+}
+```
+
+The exact location depends on how the providers Map is built — find the line where the Map is finalized and add this right after.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add src/types.ts src/config.ts
+git commit -m "feat(config): wire server config to providers for stream buffer access (#125)"
+```
+
+---
+
+## Task 5: Integrate SSEBuffer into proxy.ts
 
 **Files:**
 - Modify: `src/proxy.ts:~787` (the `passThrough.on("data")` handler inside `ReadableStream`)
 
-The buffering is activated when `server.streamBufferMs > 0 || server.streamBufferBytes > 0`. The server config is accessed via `provider._serverConfig` which is already set on each `ProviderConfig` object at startup.
+The buffering is activated when `server.streamBufferMs > 0 || server.streamBufferBytes > 0`. The server config is accessed via `provider._serverConfig` which was wired in Task 4.
 
-- [ ] **Step 1: Verify provider._serverConfig exists**
-
-Run: `grep -n "_serverConfig" src/types.ts src/config.ts`
-Expected: Field exists on `ProviderConfig` in `types.ts`
-
-Find the `ProviderConfig` interface in `src/types.ts` and confirm `_serverConfig?: ServerConfig` is present (added by a previous task or as part of existing setup). If it doesn't exist, add it:
-
-```typescript
-export interface ProviderConfig {
-  // ... existing fields ...
-  _serverConfig?: ServerConfig;
-}
-```
-
-- [ ] **Step 2: Add SSEBuffer import at top of proxy.ts**
+- [ ] **Step 1: Add SSEBuffer import at top of proxy.ts**
 
 Add after the existing imports:
 
@@ -243,7 +268,7 @@ Add after the existing imports:
 import { SSEBuffer } from "./stream-buffer.js";
 ```
 
-- [ ] **Step 3: Modify the passThrough.on("data") handler**
+- [ ] **Step 2: Modify the passThrough.on("data") handler**
 
 In `proxy.ts`, find the `passThrough.on("data", ...)` block around line 787. Replace the entire `start(controller)` callback body (from `let controllerClosed = false;` through `passThrough.on("close", safeClose);`) with:
 
@@ -301,7 +326,7 @@ start(controller) {
 },
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add src/proxy.ts
@@ -310,7 +335,7 @@ git commit -m "feat(proxy): integrate SSEBuffer into stream handler (#125)"
 
 ---
 
-## Task 5: Write unit tests
+## Task 6: Write unit tests
 
 **Files:**
 - Create: `tests/stream-buffer.test.ts`
