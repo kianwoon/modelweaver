@@ -11,6 +11,7 @@ import { warmupProvider } from './pool.js';
 import { resolveAdaptiveTTFB } from './adaptive-timeout.js';
 import { recordHealthEvent } from './health-score.js';
 import { broadcastStreamEvent } from './ws.js';
+import { SSEBuffer } from "./stream-buffer.js";
 
 // --- Per-provider latency metrics ---
 const providerLatencySamples: Map<string, number[]> = new Map();
@@ -784,14 +785,41 @@ export async function forwardRequest(
           controllerClosed = true;
           try { controller.error(err); } catch { /* already closed */ }
         };
+        // Check if streaming buffer is enabled via server config
+        const serverConfig = (provider as any)._serverConfig;
+        const bufferMs = serverConfig?.streamBufferMs ?? 0;
+        const bufferBytes = serverConfig?.streamBufferBytes ?? 0;
+        const bufferingEnabled = bufferMs > 0 || bufferBytes > 0;
+
+        let sseBuffer: SSEBuffer | undefined;
+        if (bufferingEnabled) {
+          sseBuffer = new SSEBuffer(
+            (chunk: Uint8Array) => {
+              if (ctx._streamState === "error" || ctx._streamState === "complete") return;
+              try { controller.enqueue(chunk); } catch { /* already closed */ }
+            },
+            { bufferBytes, bufferMs },
+          );
+        }
+
         passThrough.on("data", (chunk: Buffer) => {
           // Guard: don't enqueue data if stream is already in a terminal state
           // (this is a pure read guard, no transition — safe as-is)
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
-          try { controller.enqueue(new Uint8Array(chunk)); } catch { /* already closed */ }
+          if (sseBuffer) {
+            sseBuffer.write(new Uint8Array(chunk));
+          } else {
+            try { controller.enqueue(new Uint8Array(chunk)); } catch { /* already closed */ }
+          }
         });
-        passThrough.on("end", safeClose);
-        passThrough.on("error", safeError);
+        passThrough.on("end", () => {
+          if (sseBuffer) sseBuffer.end();
+          safeClose();
+        });
+        passThrough.on("error", () => {
+          if (sseBuffer) sseBuffer.end();
+          safeError(new Error("PassThrough error"));
+        });
         // Listen for "close" which fires on both end() and destroy(), ensuring
         // the ReadableStream completes even if "end" doesn't fire (e.g. after
         // unpipe + end on Node.js 20/22 where the pipe state prevents end event).
