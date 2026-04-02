@@ -276,7 +276,7 @@ describe("daemon", () => {
     it("cleans up even with no log file", async () => {
       const result = await removeDaemon();
       expect(result.success).toBe(true);
-      expect(result.message).toContain("not running");
+      expect(result.message).toMatch(/stopped|not running/);
     });
   });
 });

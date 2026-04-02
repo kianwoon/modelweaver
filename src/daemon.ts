@@ -292,7 +292,7 @@ export async function startDaemon(
   const currentStatus = await statusDaemon(port);
   if (currentStatus.running) {
     return {
-      success: false,
+      success: true,
       pid: currentStatus.pid,
       message: `ModelWeaver is already running (PID ${currentStatus.pid})`,
       logPath: getLogPath(),
@@ -396,7 +396,7 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
         };
       }
     }
-    return { success: false, message: "ModelWeaver is not running (no PID file found)" };
+    return { success: true, message: "ModelWeaver is not running" };
   }
 
   if (!isProcessAlive(pid)) {
@@ -407,15 +407,18 @@ export async function stopDaemon(portOverride?: number): Promise<DaemonStopResul
       await removeWorkerPidFile();
     }
     await removePidFile();
-    return { success: false, message: "ModelWeaver is not running (stale PID file cleaned up)" };
+    return { success: true, message: "ModelWeaver is not running (stale PID file cleaned up)" };
   }
 
-  // Kill worker first (holds port + connection pool)
+  // Read worker PID for the wait loop (do NOT kill it yet — see below).
   const workerPid = await readWorkerPidFile();
-  if (workerPid !== null && isProcessAlive(workerPid)) {
-    try { process.kill(workerPid, "SIGTERM"); } catch { /* already dead */ }
-  }
-  // Then kill monitor
+
+  // Kill MONITOR first to prevent respawn race condition.
+  // If we kill the worker first, the monitor's child.on('exit') handler
+  // queues a setTimeout(spawnDaemon, backoff) before it receives SIGTERM —
+  // creating an orphaned worker if the timer fires in that gap. Killing the
+  // monitor first sets its `shuttingDown` flag, so when it kills the child
+  // in its own SIGTERM handler, the child's exit handler skips the restart.
   try {
     process.kill(pid, "SIGTERM");
   } catch {

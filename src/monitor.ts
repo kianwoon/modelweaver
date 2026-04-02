@@ -1,6 +1,6 @@
 // src/monitor.ts — Monitor mode: spawns daemon child, auto-restarts on crash
 import { spawn } from "node:child_process";
-import { existsSync, unlinkSync } from "node:fs";
+import { existsSync, statSync, unlinkSync } from "node:fs";
 import { resolveEntryScript } from "./entry-path.js";
 import { writePidFile, removePidFile, removeWorkerPidFile, getPidPath } from "./daemon.js";
 
@@ -95,6 +95,16 @@ export async function startMonitor(args: {
         console.error(`[monitor] Port ${port} still in use after cleanup — skipping worker spawn`);
         return;
       }
+    }
+
+    // Guard: verify the entry script bundle exists and is non-trivial.
+    // tsup with `clean: true` wipes dist/ before rebuilding — if the monitor
+    // respawns during that window the worker crashes immediately. Retry instead.
+    const MIN_BUNDLE_SIZE = 1024; // 1 KB — a valid bundle is much larger
+    if (!existsSync(entryScript) || statSync(entryScript).size < MIN_BUNDLE_SIZE) {
+      console.warn(`[monitor] Entry script missing or too small (likely mid-build), retrying in 500ms`);
+      restartTimer = setTimeout(spawnDaemon, 500);
+      return;
     }
 
     const childArgs: string[] = [entryScript, "--daemon"];
