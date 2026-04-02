@@ -52,6 +52,8 @@ export interface ServerConfig {
   globalBackoffEnabled?: boolean;
   /** Health score threshold below which a provider is considered unhealthy — default 0.5 */
   unhealthyThreshold?: number;
+  /** Maximum request body size in MB — rejects requests exceeding this limit */
+  maxBodySizeMB?: number;
 }
 
 export interface AppConfig {

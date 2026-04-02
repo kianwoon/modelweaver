@@ -165,6 +165,7 @@ const rawConfigSchema = z.object({
       streamBufferBytes: z.number().min(0).optional(),
       globalBackoffEnabled: z.boolean().default(true).optional(),
       unhealthyThreshold: z.number().min(0).max(1).default(0.5).optional(),
+      maxBodySizeMB: z.number().min(1).max(100).default(10).optional(),
     })
     .default({ port: 3456, host: "localhost" }),
   providers: z.record(z.string(), providerSchema),
@@ -459,6 +460,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     streamBufferBytes: validated.server.streamBufferBytes,
     globalBackoffEnabled: validated.server.globalBackoffEnabled,
     unhealthyThreshold: validated.server.unhealthyThreshold,
+    maxBodySizeMB: validated.server.maxBodySizeMB,
   };
   for (const [, provider] of providers) {
     provider._serverConfig = serverConfig;

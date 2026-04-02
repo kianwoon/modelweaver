@@ -438,13 +438,14 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     const requestId = randomUUID();
 
     // Read raw body once, then parse — avoids double serialization
-    const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB
+    const maxBodyMB = config.server.maxBodySizeMB ?? 10;
+    const MAX_BODY_SIZE = maxBodyMB * 1024 * 1024;
     let body: { model?: string };
     let rawBody: string;
     try {
       rawBody = await c.req.text();
       if (rawBody.length > MAX_BODY_SIZE) {
-        return anthropicError("invalid_request_error", `Request body exceeds maximum size of ${MAX_BODY_SIZE / 1024 / 1024}MB`, requestId);
+        return anthropicError("invalid_request_error", `Request body exceeds maximum size of ${maxBodyMB}MB`, requestId);
       }
       body = JSON.parse(rawBody);
     } catch {
