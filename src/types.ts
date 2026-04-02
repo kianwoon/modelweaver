@@ -175,7 +175,11 @@ const VALID_TRANSITIONS: Record<StreamState, StreamState[]> = {
   streaming: ["complete", "error", "fallback"],
   fallback: ["streaming", "complete", "error"],
   complete: [],
-  error: [],
+  // Allow recovery from error state: if upstream data arrives after a timeout/
+  // stall error (e.g. from a race between TTFB timer and actual response), the
+  // stream should resume rather than being permanently stuck in error state.
+  // "error → complete" is also allowed for non-streaming error responses.
+  error: ["streaming", "ttfb", "complete"],
 };
 
 /**
@@ -209,10 +213,12 @@ export function transitionStreamState(
 ): StreamState {
   const current = ctx._streamState ?? "start";
 
-  // Terminal states — no transitions allowed
-  if (current === "complete" || current === "error") {
+  // Terminal state — no transitions allowed from complete
+  if (current === "complete") {
     return current;
   }
+  // Error state allows recovery transitions (streaming, ttfb, complete)
+  // but blocks duplicate error transitions.
 
   // Validate transition
   if (!VALID_TRANSITIONS[current].includes(next)) {
