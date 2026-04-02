@@ -750,10 +750,11 @@ export async function forwardRequest(
       // Mark passThrough as intentional close so safeError delegates to safeClose
       // instead of propagating the destroy error to the ReadableStream.
       (passThrough! as any)._intentionalClose = true;
-      // Write SSE error payload, then destroy (not .end()) — destroy() always
-      // fires "close" event even when piped source is still active (Node 20/22).
-      passThrough!.write(ssePayload);
-      passThrough!.destroy();
+      // Use .end() (not .write() + .destroy()) to flush the SSE error payload
+      // before closing. destroy() can fire "close" before the write is pushed
+      // to the ReadableStream, causing result.text() to hang indefinitely
+      // (especially on Node 22).
+      passThrough!.end(ssePayload);
 
       // Destroy upstream — after passThrough has flushed the SSE error.
       try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
