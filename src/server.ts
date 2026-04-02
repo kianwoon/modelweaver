@@ -1,7 +1,7 @@
 // src/server.ts
 import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
-import { forwardWithFallback, type FallbackResult, recordProviderLatency } from "./proxy.js";
+import { forwardWithFallback, setMetricsStore as setProxyMetricsStore, type FallbackResult, recordProviderLatency } from "./proxy.js";
 import { createLogger, type LogLevel } from "./logger.js";
 import type { AppConfig, ProviderConfig, RequestContext, StreamState } from "./types.js";
 import { transitionStreamState } from "./types.js";
@@ -401,6 +401,9 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   let config: AppConfig = initConfig;
   const logger = createLogger(logLevel);
   const app = new Hono();
+
+  // Share MetricsStore with proxy.ts for connection error tracking (GUI counters)
+  if (metricsStore) setProxyMetricsStore(metricsStore);
 
   // Global error handler — returns Anthropic-compatible JSON error responses
   app.onError((err, c) => {

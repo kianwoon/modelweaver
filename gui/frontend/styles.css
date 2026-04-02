@@ -545,6 +545,9 @@ body {
 
 .provider-errs .err-429 { color: #f59e0b; margin-right: 8px; }
 .provider-errs .err-5xx { color: #ef4444; margin-right: 8px; }
+.provider-errs .err-stall { color: #eab308; margin-right: 8px; }
+.provider-errs .err-ttfb { color: #f97316; margin-right: 8px; }
+.provider-errs .err-conn { color: #94a3b8; margin-right: 8px; }
 .provider-errs .no-errors { color: var(--text-dim); }
 
 /* Cap model and provider lists to prevent them from consuming all space */

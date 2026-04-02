@@ -118,10 +118,12 @@ function maybeLogBackpressure(source: string): void {
 export function buildProviderHealth(config: AppConfig, metricsStore: MetricsStore): ProviderHealth {
   const health: ProviderHealth = {};
   const errors = metricsStore.getProviderErrors();
+  const connErrors = metricsStore.getConnectionErrors();
   for (const [name, provider] of config.providers) {
     const breaker = provider._circuitBreaker;
     const breakerStatus = breaker ? breaker.getStatus() : undefined;
     const errEntry = errors[name];
+    const connEntry = connErrors[name];
     health[name] = {
       state: breakerStatus?.state ?? "closed",
       failures: breakerStatus?.failures ?? 0,
@@ -130,6 +132,7 @@ export function buildProviderHealth(config: AppConfig, metricsStore: MetricsStor
       lastErrorTime: errEntry?.lastErrorTime ?? null,
       errorCount: errEntry?.total ?? 0,
       errorBreakdown: errEntry ?? null,
+      connectionErrors: connEntry && (connEntry.stalls + connEntry.ttfbTimeouts + connEntry.connectionErrors > 0) ? connEntry : undefined,
     };
   }
   return health;

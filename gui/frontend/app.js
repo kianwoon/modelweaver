@@ -2,6 +2,14 @@
 const DEFAULT_PORT = 3456;
 const POLL_INTERVAL = 5000;
 
+/** Safely append a styled chip span to a parent element. */
+function appendChip(parent, className, text) {
+  const span = document.createElement('span');
+  span.className = className;
+  span.textContent = text;
+  parent.appendChild(span);
+}
+
 // Tauri invoke helper
 async function invoke(cmd, args) {
   if (window.__TAURI__) {
@@ -816,22 +824,33 @@ function renderProviders() {
     const successRate = total > 0 ? Math.round((total - errTotal) / total * 100) : null;
     row._statsEl.textContent = total + ' req \u00B7 ' + (successRate !== null ? successRate + '% success' : '\u2014 success');
     const errs = entry.errorBreakdown?.errors || {};
-    let chips = '';
-    if (errs[429] > 0) chips += '<span class="err-429">' + errs[429] + '\u00D7 429</span> ';
+    const connErrs = entry.connectionErrors || {};
+    // Clear previous chips
+    row._errsEl.replaceChildren();
+    let hasChips = false;
+    if (errs[429] > 0) { appendChip(row._errsEl, 'err-429', errs[429] + '\u00D7 429'); hasChips = true; }
     for (const [code, count] of Object.entries(errs)) {
       if (parseInt(code) >= 500 && code !== '429' && count > 0) {
-        chips += '<span class="err-5xx">' + count + '\u00D7 ' + code + '</span> ';
+        appendChip(row._errsEl, 'err-5xx', count + '\u00D7 ' + code);
+        hasChips = true;
       }
     }
-    row._errsEl.innerHTML = chips.trim() || '<span class="no-errors">\u2014</span>';
+    if (connErrs.stalls > 0) { appendChip(row._errsEl, 'err-stall', connErrs.stalls + '\u00D7 stall'); hasChips = true; }
+    if (connErrs.ttfbTimeouts > 0) { appendChip(row._errsEl, 'err-ttfb', connErrs.ttfbTimeouts + '\u00D7 TTFB'); hasChips = true; }
+    if (connErrs.connectionErrors > 0) { appendChip(row._errsEl, 'err-conn', connErrs.connectionErrors + '\u00D7 conn'); hasChips = true; }
+    if (!hasChips) appendChip(row._errsEl, 'no-errors', '\u2014');
   }
   const cards = Array.from(providersEl.querySelectorAll('.provider-card'));
   cards.sort((a, b) => {
-    const aHasErr = providerHealthCache[a.getAttribute('data-provider')]?.errorBreakdown?.total > 0;
-    const bHasErr = providerHealthCache[b.getAttribute('data-provider')]?.errorBreakdown?.total > 0;
+    const aName = a.getAttribute('data-provider');
+    const bName = b.getAttribute('data-provider');
+    const aEntry = providerHealthCache[aName] || {};
+    const bEntry = providerHealthCache[bName] || {};
+    const aHasErr = (aEntry.errorBreakdown?.total > 0) || ((aEntry.connectionErrors?.stalls + aEntry.connectionErrors?.ttfbTimeouts + aEntry.connectionErrors?.connectionErrors) > 0);
+    const bHasErr = (bEntry.errorBreakdown?.total > 0) || ((bEntry.connectionErrors?.stalls + bEntry.connectionErrors?.ttfbTimeouts + bEntry.connectionErrors?.connectionErrors) > 0);
     if (aHasErr && !bHasErr) return -1;
     if (!aHasErr && bHasErr) return 1;
-    return a.getAttribute('data-provider').localeCompare(b.getAttribute('data-provider'));
+    return aName.localeCompare(bName);
   });
   cards.forEach(r => providersEl.appendChild(r));
 }

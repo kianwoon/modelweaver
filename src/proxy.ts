@@ -12,6 +12,15 @@ import { resolveAdaptiveTTFB } from './adaptive-timeout.js';
 import { recordHealthEvent } from './health-score.js';
 import { broadcastStreamEvent } from './ws.js';
 import { SSEBuffer } from "./stream-buffer.js";
+import type { MetricsStore } from "./metrics.js";
+
+// --- Module-level MetricsStore reference for connection error tracking ---
+let _metricsStore: MetricsStore | null = null;
+
+/** Set the MetricsStore instance. Called by server.ts at startup. */
+export function setMetricsStore(store: MetricsStore): void {
+  _metricsStore = store;
+}
 
 // --- Per-provider latency metrics ---
 const providerLatencySamples: Map<string, number[]> = new Map();
@@ -750,6 +759,7 @@ export async function forwardRequest(
       if (ctx._streamState === "error" || ctx._streamState === "complete") return; // fast-path for _stallFired
       (ctx as any)._stallFired = true;
       provider._circuitBreaker?.recordTimeout();
+      _metricsStore?.recordConnectionError(provider.name, "stalls");
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
 
       // Inject an Anthropic-compatible SSE error event so Claude Code's SDK
@@ -941,6 +951,13 @@ export async function forwardRequest(
         : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
 
     console.warn(`[proxy] ${message}`);
+
+    // Record connection-level error for GUI counters (does NOT affect health scores)
+    if (isTTFB) {
+      _metricsStore?.recordConnectionError(provider.name, "ttfbTimeouts");
+    } else if (!isAbort) {
+      _metricsStore?.recordConnectionError(provider.name, "connectionErrors");
+    }
 
     // Broadcast error so the GUI progress bar doesn't stall on TTFB/total timeout
     setImmediate(() => {

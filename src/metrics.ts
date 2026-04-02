@@ -1,5 +1,5 @@
 // src/metrics.ts
-import type { RequestMetrics, MetricsSummary, ModelPerformanceStats, ProviderHealth, ProviderHealthEntry } from "./types.js";
+import type { RequestMetrics, MetricsSummary, ModelPerformanceStats, ConnectionErrorEntry } from "./types.js";
 
 type Subscriber = (metrics: RequestMetrics) => void;
 
@@ -33,6 +33,10 @@ export class MetricsStore {
   private _providerMap = new Map<string, number>();
   private _providerErrors = new Map<string, { total: number; errors: { [status: number]: number }; lastErrorCode: number | null; lastErrorTime: number | null }>();
   private _sessionMap = new Map<string, { count: number; lastSeen: number }>();
+
+  // Connection-level error counters (stall, TTFB timeout, connection failed)
+  // Tracked separately from HTTP status errors — do NOT affect health scores or circuit breakers.
+  private _connectionErrors = new Map<string, ConnectionErrorEntry>();
 
   // Lazy cache for getModelStats() — invalidated on every recordRequest()
   private _modelStatsDirty = true;
@@ -392,6 +396,20 @@ export class MetricsStore {
   /** Returns full provider health state (errors + circuit breaker state merged). */
   getProviderErrors(): { [provider: string]: { total: number; errors: { [status: number]: number }; lastErrorCode: number | null; lastErrorTime: number | null } } {
     return Object.fromEntries(this._providerErrors);
+  }
+
+  /** Record a connection-level error (stall, TTFB timeout, connection failed).
+   *  Tracked separately from HTTP status errors — does NOT affect health scores or circuit breakers. */
+  recordConnectionError(provider: string, type: keyof Omit<ConnectionErrorEntry, "lastTime">): void {
+    const entry = this._connectionErrors.get(provider) ?? { stalls: 0, ttfbTimeouts: 0, connectionErrors: 0, lastTime: null };
+    entry[type]++;
+    entry.lastTime = Date.now();
+    this._connectionErrors.set(provider, entry);
+  }
+
+  /** Returns connection-level error counters for all providers. */
+  getConnectionErrors(): { [provider: string]: ConnectionErrorEntry } {
+    return Object.fromEntries(this._connectionErrors);
   }
 
   private getRecentRequests(): RequestMetrics[] {

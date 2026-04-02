@@ -139,6 +139,13 @@ export interface MetricsSummary {
   providerErrors: { [provider: string]: { total: number; errors: { [status: number]: number }; lastErrorCode: number | null; lastErrorTime: number | null } };
 }
 
+export interface ConnectionErrorEntry {
+  stalls: number;
+  ttfbTimeouts: number;
+  connectionErrors: number;
+  lastTime: number | null;
+}
+
 export interface ProviderHealthEntry {
   state: string;
   failures: number;
@@ -152,6 +159,7 @@ export interface ProviderHealthEntry {
     lastErrorCode: number | null;
     lastErrorTime: number | null;
   };
+  connectionErrors?: ConnectionErrorEntry;
 }
 
 export interface ProviderHealth {
