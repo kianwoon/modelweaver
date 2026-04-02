@@ -724,7 +724,7 @@ export async function forwardRequest(
       if ((ctx as any)._stallFired) return;
       if (ctx._streamState === "error" || ctx._streamState === "complete") return; // fast-path for _stallFired
       (ctx as any)._stallFired = true;
-      provider._circuitBreaker?.recordResult(502);
+      provider._circuitBreaker?.recordTimeout();
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
 
       // Inject an Anthropic-compatible SSE error event so Claude Code's SDK
@@ -936,6 +936,62 @@ export async function forwardRequest(
 }
 
 /**
+ * Forward a request to a single provider with automatic retry on timeout/connection error.
+ * On the first attempt, uses the provider's pooled connection agent.
+ * If the request times out or hits a connection error, retries once with a fresh
+ * connection (no pool) — stale HTTP/2 connections are the #1 cause of timeouts.
+ */
+async function forwardWithRetry(
+  provider: ProviderConfig,
+  entry: RoutingEntry,
+  ctx: RequestContext,
+  incomingRequest: Request,
+  chainSignal: AbortSignal | undefined,
+  index: number,
+): Promise<Response> {
+  const result = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index);
+
+  // Only retry on synthetic 502s from timeouts/connection errors (not actual 5xx from upstream)
+  if (result.status !== 502) return result;
+
+  // Check if the error message indicates a timeout or connection issue
+  // (as opposed to an actual 502 response body from the upstream server)
+  const body = await result.text().catch(() => "");
+  const isTimeout = body.includes("timed out") || body.includes("connection failed") || body.includes("stalled");
+
+  if (!isTimeout) {
+    // Actual 502 from upstream — return as-is, let caller handle fallback
+    return new Response(body, {
+      status: 502,
+      headers: { "content-type": "application/json" },
+    });
+  }
+
+  // Evict stale connections from the pool before retrying
+  try {
+    await provider._agent?.close();
+  } catch { /* pool may already be closed */ }
+  // Re-create the agent (undici Agent is lightweight)
+  if (provider._agent) {
+    const { Agent } = await import("undici");
+    provider._agent = new Agent({
+      keepAliveTimeout: 30000,
+      keepAliveMaxTimeout: 60000,
+      connections: provider.poolSize ?? 10,
+      allowH2: true,
+    });
+  }
+
+  console.warn(`[proxy] Retrying "${provider.name}" with fresh connection pool after timeout`);
+
+  // Reset stream state for retry
+  ctx._streamState = "start";
+  (ctx as any)._stallFired = false;
+
+  return forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index);
+}
+
+/**
  * Forward a request with optional adaptive hedging.
  * When latency variance is high, sends multiple copies and returns the fastest.
  */
@@ -952,11 +1008,11 @@ async function hedgedForwardRequest(
   const count = ctx.hasDistribution ? 1 : computeHedgingCount(provider, hedging);
 
   if (count <= 1) {
-    // No hedging — single request
+    // No hedging — single request (with automatic retry on timeout)
     inFlightCounter.increment(provider.name);
     const start = Date.now();
     try {
-      const r = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index);
+      const r = await forwardWithRetry(provider, entry, ctx, incomingRequest, chainSignal, index);
       latencyTracker.record(provider.name, Date.now() - start);
       return r;
     } finally {
@@ -1211,7 +1267,7 @@ export async function forwardWithFallback(
       } catch {
         const attemptLatency = Date.now() - attemptStart;
         recordHealthEvent(provider.name, false, attemptLatency);
-        if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502, cbProbeId);
+        if (provider._circuitBreaker) provider._circuitBreaker.recordTimeout();
         logger?.warn("Provider failed with exception, falling back", {
           requestId: ctx.requestId,
           provider: entry.provider,
@@ -1281,7 +1337,7 @@ export async function forwardWithFallback(
       recordHealthEvent(provider.name, success, attemptLatency);
       return { response, index };
     } catch {
-      if (provider._circuitBreaker) provider._circuitBreaker.recordResult(502, cbProbeId);
+      if (provider._circuitBreaker) provider._circuitBreaker.recordTimeout();
       recordHealthEvent(provider.name, false, Date.now() - attemptStart);
       return {
         response: makeErrorResponse(502, "api_error", `Provider "${entry.provider}" failed`),
