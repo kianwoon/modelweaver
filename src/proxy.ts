@@ -643,6 +643,46 @@ export async function forwardRequest(
       if (stallTimerRef) clearTimeout(stallTimerRef);
       if ((upstreamBody as any)._intentionalClose) return; // expected — suppress
       console.warn(`[proxy] Upstream body error on "${provider.name}": ${err.message}`);
+
+      // When the upstream provider closes the socket mid-stream (e.g. GLM dropping
+      // connection), Node.js pipe does NOT forward the error to passThrough — it
+      // just breaks the pipe silently.  The passThrough stream hangs with no events.
+      // Detect retriable socket/network errors and write an SSE error payload so
+      // the client receives a proper retriable error instead of a raw socket failure.
+      const code = (err as any).code;
+      if (code === 'ECONNRESET' || code === 'ECONNREFUSED' ||
+          code === 'EPIPE' || code === 'ETIMEDOUT' ||
+          code === 'UND_ERR_SOCKET' ||
+          (err.message && /socket|closed unexpectedly/i.test(err.message))) {
+        if (passThrough && !passThrough.destroyed) {
+          const errMsg = `Provider connection lost: ${err.message}`;
+          const ssePayload = `event: error\ndata: ${JSON.stringify({
+            type: "error",
+            error: { type: "api_error", message: errMsg },
+          })}\n\n`;
+
+          // Mark upstream as intentionally closed to suppress undici warnings
+          (upstreamBody as any)._intentionalClose = true;
+          // Unpipe upstream body FIRST so it can't inject data after SSE error write
+          try { undiciResponse.body.unpipe(passThrough) } catch { /* not piped */ }
+          // Mark passThrough as intentional close so safeError delegates to safeClose
+          (passThrough as any)._intentionalClose = true;
+          // Write SSE error payload, then destroy
+          passThrough.write(ssePayload);
+          passThrough.destroy();
+
+          // Update stream state
+          ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
+          broadcastStreamEvent({
+            requestId: ctx.requestId,
+            model: String(ctx.actualModel ?? entry.model ?? ""),
+            tier: "",
+            state: ctx._streamState!,
+            message: errMsg,
+            timestamp: Date.now(),
+          });
+        }
+      }
     });
 
     // For error status codes (4xx/5xx), consume body immediately without stall detection.
