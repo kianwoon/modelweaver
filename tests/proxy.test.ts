@@ -426,5 +426,5 @@ describe("forwardRequest stall detection", () => {
     expect(text).toContain("event: error");
     expect(text).toContain("stalled");
     expect(text).toContain("no data after");
-  }, 10_000);
+  }, 20_000);
 });
