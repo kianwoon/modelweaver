@@ -491,7 +491,7 @@ body {
 
 .perf-success.perf-good { color: var(--green); }
 .perf-success.perf-warn { color: var(--yellow); }
-.perf-success.perf-bad { color: white; }
+.perf-success.perf-bad { color: #ef4444; }
 
 .perf-tokens {
   font-size: 10px;

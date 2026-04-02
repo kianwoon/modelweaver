@@ -782,7 +782,25 @@ export async function forwardRequest(
           // safely complete the ReadableStream via safeClose.
           if ((passThrough as any)._intentionalClose) return;
           controllerClosed = true;
-          try { controller.error(err); } catch { /* already closed */ }
+          // Upstream socket/network errors (e.g. provider closed connection, stale
+          // pooled connection, HTTP/2 GOAWAY).  Write an SSE error payload so the
+          // client sees a retriable error instead of a hard stream failure.
+          const code = (err as any).code;
+          if (code === 'ECONNRESET' || code === 'ECONNREFUSED' ||
+              code === 'EPIPE' || code === 'ETIMEDOUT' ||
+              code === 'UND_ERR_SOCKET' ||
+              (err.message && /socket|closed unexpectedly/i.test(err.message))) {
+            const sseError = JSON.stringify({
+              type: "error",
+              error: { type: "api_error", message: `Provider connection lost: ${err.message}` },
+            });
+            try {
+              controller.enqueue(textEncoder.encode(`event: error\ndata: ${sseError}\n\n`));
+              controller.close();
+            } catch { /* already closed */ }
+          } else {
+            try { controller.error(err); } catch { /* already closed */ }
+          }
         };
         passThrough.on("data", (chunk: Buffer) => {
           // Guard: don't enqueue data if stream is already in a terminal state
