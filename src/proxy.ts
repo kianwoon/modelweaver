@@ -93,6 +93,31 @@ const REPLACEMENT_REGEX_BOTH = new RegExp(MODEL_KEY_REGEX.source + "|" + MAX_TOK
 
 const ERR_HEADERS = Object.freeze({ "content-type": "application/json" });
 
+/** Keywords that indicate a synthetic 502 from a local failure (not an upstream 502). */
+const CONNECTION_ERROR_KEYWORDS = ["timed out", "connection failed", "stalled"];
+
+/**
+ * Check if a 502 response is a connection-level error (stale pool, timeout, stall)
+ * vs an actual upstream 502. Connection errors should NOT tank the provider's
+ * health score because they're local artifacts, not provider failures.
+ */
+
+/** Check if a 502 response body indicates a connection-level error. */
+function isConnectionError502FromBody(body: string): boolean {
+  return CONNECTION_ERROR_KEYWORDS.some(kw => body.includes(kw));
+}
+
+/** Async: clone a response and check if its body indicates a connection-level error. */
+async function isConnectionErrorBody(response: Response): Promise<boolean> {
+  if (response.status !== 502) return false;
+  try {
+    const body = await response.clone().text();
+    return isConnectionError502FromBody(body);
+  } catch {
+    return false;
+  }
+}
+
 function makeErrorResponse(status: number, type: string, message: string): Response {
   const body = JSON.stringify({ type: "error", error: { type, message } });
   return new Response(body, {
@@ -915,6 +940,8 @@ export async function forwardRequest(
         ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
         : `Provider "${provider.name}" connection failed: ${(error as Error).message}`;
 
+    console.warn(`[proxy] ${message}`);
+
     // Broadcast error so the GUI progress bar doesn't stall on TTFB/total timeout
     setImmediate(() => {
       ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
@@ -935,11 +962,20 @@ export async function forwardRequest(
   }
 }
 
+/** Maximum retries for connection errors (stale pool, timeout, stall). */
+const CONNECTION_RETRY_MAX = 3;
+/** Base delay (ms) between connection retry attempts. */
+const CONNECTION_RETRY_BASE_MS = 500;
+
 /**
  * Forward a request to a single provider with automatic retry on timeout/connection error.
  * On the first attempt, uses the provider's pooled connection agent.
- * If the request times out or hits a connection error, retries once with a fresh
- * connection (no pool) — stale HTTP/2 connections are the #1 cause of timeouts.
+ * If the request times out or hits a connection error, retries up to CONNECTION_RETRY_MAX
+ * times with a fresh connection pool and exponential backoff.
+ *
+ * Connection errors (stale pool, timeout, stall) are local artifacts — the client
+ * should never see a 502 from them. Only actual upstream 5xx responses escape
+ * this function as 502.
  */
 async function forwardWithRetry(
   provider: ProviderConfig,
@@ -949,46 +985,60 @@ async function forwardWithRetry(
   chainSignal: AbortSignal | undefined,
   index: number,
 ): Promise<Response> {
-  const result = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index);
+  let lastResult: Response | undefined;
 
-  // Only retry on synthetic 502s from timeouts/connection errors (not actual 5xx from upstream)
-  if (result.status !== 502) return result;
+  for (let attempt = 0; attempt <= CONNECTION_RETRY_MAX; attempt++) {
+    const result = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index);
 
-  // Check if the error message indicates a timeout or connection issue
-  // (as opposed to an actual 502 response body from the upstream server)
-  const body = await result.text().catch(() => "");
-  const isTimeout = body.includes("timed out") || body.includes("connection failed") || body.includes("stalled");
+    // Non-502 responses pass through immediately (success or upstream error)
+    if (result.status !== 502) return result;
 
-  if (!isTimeout) {
-    // Actual 502 from upstream — return as-is, let caller handle fallback
-    return new Response(body, {
+    // Check if this is a connection error vs an actual upstream 502
+    const body = await result.text().catch(() => "");
+    const isConnectionError = body.includes("timed out") || body.includes("connection failed") || body.includes("stalled");
+
+    if (!isConnectionError) {
+      // Actual 502 from upstream — return as-is, let caller handle fallback
+      return new Response(body, {
+        status: 502,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    // Connection error — retry with fresh pool
+    lastResult = new Response(body, {
       status: 502,
       headers: { "content-type": "application/json" },
     });
+
+    if (attempt < CONNECTION_RETRY_MAX) {
+      // Evict stale connections from the pool before retrying
+      try { await provider._agent?.close(); } catch { /* pool may already be closed */ }
+      if (provider._agent) {
+        const { Agent } = await import("undici");
+        provider._agent = new Agent({
+          keepAliveTimeout: 30000,
+          keepAliveMaxTimeout: 60000,
+          connections: provider.poolSize ?? 10,
+          allowH2: true,
+        });
+      }
+
+      const delay = CONNECTION_RETRY_BASE_MS * Math.pow(2, attempt);
+      console.warn(`[proxy] Connection error on "${provider.name}" (attempt ${attempt + 1}/${CONNECTION_RETRY_MAX}), retrying in ${delay}ms: ${body.slice(0, 200)}`);
+
+      // Reset stream state for retry
+      ctx._streamState = "start";
+      (ctx as any)._stallFired = false;
+
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
   }
 
-  // Evict stale connections from the pool before retrying
-  try {
-    await provider._agent?.close();
-  } catch { /* pool may already be closed */ }
-  // Re-create the agent (undici Agent is lightweight)
-  if (provider._agent) {
-    const { Agent } = await import("undici");
-    provider._agent = new Agent({
-      keepAliveTimeout: 30000,
-      keepAliveMaxTimeout: 60000,
-      connections: provider.poolSize ?? 10,
-      allowH2: true,
-    });
-  }
-
-  console.warn(`[proxy] Retrying "${provider.name}" with fresh connection pool after timeout`);
-
-  // Reset stream state for retry
-  ctx._streamState = "start";
-  (ctx as any)._stallFired = false;
-
-  return forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index);
+  // All retries exhausted — return the last connection error as 502.
+  // Caller (fallback chain) will try the next provider.
+  console.warn(`[proxy] All ${CONNECTION_RETRY_MAX + 1} attempts failed for "${provider.name}" — escalating to fallback`);
+  return lastResult!;
 }
 
 /**
@@ -1168,7 +1218,10 @@ export async function forwardWithFallback(
     const singleStart = Date.now();
     const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging);
     const success = response.status >= 200 && response.status < 300;
-    recordHealthEvent(provider.name, success, Date.now() - singleStart);
+    const isConnErr = response.status === 502 && await isConnectionErrorBody(response);
+    if (!isConnErr) {
+      recordHealthEvent(provider.name, success, Date.now() - singleStart);
+    }
 
     return { response, actualModel: entry.model, actualProvider: entry.provider };
   }
@@ -1218,7 +1271,14 @@ export async function forwardWithFallback(
 
         const attemptLatency = Date.now() - attemptStart;
         const success = response.status >= 200 && response.status < 300;
-        recordHealthEvent(provider.name, success, attemptLatency);
+
+        // Don't tank health score for connection errors (stale pool, timeout, stall).
+        // These are local artifacts, not provider failures — recording them false
+        // cascades into global backoff and health-based deprioritization.
+        const isConnErr = response.status === 502 && await isConnectionErrorBody(response);
+        if (!isConnErr) {
+          recordHealthEvent(provider.name, success, attemptLatency);
+        }
 
         if (provider._circuitBreaker) {
           const prevCB = provider._circuitBreaker.getState();
@@ -1265,8 +1325,9 @@ export async function forwardWithFallback(
         });
         // continue loop
       } catch {
-        const attemptLatency = Date.now() - attemptStart;
-        recordHealthEvent(provider.name, false, attemptLatency);
+        // Connection errors/exceptions should NOT tank health score
+        // (they're local pool artifacts, not provider failures)
+        // recordTimeout() is already a no-op for circuit breaker
         if (provider._circuitBreaker) provider._circuitBreaker.recordTimeout();
         logger?.warn("Provider failed with exception, falling back", {
           requestId: ctx.requestId,
@@ -1334,11 +1395,14 @@ export async function forwardWithFallback(
       );
       const attemptLatency = Date.now() - attemptStart;
       const success = response.status >= 200 && response.status < 300;
-      recordHealthEvent(provider.name, success, attemptLatency);
+      const isConnErr = response.status === 502 && await isConnectionErrorBody(response);
+      if (!isConnErr) {
+        recordHealthEvent(provider.name, success, attemptLatency);
+      }
       return { response, index };
     } catch {
       if (provider._circuitBreaker) provider._circuitBreaker.recordTimeout();
-      recordHealthEvent(provider.name, false, Date.now() - attemptStart);
+      // Connection errors should NOT tank health score
       return {
         response: makeErrorResponse(502, "api_error", `Provider "${entry.provider}" failed`),
         index,

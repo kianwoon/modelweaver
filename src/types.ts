@@ -48,6 +48,10 @@ export interface ServerConfig {
   retryBaseDelayMs?: number;     // Base delay (ms) between fallback retries — default 500
   retryMaxDelayMs?: number;      // Max delay (ms) between fallback retries — default 5000
   retryMultiplier?: number;      // Exponential backoff multiplier — default 2
+  /** When true (default), skip the entire provider chain when all are unhealthy */
+  globalBackoffEnabled?: boolean;
+  /** Health score threshold below which a provider is considered unhealthy — default 0.5 */
+  unhealthyThreshold?: number;
 }
 
 export interface AppConfig {
