@@ -998,11 +998,10 @@ let reconnectTimer = null;
 const WS_MAX_BACKOFF = 30000;
 const WS_CONNECT_TIMEOUT = 5000;
 
-// --- Section Reorder ---
+// --- Section Reorder (mousedown/mousemove/mouseup for WKWebView compat) ---
 const DEFAULT_SECTION_ORDER = ['models-section', 'providers-section', 'recent-section'];
 const SECTION_ORDER_KEY = 'sectionOrder';
 
-/** Reference node: the element right after which sections live in #app. */
 function getSectionAnchor() {
   return document.querySelector('.app-credit');
 }
@@ -1013,7 +1012,7 @@ function getCurrentSectionOrder() {
   const order = [];
   let node = app.firstElementChild;
   while (node && node !== anchor) {
-    if (node.matches('.section[draggable="true"]')) order.push(node.id);
+    if (node.classList && node.classList.contains('section') && node.id) order.push(node.id);
     node = node.nextElementSibling;
   }
   return order;
@@ -1049,56 +1048,73 @@ function updateResetIcon() {
 }
 
 (function initSectionDragDrop() {
-  let draggedSection = null;
+  let draggedEl = null;   // the .section being dragged
 
-  document.querySelectorAll('.section[draggable="true"]').forEach(section => {
-    section.addEventListener('dragstart', (e) => {
-      draggedSection = section;
-      section.classList.add('dragging');
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', section.id);
-    });
-
-    section.addEventListener('dragend', () => {
-      section.classList.remove('dragging');
-      document.querySelectorAll('.section').forEach(s => {
-        s.classList.remove('drag-over-top', 'drag-over-bottom');
-      });
-      draggedSection = null;
-    });
-
-    section.addEventListener('dragover', (e) => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      const rect = section.getBoundingClientRect();
-      const midY = rect.top + rect.height / 2;
-      section.classList.remove('drag-over-top', 'drag-over-bottom');
-      section.classList.add(e.clientY < midY ? 'drag-over-top' : 'drag-over-bottom');
-    });
-
-    section.addEventListener('dragleave', () => {
-      section.classList.remove('drag-over-top', 'drag-over-bottom');
-    });
-
-    section.addEventListener('drop', (e) => {
-      e.preventDefault();
-      if (section === draggedSection) return;
-
-      const rect = section.getBoundingClientRect();
-      const insertBefore = e.clientY < rect.top + rect.height / 2;
-
-      // Move the dragged section node before/after the target in the DOM
-      const parent = section.parentNode;
-      if (insertBefore) {
-        parent.insertBefore(draggedSection, section);
-      } else {
-        parent.insertBefore(draggedSection, section.nextSibling);
+  // Find which section the cursor is over, and whether top or bottom half
+  function getDropTarget(y) {
+    const sections = document.querySelectorAll('#app > .section');
+    for (const sec of sections) {
+      if (sec === draggedEl) continue;
+      const rect = sec.getBoundingClientRect();
+      if (y >= rect.top && y <= rect.bottom) {
+        return { section: sec, before: y < rect.top + rect.height / 2 };
       }
+    }
+    return null;
+  }
 
-      const order = getCurrentSectionOrder();
-      saveSectionOrder(order);
-      updateResetIcon();
+  function clearIndicators() {
+    document.querySelectorAll('.section').forEach(s => {
+      s.classList.remove('drag-over-top', 'drag-over-bottom');
     });
+  }
+
+  document.addEventListener('mousedown', (e) => {
+    const handle = e.target.closest('.drag-handle');
+    if (!handle) return;
+    e.preventDefault();
+
+    draggedEl = handle.closest('.section');
+    if (!draggedEl) return;
+
+    startY = e.clientY;
+    draggedEl.classList.add('dragging');
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!draggedEl) return;
+    e.preventDefault();
+
+    const target = getDropTarget(e.clientY);
+    clearIndicators();
+
+    if (target) {
+      if (target.before) {
+        target.section.classList.add('drag-over-top');
+      } else {
+        target.section.classList.add('drag-over-bottom');
+      }
+    }
+  });
+
+  document.addEventListener('mouseup', (e) => {
+    if (!draggedEl) return;
+
+    const target = getDropTarget(e.clientY);
+    if (target) {
+      const parent = draggedEl.parentNode;
+      if (target.before) {
+        parent.insertBefore(draggedEl, target.section);
+      } else {
+        parent.insertBefore(draggedEl, target.section.nextSibling);
+      }
+      saveSectionOrder(getCurrentSectionOrder());
+      updateResetIcon();
+    }
+
+    clearIndicators();
+    draggedEl.classList.remove('dragging');
+    draggedEl = null;
   });
 
   // Reset icon
