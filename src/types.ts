@@ -183,7 +183,10 @@ const VALID_TRANSITIONS: Record<StreamState, StreamState[]> = {
   // stall error (e.g. from a race between TTFB timer and actual response), the
   // stream should resume rather than being permanently stuck in error state.
   // "error → complete" is also allowed for non-streaming error responses.
-  error: ["streaming", "ttfb", "complete"],
+  // "error → error" is a no-op — common when stall timer and catch block both
+  // fire for the same failure (stall handler runs first via setImmediate,
+  // then catch block also tries to set error).
+  error: ["streaming", "ttfb", "complete", "error"],
 };
 
 /**
