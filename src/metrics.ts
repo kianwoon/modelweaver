@@ -26,6 +26,7 @@ export class MetricsStore {
   private _totalInputTokens = 0;
   private _totalOutputTokens = 0;
   private _totalTokensPerSec = 0;
+  private _nonZeroTpsCount = 0; // count of entries with tokensPerSec > 0
   private _totalCacheReadTokens = 0;
   private _totalCacheCreationTokens = 0;
   private _modelMap = new Map<string, ModelEntry>();
@@ -92,6 +93,7 @@ export class MetricsStore {
       this._totalInputTokens -= evicted.inputTokens ?? 0;
       this._totalOutputTokens -= evicted.outputTokens ?? 0;
       this._totalTokensPerSec -= evicted.tokensPerSec ?? 0;
+      if ((evicted.tokensPerSec ?? 0) > 0) this._nonZeroTpsCount--;
       this._totalCacheReadTokens -= evicted.cacheReadTokens ?? 0;
       this._totalCacheCreationTokens -= evicted.cacheCreationTokens ?? 0;
 
@@ -153,6 +155,7 @@ export class MetricsStore {
     this._totalInputTokens += metrics.inputTokens ?? 0;
     this._totalOutputTokens += metrics.outputTokens ?? 0;
     this._totalTokensPerSec += metrics.tokensPerSec ?? 0;
+    if ((metrics.tokensPerSec ?? 0) > 0) this._nonZeroTpsCount++;
     this._totalCacheReadTokens += metrics.cacheReadTokens ?? 0;
     this._totalCacheCreationTokens += metrics.cacheCreationTokens ?? 0;
 
@@ -240,26 +243,21 @@ export class MetricsStore {
       .map(([provider, count]) => ({ provider, count }))
       .sort((a, b) => b.count - a.count);
 
-    // Compute average cache hit rate across all requests with cache data
-    let cacheHitRateSum = 0;
-    let cacheHitRateCount = 0;
-    for (const r of requests) {
-      const totalInput = (r.inputTokens ?? 0) + (r.cacheReadTokens ?? 0) + (r.cacheCreationTokens ?? 0);
-      if (totalInput > 0 && (r.cacheReadTokens ?? 0) > 0) {
-        cacheHitRateSum += (r.cacheReadTokens! / totalInput) * 100;
-        cacheHitRateCount++;
-      }
-    }
+    // Compute average cache hit rate using running counters (same 1000-entry window as token totals)
+    const totalInputAll = this._totalInputTokens + this._totalCacheReadTokens + this._totalCacheCreationTokens;
+    const avgCacheHitRate = totalInputAll > 0
+      ? Math.round((this._totalCacheReadTokens / totalInputAll) * 1000) / 10
+      : 0;
 
     // getRecentRequests() already caps at WS_RECENT_REQUESTS_CAP
     return {
       totalRequests: this._lifetimeRequests,
       totalInputTokens: this._totalInputTokens,
       totalOutputTokens: this._totalOutputTokens,
-      avgTokensPerSec: this.count > 0 ? Math.round((this._totalTokensPerSec / this.count) * 10) / 10 : 0,
+      avgTokensPerSec: this._nonZeroTpsCount > 0 ? Math.round((this._totalTokensPerSec / this._nonZeroTpsCount) * 10) / 10 : 0,
       totalCacheReadTokens: this._totalCacheReadTokens,
       totalCacheCreationTokens: this._totalCacheCreationTokens,
-      avgCacheHitRate: cacheHitRateCount > 0 ? Math.round((cacheHitRateSum / cacheHitRateCount) * 10) / 10 : 0,
+      avgCacheHitRate,
       activeModels,
       providerDistribution,
       recentRequests: requests,
@@ -314,17 +312,13 @@ export class MetricsStore {
         ? Math.round((tokSecEntries.reduce((s, e) => s + e.tokensPerSec, 0) / tokSecEntries.length) * 10) / 10
         : 0;
 
-      // Cache hit rate
-      let cacheHitSum = 0;
-      let cacheHitCount = 0;
-      for (const e of entries) {
-        const totalInput = (e.inputTokens ?? 0) + (e.cacheReadTokens ?? 0) + (e.cacheCreationTokens ?? 0);
-        if (totalInput > 0 && (e.cacheReadTokens ?? 0) > 0) {
-          cacheHitSum += (e.cacheReadTokens! / totalInput) * 100;
-          cacheHitCount++;
-        }
-      }
-      const avgCacheHitRate = cacheHitCount > 0 ? Math.round((cacheHitSum / cacheHitCount) * 10) / 10 : 0;
+      // Cache hit rate — sum-based (includes zero-cache requests in denominator)
+      const totalInputForModel = entries.reduce((s, e) =>
+        s + (e.inputTokens ?? 0) + (e.cacheReadTokens ?? 0) + (e.cacheCreationTokens ?? 0), 0);
+      const totalCacheReadForModel = entries.reduce((s, e) => s + (e.cacheReadTokens ?? 0), 0);
+      const avgCacheHitRate = totalInputForModel > 0
+        ? Math.round((totalCacheReadForModel / totalInputForModel) * 1000) / 10
+        : 0;
 
       // Provider breakdown
       const providerGroups = new Map<string, { count: number; latencySum: number; errorCount: number }>();
