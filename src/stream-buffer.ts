@@ -14,10 +14,12 @@ export class SSEBuffer {
   ) {}
 
   private scheduleTimer(): void {
-    if (!this.opts.bufferMs || this.timer) return;
+    if (!this.opts.bufferMs) return;
+    // Clear and reschedule — tracks "idle time since last write"
+    this.resetTimer();
     this.timer = setTimeout(() => {
       this.timer = null;
-      this.flush();
+      this.flushAll();
     }, this.opts.bufferMs);
   }
 
@@ -61,6 +63,7 @@ export class SSEBuffer {
       }
 
       if (boundary > 0) {
+        // Flush up to boundary, keep remainder
         this.enqueue(combined.subarray(0, boundary));
         const remainder = combined.subarray(boundary);
         this.chunks = [remainder];
@@ -68,13 +71,9 @@ export class SSEBuffer {
         this.scheduleTimer();
         return;
       }
+      // Size threshold met but no boundary — hold until next write or timer
+      return;
     }
-
-    // No size threshold met, or no boundary found yet — flush everything
-    this.enqueue(combined);
-    this.chunks = [];
-    this.byteLength = 0;
-    this.resetTimer();
   }
 
   write(data: Uint8Array): void {
@@ -94,14 +93,13 @@ export class SSEBuffer {
   }
 
   flush(): void {
-    if (this.chunks.length === 0) return;
-    this.resetTimer();
-    this.flushAtBoundary();
+    // Called by timer — flush everything regardless of boundaries
+    this.flushAll();
   }
 
-  end(): void {
-    this.resetTimer();
+  private flushAll(): void {
     if (this.chunks.length === 0) return;
+    this.resetTimer();
     const combined = new Uint8Array(this.byteLength);
     let offset = 0;
     for (const chunk of this.chunks) {
@@ -111,5 +109,10 @@ export class SSEBuffer {
     this.enqueue(combined);
     this.chunks = [];
     this.byteLength = 0;
+  }
+
+  end(): void {
+    // Flush everything — no boundary check on stream end
+    this.flushAll();
   }
 }
