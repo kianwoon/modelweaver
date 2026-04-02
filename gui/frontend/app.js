@@ -1002,19 +1002,31 @@ const WS_CONNECT_TIMEOUT = 5000;
 const DEFAULT_SECTION_ORDER = ['models-section', 'providers-section', 'recent-section'];
 const SECTION_ORDER_KEY = 'sectionOrder';
 
-function initSectionOrder() {
-  let order = DEFAULT_SECTION_ORDER;
-  try {
-    const saved = localStorage.getItem(SECTION_ORDER_KEY);
-    if (saved) order = JSON.parse(saved);
-  } catch (e) {}
-  applySectionOrder(order);
+/** Reference node: the element right after which sections live in #app. */
+function getSectionAnchor() {
+  return document.querySelector('.app-credit');
+}
+
+function getCurrentSectionOrder() {
+  const anchor = getSectionAnchor();
+  const app = document.getElementById('app');
+  const order = [];
+  let node = app.firstElementChild;
+  while (node && node !== anchor) {
+    if (node.matches('.section[draggable="true"]')) order.push(node.id);
+    node = node.nextElementSibling;
+  }
+  return order;
 }
 
 function applySectionOrder(order) {
-  order.forEach((sectionId, index) => {
+  const anchor = getSectionAnchor();
+  const app = document.getElementById('app');
+  order.forEach(sectionId => {
     const section = document.getElementById(sectionId);
-    if (section) section.style.order = index;
+    if (section && section.parentElement === app) {
+      app.insertBefore(section, anchor);
+    }
   });
 }
 
@@ -1024,9 +1036,16 @@ function saveSectionOrder(order) {
   } catch (e) {}
 }
 
-function getCurrentSectionOrder() {
-  const sections = document.querySelectorAll('#app > .section[draggable="true"]');
-  return Array.from(sections).sort((a, b) => (a.style.order || 0) - (b.style.order || 0)).map(s => s.id);
+function isDefaultOrder() {
+  const current = getCurrentSectionOrder();
+  return current.length === DEFAULT_SECTION_ORDER.length &&
+    current.every((id, i) => id === DEFAULT_SECTION_ORDER[i]);
+}
+
+function updateResetIcon() {
+  const icon = document.getElementById('reset-section-order');
+  if (!icon) return;
+  icon.style.display = isDefaultOrder() ? 'none' : '';
 }
 
 (function initSectionDragDrop() {
@@ -1067,49 +1086,39 @@ function getCurrentSectionOrder() {
 
       const rect = section.getBoundingClientRect();
       const insertBefore = e.clientY < rect.top + rect.height / 2;
-      const currentOrder = getCurrentSectionOrder();
 
-      const draggedId = draggedSection.id;
-      const targetId = section.id;
-      const fromIdx = currentOrder.indexOf(draggedId);
-      const toIdx = currentOrder.indexOf(targetId);
+      // Move the dragged section node before/after the target in the DOM
+      const parent = section.parentNode;
+      if (insertBefore) {
+        parent.insertBefore(draggedSection, section);
+      } else {
+        parent.insertBefore(draggedSection, section.nextSibling);
+      }
 
-      currentOrder.splice(fromIdx, 1);
-      currentOrder.splice(insertBefore ? toIdx : toIdx + 1, 0, draggedId);
-
-      applySectionOrder(currentOrder);
-      saveSectionOrder(currentOrder);
-    });
-
-    // Right-click context menu
-    section.addEventListener('contextmenu', (e) => {
-      // Only on the section header area
-      if (!e.target.closest('.section-title')) return;
-      e.preventDefault();
-      const menu = document.getElementById('section-context-menu');
-      menu.style.left = e.clientX + 'px';
-      menu.style.top = e.clientY + 'px';
-      menu.classList.remove('hidden');
-
-      const closeMenu = (ev) => {
-        if (!menu.contains(ev.target)) {
-          menu.classList.add('hidden');
-          document.removeEventListener('click', closeMenu);
-        }
-      };
-      setTimeout(() => document.addEventListener('click', closeMenu), 0);
+      const order = getCurrentSectionOrder();
+      saveSectionOrder(order);
+      updateResetIcon();
     });
   });
 
-  // Reset button
+  // Reset icon
   document.getElementById('reset-section-order').addEventListener('click', () => {
     applySectionOrder(DEFAULT_SECTION_ORDER);
     saveSectionOrder(DEFAULT_SECTION_ORDER);
-    document.getElementById('section-context-menu').classList.add('hidden');
+    updateResetIcon();
   });
 })();
 
 // Apply saved section order on load
+(function() {
+  let order = DEFAULT_SECTION_ORDER;
+  try {
+    const saved = localStorage.getItem(SECTION_ORDER_KEY);
+    if (saved) order = JSON.parse(saved);
+  } catch (e) {}
+  applySectionOrder(order);
+  updateResetIcon();
+})();
 initSectionOrder();
 
 // Set custom titlebar version from the native window title (set by Rust backend)
