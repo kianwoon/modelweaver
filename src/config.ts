@@ -163,6 +163,8 @@ const rawConfigSchema = z.object({
       host: z.string().default("localhost"),
       streamBufferMs: z.number().min(0).optional(),
       streamBufferBytes: z.number().min(0).optional(),
+      globalBackoffEnabled: z.boolean().default(true).optional(),
+      unhealthyThreshold: z.number().min(0).max(1).default(0.5).optional(),
     })
     .default({ port: 3456, host: "localhost" }),
   providers: z.record(z.string(), providerSchema),
@@ -455,6 +457,8 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     host: validated.server.host,
     streamBufferMs: validated.server.streamBufferMs,
     streamBufferBytes: validated.server.streamBufferBytes,
+    globalBackoffEnabled: validated.server.globalBackoffEnabled,
+    unhealthyThreshold: validated.server.unhealthyThreshold,
   };
   for (const [, provider] of providers) {
     provider._serverConfig = serverConfig;
@@ -477,13 +481,8 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     }
   }
 
-  const server: ServerConfig = {
-    port: validated.server.port,
-    host: validated.server.host,
-  };
-
   const config: AppConfig = {
-    server,
+    server: serverConfig,
     providers,
     routing,
     tierPatterns,

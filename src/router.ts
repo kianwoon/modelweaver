@@ -228,18 +228,20 @@ export function resolveRequest(
     providerChain = reorderChainByHealth(providerChain);
   }
 
-  // Global backoff: if ALL providers are unhealthy (health < 0.5),
-  // skip the chain entirely and return 503 immediately.
-  // No point burning 15s+ per request when all providers are degraded.
+  // Global backoff: if ALL providers are unhealthy, skip the chain entirely
+  // and return 503 immediately. Configurable via server.globalBackoffEnabled
+  // and server.unhealthyThreshold.
+  const globalBackoffEnabled = config.server.globalBackoffEnabled !== false;
+  const unhealthyThreshold = config.server.unhealthyThreshold ?? UNHEALTHY_THRESHOLD;
   let globalBackoff = false;
   const allScores = getAllHealthScores(providerChain.map(e => e.provider));
   let hasHealthData = false;
   for (const score of allScores.values()) {
     if (score < 1) { hasHealthData = true; break; }
   }
-  if (hasHealthData) {
+  if (hasHealthData && globalBackoffEnabled) {
     const allUnhealthy = providerChain.every(
-      e => (allScores.get(e.provider) ?? 1) < UNHEALTHY_THRESHOLD
+      e => (allScores.get(e.provider) ?? 1) < unhealthyThreshold
     );
     if (allUnhealthy) {
       globalBackoff = true;
