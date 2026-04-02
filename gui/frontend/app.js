@@ -1119,7 +1119,6 @@ function updateResetIcon() {
   applySectionOrder(order);
   updateResetIcon();
 })();
-initSectionOrder();
 
 // Set custom titlebar version from the native window title (set by Rust backend)
 if (window.__TAURI__) {
