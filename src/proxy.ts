@@ -1062,20 +1062,12 @@ async function forwardWithRetry(
     });
 
     if (attempt < maxRetries) {
-      // Evict stale connections from the pool before retrying
-      try { await provider._agent?.close(); } catch { /* pool may already be closed */ }
-      // Also evict session-scoped agent if present
+      // Only evict the session-scoped agent — do NOT close/destroy the provider's
+      // shared agent, Closing it shared agent would kill all concurrent requests
+      // to this provider. The session pool eviction gives the retry a fresh
+      // session-scoped connection while leaving the shared pool intact.
       if (sessionPool && ctx.sessionId) {
         sessionPool.evict(ctx.sessionId, provider.name);
-      }
-      if (provider._agent) {
-        const { Agent } = await import("undici");
-        provider._agent = new Agent({
-          keepAliveTimeout: 30000,
-          keepAliveMaxTimeout: 60000,
-          connections: provider.poolSize ?? 10,
-          allowH2: true,
-        });
       }
 
       const delay = CONNECTION_RETRY_BASE_MS * Math.pow(2, attempt);
