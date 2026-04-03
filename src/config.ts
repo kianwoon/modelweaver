@@ -151,7 +151,7 @@ const providerSchema = z.object({
 const routingEntrySchema = z.object({
   provider: z.string(),
   model: z.string().optional(),
-  weight: z.number().positive().optional(),
+  weight: z.number().min(0).optional(),
 });
 
 const hedgingSchema = z.object({
@@ -407,6 +407,13 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       if (!allHaveWeight) {
         throw new Error(
           `modelRouting for model "${modelName}": all entries must have a weight when distribution is enabled`
+        );
+      }
+      // Warn about weight: 0 entries — they are valid but will never receive traffic
+      const zeroWeightEntries = entries.filter(e => e.weight === 0);
+      if (zeroWeightEntries.length > 0) {
+        console.warn(
+          `[config] modelRouting for "${modelName}": ${zeroWeightEntries.length} provider(s) have weight: 0 — they will not receive traffic via weighted distribution`
         );
       }
       if (entries.length < 2) {
