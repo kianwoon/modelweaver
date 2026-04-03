@@ -503,6 +503,7 @@ async function main() {
       }
 
       await handle.closeAgents();
+      await handle.closeSessionPool();
       await removeWorkerPidFile();
       logStream.end();
       process.exit(0);
@@ -611,6 +612,7 @@ async function main() {
     fgRefreshLoop.stop();
     closeWebSocket();
     await handle.closeAgents();
+    await handle.closeSessionPool();
     process.exit(0);
   };
   process.on("SIGTERM", shutdown);
