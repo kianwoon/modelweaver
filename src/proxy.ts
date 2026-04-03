@@ -3,6 +3,7 @@ import type { HedgingConfig, ProviderConfig, RequestContext, RoutingEntry, Strea
 import { transitionStreamState } from "./types.js";
 import { request as undiciRequest } from "undici";
 import { PassThrough } from "node:stream";
+import type { SessionAgentPool } from "./session-pool.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -504,6 +505,7 @@ export async function forwardRequest(
   externalSignal?: AbortSignal,
   chainIndex: number = 0,
   probeId?: number,
+  sessionPool?: SessionAgentPool,
 ): Promise<Response> {
   const outgoingPath = incomingRequest.url.replace(STRIP_ORIGIN, "");
 
@@ -666,13 +668,16 @@ export async function forwardRequest(
   }
 
   try {
+    // Use session-scoped agent when available (per-session connection isolation),
+    // otherwise fall back to shared per-provider pool
+    const dispatcher = sessionPool?.get(ctx.sessionId, provider.name) ?? provider._agent;
     const undiciResponse = await Promise.race([
       undiciRequest(url, {
         method: "POST",
         headers,
         body,
         signal: controller.signal,
-        dispatcher: provider._agent,
+        dispatcher,
       }),
       ttfbPromise,
     ]);
@@ -1027,12 +1032,13 @@ async function forwardWithRetry(
   chainSignal: AbortSignal | undefined,
   index: number,
   probeId?: number,
+  sessionPool?: SessionAgentPool,
 ): Promise<Response> {
   let lastResult: Response | undefined;
 
   const maxRetries = provider._connectionRetries ?? CONNECTION_RETRY_MAX;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const result = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index, probeId);
+    const result = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index, probeId, sessionPool);
 
     // Non-502 responses pass through immediately (success or upstream error)
     if (result.status !== 502) return result;
@@ -1058,6 +1064,10 @@ async function forwardWithRetry(
     if (attempt < maxRetries) {
       // Evict stale connections from the pool before retrying
       try { await provider._agent?.close(); } catch { /* pool may already be closed */ }
+      // Also evict session-scoped agent if present
+      if (sessionPool && ctx.sessionId) {
+        sessionPool.evict(ctx.sessionId, provider.name);
+      }
       if (provider._agent) {
         const { Agent } = await import("undici");
         provider._agent = new Agent({
@@ -1108,6 +1118,7 @@ async function hedgedForwardRequest(
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
   hedging?: HedgingConfig,
   probeId?: number,
+  sessionPool?: SessionAgentPool,
 ): Promise<Response> {
   const count = ctx.hasDistribution ? 1 : computeHedgingCount(provider, hedging);
 
@@ -1116,7 +1127,7 @@ async function hedgedForwardRequest(
     inFlightCounter.increment(provider.name);
     const start = Date.now();
     try {
-      const r = await forwardWithRetry(provider, entry, ctx, incomingRequest, chainSignal, index, probeId);
+      const r = await forwardWithRetry(provider, entry, ctx, incomingRequest, chainSignal, index, probeId, sessionPool);
       latencyTracker.record(provider.name, Date.now() - start);
       return r;
     } finally {
@@ -1152,7 +1163,7 @@ async function hedgedForwardRequest(
     (ctx as any)._stallFired = false;
     hedgeStarts.push(Date.now());
     launched.push(
-      forwardRequest(provider, entry, ctx, incomingRequest, hedgeSignal, index)
+      forwardRequest(provider, entry, ctx, incomingRequest, hedgeSignal, index, undefined, sessionPool)
         .finally(() => inFlightCounter.decrement(provider.name))
     );
   }
@@ -1251,6 +1262,7 @@ export async function forwardWithFallback(
   onAttempt?: (provider: string, index: number) => void,
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
   hedging?: HedgingConfig,
+  sessionPool?: SessionAgentPool,
 ): Promise<FallbackResult> {
   // Guard: empty chain
   if (chain.length === 0) {
@@ -1281,7 +1293,7 @@ export async function forwardWithFallback(
     onAttempt?.(entry.provider, 0);
 
     const singleStart = Date.now();
-    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging);
+    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging, undefined, sessionPool);
     const success = response.status >= 200 && response.status < 300;
     const isConnErr = response.status === 502 && await isConnectionErrorBody(response);
     if (!isConnErr) {
@@ -1332,7 +1344,7 @@ export async function forwardWithFallback(
       try {
         const response = await hedgedForwardRequest(
           provider, entry, ctx, incomingRequest, undefined, i, logger, hedging,
-          cbProbeId,
+          cbProbeId, sessionPool,
         );
 
         const attemptLatency = Date.now() - attemptStart;
@@ -1461,6 +1473,7 @@ export async function forwardWithFallback(
         logger,
         hedging,
         cbProbeId,
+        sessionPool,
       );
       const attemptLatency = Date.now() - attemptStart;
       const success = response.status >= 200 && response.status < 300;

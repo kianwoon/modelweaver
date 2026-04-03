@@ -2,6 +2,7 @@
 import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
 import { forwardWithFallback, setMetricsStore as setProxyMetricsStore, type FallbackResult, recordProviderLatency } from "./proxy.js";
+import { SessionAgentPool } from "./session-pool.js";
 import { createLogger, type LogLevel } from "./logger.js";
 import type { AppConfig, ProviderConfig, RequestContext, StreamState } from "./types.js";
 import { transitionStreamState } from "./types.js";
@@ -402,6 +403,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   let config: AppConfig = initConfig;
   const logger = createLogger(logLevel);
   const app = new Hono();
+  const sessionPool = new SessionAgentPool();
 
   // Share MetricsStore with proxy.ts for connection error tracking (GUI counters)
   if (metricsStore) setProxyMetricsStore(metricsStore);
@@ -548,12 +550,11 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         c.req.raw,
         (provider, index) => {
           logger.info("Attempting provider", { requestId, provider, index, tier: ctx.tier });
-          // Only capture first attempted provider; accurate winner tracking requires
-          // an onSuccess callback in proxy.ts (handled separately).
           if (!successfulProvider) successfulProvider = provider;
         },
         logger,
         config.hedging,
+        sessionPool,
       );
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
