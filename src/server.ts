@@ -14,6 +14,7 @@ import { latencyTracker, inFlightCounter, getHedgeStats, clearHedgeStats } from 
 import { getPoolStats } from "./pool.js";
 import { getAllHealthScores } from "./health-score.js";
 import { broadcastStreamEvent, broadcastProviderHealth, buildProviderHealth } from "./ws.js";
+import { ActiveProbeManager } from "./health-probe.js";
 
 const gzipAsync = promisify(gzip);
 
@@ -789,6 +790,10 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     }
   }, 5000);
   healthInterval.unref();
+
+  // Active health probe for half-open circuit breakers — independent of routing traffic
+  const activeProbeManager = new ActiveProbeManager(config.providers);
+  activeProbeManager.start();
 
   return {
     app,

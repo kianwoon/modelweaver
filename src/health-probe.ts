@@ -1,0 +1,84 @@
+import type { CircuitBreaker } from './circuit-breaker.js';
+
+const PROBE_INTERVAL_MS = 15_000; // 15 seconds
+const PROBE_TIMEOUT_MS = 5_000;  // 5 second timeout per probe
+
+export class ActiveProbeManager {
+  private providers: Map<string, { baseUrl: string; _circuitBreaker?: CircuitBreaker }>;
+  private fetchFn: typeof fetch;
+  private intervalId: ReturnType<typeof setInterval> | null = null;
+
+  constructor(
+    providers: Map<string, { baseUrl: string; _circuitBreaker?: CircuitBreaker }>,
+    fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
+  ) {
+    this.providers = providers;
+    this.fetchFn = fetchFn;
+  }
+
+  start(intervalMs: number = PROBE_INTERVAL_MS): void {
+    if (this.intervalId !== null) return; // already running
+    this.intervalId = setInterval(() => { this.tick().catch(() => {}); }, intervalMs);
+  }
+
+  stop(): void {
+    if (this.intervalId !== null) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+  }
+
+  /** Run one probe cycle — useful for testing */
+  async tick(): Promise<void> {
+    const halfOpen: Array<{ name: string; baseUrl: string; cb: CircuitBreaker }> = [];
+
+    for (const [name, provider] of this.providers) {
+      const cb = provider._circuitBreaker;
+      if (!cb) continue;
+      if (cb.getState() === 'half-open') {
+        halfOpen.push({ name, baseUrl: provider.baseUrl, cb });
+      }
+    }
+
+    // Probe all half-open providers in parallel
+    await Promise.all(halfOpen.map(p => this.probeProvider(p)));
+  }
+
+  private async probeProvider(entry: { name: string; baseUrl: string; cb: CircuitBreaker }): Promise<void> {
+    // Grant a probe ID for this active health check
+    const { allowed, probeId } = entry.cb.canProceed();
+    if (!allowed) return; // another probe already in flight
+
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
+
+      let status = 0;
+      try {
+        // Lightweight HEAD request — most providers accept it
+        const res = await this.fetchFn(entry.baseUrl, {
+          method: 'HEAD',
+          signal: controller.signal,
+          redirect: 'follow',
+        });
+        status = res.status;
+      } catch (err: any) {
+        clearTimeout(timeout);
+        if (err.name === 'AbortError' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') {
+          entry.cb.recordProbeTimeout(probeId);
+          console.warn(`[health-probe] half-open probe timed out for ${entry.name}`);
+          return;
+        }
+        // Other error — ignore, let the next interval try again
+        return;
+      } finally {
+        clearTimeout(timeout);
+      }
+
+      entry.cb.recordResult(status, probeId);
+      console.warn(`[health-probe] half-open probe result for ${entry.name}: ${status}`);
+    } catch {
+      // Non-fetch errors — ignore
+    }
+  }
+}
