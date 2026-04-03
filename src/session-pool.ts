@@ -113,6 +113,11 @@ export class SessionAgentPool {
       this.agents.get(sessionId)?.delete(providerName);
       this.lastActivity.get(sessionId)?.delete(providerName);
     }
+    // Clean up empty session entries
+    if (this.agents.get(sessionId)?.size === 0) {
+      this.agents.delete(sessionId);
+      this.lastActivity.delete(sessionId);
+    }
   }
 
   /** Close all session agents (e.g., on reload/shutdown) */
