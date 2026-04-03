@@ -490,6 +490,7 @@ export async function forwardRequest(
   incomingRequest: Request,
   externalSignal?: AbortSignal,
   chainIndex: number = 0,
+  probeId?: number,
 ): Promise<Response> {
   const outgoingPath = incomingRequest.url.replace(STRIP_ORIGIN, "");
 
@@ -758,7 +759,11 @@ export async function forwardRequest(
       if ((ctx as any)._stallFired) return;
       if (ctx._streamState === "error" || ctx._streamState === "complete") return; // fast-path for _stallFired
       (ctx as any)._stallFired = true;
-      provider._circuitBreaker?.recordTimeout();
+      if (probeId !== undefined) {
+        provider._circuitBreaker?.recordProbeTimeout(probeId);
+      } else {
+        provider._circuitBreaker?.recordTimeout();
+      }
       _metricsStore?.recordConnectionError(provider.name, "stalls");
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
 
@@ -994,12 +999,13 @@ async function forwardWithRetry(
   incomingRequest: Request,
   chainSignal: AbortSignal | undefined,
   index: number,
+  probeId?: number,
 ): Promise<Response> {
   let lastResult: Response | undefined;
 
   const maxRetries = provider._connectionRetries ?? CONNECTION_RETRY_MAX;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    const result = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index);
+    const result = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index, probeId);
 
     // Non-502 responses pass through immediately (success or upstream error)
     if (result.status !== 502) return result;
@@ -1074,6 +1080,7 @@ async function hedgedForwardRequest(
   index: number,
   logger?: { warn: (msg: string, meta?: Record<string, unknown>) => void },
   hedging?: HedgingConfig,
+  probeId?: number,
 ): Promise<Response> {
   const count = ctx.hasDistribution ? 1 : computeHedgingCount(provider, hedging);
 
@@ -1082,7 +1089,7 @@ async function hedgedForwardRequest(
     inFlightCounter.increment(provider.name);
     const start = Date.now();
     try {
-      const r = await forwardWithRetry(provider, entry, ctx, incomingRequest, chainSignal, index);
+      const r = await forwardWithRetry(provider, entry, ctx, incomingRequest, chainSignal, index, probeId);
       latencyTracker.record(provider.name, Date.now() - start);
       return r;
     } finally {
@@ -1295,6 +1302,7 @@ export async function forwardWithFallback(
       try {
         const response = await hedgedForwardRequest(
           provider, entry, ctx, incomingRequest, undefined, i, logger, hedging,
+          cbProbeId,
         );
 
         const attemptLatency = Date.now() - attemptStart;
@@ -1355,8 +1363,10 @@ export async function forwardWithFallback(
       } catch {
         // Connection errors/exceptions should NOT tank health score
         // (they're local pool artifacts, not provider failures)
-        // recordTimeout() is already a no-op for circuit breaker
-        if (provider._circuitBreaker) provider._circuitBreaker.recordTimeout();
+        if (provider._circuitBreaker) {
+          if (cbProbeId !== undefined) provider._circuitBreaker.recordProbeTimeout(cbProbeId);
+          else provider._circuitBreaker.recordTimeout();
+        }
         logger?.warn("Provider failed with exception, falling back", {
           requestId: ctx.requestId,
           provider: entry.provider,
@@ -1420,6 +1430,7 @@ export async function forwardWithFallback(
         index,
         logger,
         hedging,
+        cbProbeId,
       );
       const attemptLatency = Date.now() - attemptStart;
       const success = response.status >= 200 && response.status < 300;
@@ -1429,7 +1440,10 @@ export async function forwardWithFallback(
       }
       return { response, index };
     } catch {
-      if (provider._circuitBreaker) provider._circuitBreaker.recordTimeout();
+      if (provider._circuitBreaker) {
+        if (cbProbeId !== undefined) provider._circuitBreaker.recordProbeTimeout(cbProbeId);
+        else provider._circuitBreaker.recordTimeout();
+      }
       // Connection errors should NOT tank health score
       return {
         response: makeErrorResponse(502, "api_error", `Provider "${entry.provider}" failed`),
