@@ -374,11 +374,38 @@ async function main() {
     // Write worker PID file (monitor owns modelweaver.pid)
     await writeWorkerPidFile(process.pid);
 
-    // Redirect stdout/stderr to log file
+    // Redirect stdout/stderr to log file (capped at MAX_LOG_LINES, recycled)
+    const MAX_LOG_LINES = 1000;
+    const LOG_RETAIN_LINES = 500;
+    let logLineCount = 0;
+    let recyclePending = false;
     const logStream = createWriteStream(getLogPath(), { flags: 'a' });
     logStream.on('error', () => { /* ignore write errors to log file */ });
-    process.stdout.write = logStream.write.bind(logStream) as typeof process.stdout.write;
-    process.stderr.write = logStream.write.bind(logStream) as typeof process.stderr.write;
+    const originalWrite = logStream.write.bind(logStream);
+    const cappedWrite = logStream.write = function (chunk: any, ...args: any[]): boolean {
+      const result = originalWrite(chunk, ...args);
+      // Count newlines to track log size
+      const str = typeof chunk === 'string' ? chunk : (chunk instanceof Buffer ? chunk.toString() : String(chunk));
+      logLineCount += (str.match(/\n/g) || []).length;
+      if (logLineCount > MAX_LOG_LINES && !recyclePending) {
+        recyclePending = true;
+        // Schedule async recycle — keeps last LOG_RETAIN_LINES lines
+        setImmediate(async () => {
+          try {
+            const { readFileSync, writeFileSync } = await import('node:fs');
+            const raw = readFileSync(getLogPath(), 'utf8');
+            const lines = raw.split('\n');
+            const trimmed = lines.slice(-LOG_RETAIN_LINES).join('\n');
+            writeFileSync(getLogPath(), trimmed);
+            logLineCount = LOG_RETAIN_LINES;
+          } catch { /* ignore recycle errors */ }
+          recyclePending = false;
+        });
+      }
+      return result;
+    } as any;
+    process.stdout.write = cappedWrite as typeof process.stdout.write;
+    process.stderr.write = cappedWrite as typeof process.stderr.write;
 
     // Create app with mutable config
     const handle = createApp(config, logLevel, metricsStore, VERSION);
