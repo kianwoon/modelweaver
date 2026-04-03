@@ -382,6 +382,7 @@ ${BOLD}${CYAN}\u250C\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
     } else {
       action = { type: 'back' };
     }
+    }
 
     // Handle screen action
     switch (action.type) {
