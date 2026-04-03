@@ -116,6 +116,45 @@ describe("CircuitBreaker", () => {
       expect(breaker.getState()).toBe("open");
     });
 
+    it("getState() does not consume the half-open probe slot (regression #156)", async () => {
+      // Simulates the pattern where router.ts checks getState() for distribution
+      // routing — this must NOT consume the probe slot that forwardWithFallback()
+      // needs via canProceed().
+      breaker.recordResult(429);
+      breaker.recordResult(429);
+      breaker.recordResult(429);
+      expect(breaker.getState()).toBe("open");
+
+      // Advance past cooldown
+      vi.advanceTimersByTime(1100);
+      await Promise.resolve();
+
+      // Router layer: read-only state check (does NOT transition)
+      expect(breaker.getState()).toBe("open");
+
+      // Proxy layer: canProceed() should still be able to grant a probe
+      const result = breaker.canProceed();
+      expect(result.allowed).toBe(true);
+      expect(breaker.getState()).toBe("half-open");
+    });
+
+    it("canProceed() consumes probe slot, subsequent canProceed() is blocked", async () => {
+      breaker.recordResult(429);
+      breaker.recordResult(429);
+      breaker.recordResult(429);
+      vi.advanceTimersByTime(1100);
+      await Promise.resolve();
+
+      // First canProceed() grants the probe
+      expect(breaker.canProceed().allowed).toBe(true);
+
+      // Second canProceed() (simulating the old router.ts bug) would be blocked
+      expect(breaker.canProceed().allowed).toBe(false);
+
+      // getState() still returns half-open (probe in progress)
+      expect(breaker.getState()).toBe("half-open");
+    });
+
     it("recordProbeTimeout clears probe flags and transitions to open", () => {
       // Use any casts to access private state — test file only
       const cb = new CircuitBreaker({ cooldownSeconds: 1 });
