@@ -29,6 +29,7 @@ const statCache = document.getElementById('stat-cache');
 const modelsEl = document.getElementById('models');
 const providersEl = document.getElementById('providers');
 const recentEl = document.getElementById('recent');
+const sessionsEl = document.getElementById('sessions');
 
 // Activity bar state
 const activityContent = document.getElementById('activity-content');
@@ -43,6 +44,7 @@ let providerHealthCache = null;
 const modelRows = new Map();
 const providerRows = new Map();
 const recentRows = new Map();
+const sessionRows = new Map();
 
 // Provider rendering: renderProviders() reads cachedFullSummary directly
 
@@ -95,8 +97,8 @@ document.querySelectorAll('.titlebar-btn').forEach(btn => {
 });
 
 // --- Compact Mode ---
-const COMPACT_HEIGHT = 420;
-const NORMAL_HEIGHT = 800;
+const COMPACT_HEIGHT = 560;
+const NORMAL_HEIGHT = 960;
 const COMPACT_KEY = 'modelweaver-compact-mode';
 
 function setCompactMode(enabled) {
@@ -338,6 +340,8 @@ function updateSummary(data) {
       if (row._cacheEl.textContent !== cacheText) row._cacheEl.textContent = cacheText;
     }
   }
+  // --- Sessions: keyed DOM diffing ---
+  renderSessions(cachedFullSummary);
   // --- Providers: renderProviders reads cachedFullSummary directly, called by handleProviderHealth ---
   // --- Recent requests: keyed DOM diffing (cap 10) ---
   const recentRequests = (data.recentRequests || [])
@@ -775,6 +779,81 @@ function handleProviderHealth(data) {
   renderProviders();
 }
 
+function renderSessions(summary) {
+  const sessions = summary?.sessionStats || [];
+  const providerCount = Object.keys(summary?.providerDistribution || {}).length || 0;
+  const sessionKeys = new Set(sessions.map(s => s.sessionId));
+
+  // Remove rows for sessionIds no longer present
+  for (const [key, row] of sessionRows) {
+    if (!sessionKeys.has(key)) {
+      row.remove();
+      sessionRows.delete(key);
+    }
+  }
+
+  // Empty state
+  const empty = sessionsEl.querySelector('.empty');
+  if (sessions.length === 0) {
+    if (!empty) {
+      const e = document.createElement('div');
+      e.className = 'empty';
+      e.textContent = 'No active sessions';
+      sessionsEl.appendChild(e);
+    }
+    return;
+  }
+  if (empty) empty.remove();
+
+  // Sort by lastSeen descending
+  const sorted = [...sessions].sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
+  const now = Date.now();
+
+  for (const s of sorted) {
+    let row = sessionRows.get(s.sessionId);
+    if (!row) {
+      row = document.createElement('div');
+      row.className = 'session-card';
+      row.setAttribute('data-session', s.sessionId);
+      const header = document.createElement('div');
+      header.className = 'session-header';
+      const idEl = document.createElement('span');
+      idEl.className = 'session-id';
+      idEl.title = s.sessionId;
+      const connBadge = document.createElement('span');
+      connBadge.className = 'session-conn-badge';
+      header.appendChild(idEl);
+      header.appendChild(connBadge);
+      row.appendChild(header);
+      const meta = document.createElement('div');
+      meta.className = 'session-meta';
+      row.appendChild(meta);
+      sessionsEl.appendChild(row);
+      row._idEl = idEl;
+      row._connEl = connBadge;
+      row._metaEl = meta;
+      sessionRows.set(s.sessionId, row);
+    }
+    // Truncated session ID (first 8 chars)
+    const shortId = s.sessionId.length > 12
+      ? s.sessionId.slice(0, 8) + '\u2026'
+      : s.sessionId;
+    if (row._idEl.textContent !== shortId) row._idEl.textContent = shortId;
+    // Connection count badge
+    const connCount = providerCount > 0 ? providerCount + ' conns' : '\u2014';
+    if (row._connEl.textContent !== connCount) row._connEl.textContent = connCount;
+    // Meta line: request count + last seen
+    const reqCount = s.requestCount || 0;
+    const ago = s.lastSeen ? Math.round((now - s.lastSeen) / 1000) : null;
+    const agoText = ago !== null && ago < 60 ? ago + 's ago'
+      : ago !== null && ago < 3600 ? Math.round(ago / 60) + 'm ago'
+      : ago !== null ? Math.round(ago / 3600) + 'h ago'
+      : '\u2014';
+    const metaText = reqCount + ' requests \u00B7 Last seen: ' + agoText;
+    if (row._metaEl.textContent !== metaText) row._metaEl.textContent = metaText;
+  }
+}
+
 function renderProviders() {
   if (!providerHealthCache) return;
   const health = providerHealthCache;
@@ -999,7 +1078,7 @@ const WS_MAX_BACKOFF = 30000;
 const WS_CONNECT_TIMEOUT = 5000;
 
 // --- Section Reorder (mousedown/mousemove/mouseup for WKWebView compat) ---
-const DEFAULT_SECTION_ORDER = ['models-section', 'providers-section', 'recent-section'];
+const DEFAULT_SECTION_ORDER = ['models-section', 'providers-section', 'sessions-section', 'recent-section'];
 const SECTION_ORDER_KEY = 'sectionOrder';
 
 function getSectionAnchor() {
