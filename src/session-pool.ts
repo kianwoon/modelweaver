@@ -9,7 +9,7 @@ export interface SessionStats {
   providers: string[];
 }
 
-const SESSION_AGENT_CONNECTIONS = 1;
+const SESSION_AGENT_CONNECTIONS = 3; // Support parallel subagent streams per session
 const SESSION_KEEPALIVE_MS = 30_000;
 const SESSION_KEEPALIVE_MAX_MS = 60_000;
 const DEFAULT_SESSION_IDLE_TTL_MS = 600_000; // 10 minutes idle → close
