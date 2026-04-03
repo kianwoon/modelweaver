@@ -30,24 +30,27 @@ export class ActiveProbeManager {
 
   /** Run one probe cycle — useful for testing */
   async tick(): Promise<void> {
-    const halfOpen: Array<{ name: string; baseUrl: string; cb: CircuitBreaker }> = [];
+    const probeable: Array<{ name: string; baseUrl: string; cb: CircuitBreaker }> = [];
 
     for (const [name, provider] of this.providers) {
       const cb = provider._circuitBreaker;
       if (!cb) continue;
-      if (cb.getState() === 'half-open') {
-        halfOpen.push({ name, baseUrl: provider.baseUrl, cb });
+      const state = cb.getState();
+      // Probe half-open providers directly; for open providers, call canProceed()
+      // to trigger the open→half-open transition when cooldown has elapsed.
+      if (state === 'half-open' || state === 'open') {
+        probeable.push({ name, baseUrl: provider.baseUrl, cb });
       }
     }
 
-    // Probe all half-open providers in parallel
-    await Promise.all(halfOpen.map(p => this.probeProvider(p)));
+    // Probe all eligible providers in parallel
+    await Promise.all(probeable.map(p => this.probeProvider(p)));
   }
 
   private async probeProvider(entry: { name: string; baseUrl: string; cb: CircuitBreaker }): Promise<void> {
-    // Grant a probe ID for this active health check
+    // Call canProceed() to trigger open→half-open transition when cooldown elapsed
     const { allowed, probeId } = entry.cb.canProceed();
-    if (!allowed) return; // another probe already in flight
+    if (!allowed) return; // cooldown not elapsed or another probe already in flight
 
     try {
       const controller = new AbortController();

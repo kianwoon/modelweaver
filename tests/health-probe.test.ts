@@ -75,16 +75,37 @@ describe('ActiveProbeManager', () => {
     assert.equal(fetchMock.mock.calls.length, 0);
   });
 
-  it('skips open providers', async () => {
+  it('skips open providers when cooldown not elapsed', async () => {
     const getState = vi.fn().mockReturnValue('open');
+    const canProceed = vi.fn().mockReturnValue({ allowed: false, probeId: 0 });
     providers.set('glm', {
       baseUrl: 'https://glm.example.com',
-      _circuitBreaker: { getState },
+      _circuitBreaker: { getState, canProceed },
     });
 
     const mgr = new ActiveProbeManager(providers, fetchMock as any);
     await mgr.tick();
 
     assert.equal(fetchMock.mock.calls.length, 0);
+    assert.equal(canProceed.mock.calls.length, 1);
+  });
+
+  it('probes open providers when cooldown has elapsed (open→half-open transition)', async () => {
+    const recordResult = vi.fn();
+    const getState = vi.fn().mockReturnValue('open');
+    const canProceed = vi.fn().mockReturnValue({ allowed: true, probeId: 42 });
+    providers.set('glm', {
+      baseUrl: 'https://glm.example.com',
+      _circuitBreaker: { getState, canProceed, recordResult },
+    });
+
+    fetchMock.mockResolvedValue({ status: 200 });
+    const mgr = new ActiveProbeManager(providers, fetchMock as any);
+    await mgr.tick();
+
+    assert.equal(fetchMock.mock.calls.length, 1);
+    assert.equal(recordResult.mock.calls.length, 1);
+    assert.equal(recordResult.mock.calls[0][0], 200);
+    assert.equal(recordResult.mock.calls[0][1], 42); // probeId passed through
   });
 });
