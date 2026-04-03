@@ -668,6 +668,10 @@ export async function forwardRequest(
           try { (upstreamBody.destroy() as any).catch?.(() => {}); } catch { /* already consumed */ }
         }
         if (passThrough && !passThrough.destroyed) {
+          // Mark as intentional close so safeError() in the ReadableStream wrapper
+          // suppresses the error instead of propagating "socket closed unexpectedly"
+          // to the client. Matches the stall handler's pattern (see handleStall).
+          (passThrough as any)._intentionalClose = true;
           passThrough.destroy(new Error("Cancelled"));
         }
       });

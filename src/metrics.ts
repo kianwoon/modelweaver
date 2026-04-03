@@ -13,6 +13,8 @@ interface ModelEntry {
 
 export class MetricsStore {
   private static readonly MAX_MAP_SIZE = 200;
+  /** Hide sessions idle beyond this threshold from the GUI. Read-time filter — no timer needed. */
+  private static readonly SESSION_IDLE_TTL_MS = 600_000; // 10 minutes (matches session-pool.ts)
 
   private buffer: (RequestMetrics | null)[];
   private maxSize: number;
@@ -267,10 +269,19 @@ export class MetricsStore {
       recentRequests: requests,
       uptimeSeconds: Math.floor((Date.now() - this.createdAt) / 1000),
       modelStats: this.getModelStats(),
-      sessionStats: [...this._sessionMap.entries()]
-        .map(([sessionId, { count, lastSeen }]) => ({ sessionId, requestCount: count, lastSeen }))
-        .sort((a, b) => b.lastSeen - a.lastSeen)
-        .slice(0, 50),
+      sessionStats: (() => {
+        const cutoff = Date.now() - MetricsStore.SESSION_IDLE_TTL_MS;
+        const live: { sessionId: string; requestCount: number; lastSeen: number }[] = [];
+        for (const [id, entry] of this._sessionMap) {
+          if (entry.lastSeen >= cutoff) {
+            live.push({ sessionId: id, requestCount: entry.count, lastSeen: entry.lastSeen });
+          } else {
+            this._sessionMap.delete(id);
+            if (this._sessionMapMin.current === id) this._sessionMapMin.current = null;
+          }
+        }
+        return live.sort((a, b) => b.lastSeen - a.lastSeen).slice(0, 50);
+      })(),
       providerErrors: Object.fromEntries(this._providerErrors),
     };
   }
