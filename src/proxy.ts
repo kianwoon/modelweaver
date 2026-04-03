@@ -131,15 +131,14 @@ async function isConnectionErrorBody(response: Response): Promise<boolean> {
   }
 }
 
-function makeErrorResponse(status: number, type: string, message: string): Response {
+function makeErrorResponse(status: number, type: string, message: string, tagConnError: boolean = false): Response {
   const body = JSON.stringify({ type: "error", error: { type, message } });
-  return new Response(body, {
-    status,
-    headers: {
-      "content-type": "application/json",
-      "content-length": textEncoder.encode(body).byteLength.toString(),
-    },
-  });
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "content-length": textEncoder.encode(body).byteLength.toString(),
+  };
+  if (tagConnError) headers[CONN_ERROR_HEADER] = CONN_ERROR_VALUE;
+  return new Response(body, { status, headers });
 }
 
 function unknownProviderErr(providerName: string): Response {
@@ -156,6 +155,11 @@ function unknownProviderErr(providerName: string): Response {
 /** Header added to synthetic circuit-breaker-skip responses so recordResult() knows not to count them. */
 const CB_SKIP_HEADER = "x-cb-skipped";
 const CB_SKIP_VALUE = "1";
+/** Header added to synthetic 502 responses from connection errors (TTFB timeout,
+ * stall, ECONNRESET). These are local artifacts, not upstream failures, and
+ * should NOT count toward the circuit breaker failure threshold. */
+const CONN_ERROR_HEADER = "x-conn-error";
+const CONN_ERROR_VALUE = "1";
 
 function circuitBreakerErr(providerName: string): Response {
   const body = JSON.stringify({
@@ -172,6 +176,14 @@ function circuitBreakerErr(providerName: string): Response {
  * from a locally-applied circuit breaker skip, NOT an upstream failure. */
 function isCircuitBreakerSkipResponse(response: Response): boolean {
   return response.headers.get(CB_SKIP_HEADER) === CB_SKIP_VALUE;
+}
+
+/** Returns true if this response is a synthetic 502 from a local connection error
+ * (TTFB timeout, stall, ECONNRESET). These are local artifacts, not upstream
+ * failures, and should NOT count toward the circuit breaker failure threshold.
+ * They are distinguished from real upstream 502s by the CONN_ERROR_HEADER. */
+function isConnectionErrorResponse(response: Response): boolean {
+  return response.headers.get(CONN_ERROR_HEADER) === CONN_ERROR_VALUE;
 }
 
 /** Default delay (ms) before starting backup providers in staggered race */
@@ -1003,7 +1015,13 @@ export async function forwardRequest(
       });
     });
 
-    return makeErrorResponse(502, "overloaded_error", message);
+    // Tag TTFB/total-timeout/connection-failure 502s with CONN_ERROR_HEADER so that
+    // recordResult() call sites can distinguish them from real upstream 502s.
+    // Race-cancellation 502s ("cancelled by race winner") are NOT tagged — they
+    // should not count toward the circuit breaker threshold either way.
+    const isConnError = isTTFB || !isAbort;
+    const response = makeErrorResponse(502, "overloaded_error", message, isConnError);
+    return response;
   } finally {
     removeAbortListener?.();
   }
@@ -1055,10 +1073,11 @@ async function forwardWithRetry(
       });
     }
 
-    // Connection error — retry with fresh pool
+    // Connection error — retry with fresh pool. Tag with CONN_ERROR_HEADER so
+    // recordResult() knows NOT to count this toward the circuit breaker threshold.
     lastResult = new Response(body, {
       status: 502,
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", [CONN_ERROR_HEADER]: CONN_ERROR_VALUE },
     });
 
     if (attempt < maxRetries) {
@@ -1121,10 +1140,17 @@ async function hedgedForwardRequest(
     try {
       const r = await forwardWithRetry(provider, entry, ctx, incomingRequest, chainSignal, index, probeId, sessionPool);
       latencyTracker.record(provider.name, Date.now() - start);
-      // Record circuit breaker result here so the outer race loop doesn't need to
-      // (avoids double-recording when hedgedForwardRequest is used in race mode).
-      if (provider._circuitBreaker && !isCircuitBreakerSkipResponse(r)) {
-        provider._circuitBreaker.recordResult(r.status, probeId);
+      // Record circuit breaker result here — but only for race (non-distribution) mode.
+      // Distribution mode records in forwardWithFallback() to include re-warm logic.
+      // Skip connection-error 502s — local artifacts that shouldn't count toward threshold.
+      // But MUST release the probe slot if one was granted, otherwise the breaker
+      // gets permanently stuck in half-open with halfOpenInProgress=true.
+      if (provider._circuitBreaker && !ctx.hasDistribution) {
+        if (!isCircuitBreakerSkipResponse(r) && !isConnectionErrorResponse(r)) {
+          provider._circuitBreaker.recordResult(r.status, probeId);
+        } else if (isConnectionErrorResponse(r) && probeId !== undefined) {
+          provider._circuitBreaker.recordProbeTimeout(probeId);
+        }
       }
       return r;
     } finally {
@@ -1183,8 +1209,9 @@ async function hedgedForwardRequest(
       completed.add(winner.hedgeIndex);
 
       // Record each hedged copy's result for circuit breaker — but skip responses
-      // from circuitBreakerErr() (synthetic 502s from locally-applied CB skips).
-      if (provider._circuitBreaker && !isCircuitBreakerSkipResponse(winner.response)) {
+      // from circuitBreakerErr() (synthetic 502s from locally-applied CB skips)
+      // and connection-error 502s (TTFB timeout, stale pool — local artifacts).
+      if (provider._circuitBreaker && !isCircuitBreakerSkipResponse(winner.response) && !isConnectionErrorResponse(winner.response)) {
         provider._circuitBreaker.recordResult(winner.response.status);
       }
 
@@ -1212,6 +1239,8 @@ async function hedgedForwardRequest(
               if (r.response.status === 499) return;
               // Skip circuit-breaker-skip synthetic 502s — they are not upstream failures
               if (isCircuitBreakerSkipResponse(r.response)) return;
+              // Skip connection-error 502s (TTFB timeout, stale pool) — local artifacts
+              if (isConnectionErrorResponse(r.response)) return;
               if (provider._circuitBreaker) provider._circuitBreaker.recordResult(r.response.status);
               try { r.response.body?.cancel(); } catch {}
             }).catch(() => {});
@@ -1280,18 +1309,20 @@ export async function forwardWithFallback(
       return { response: unknownProviderErr(entry.provider), actualModel: entry.model, actualProvider: entry.provider };
     }
 
+    let singleProbeId: number | undefined;
     if (provider._circuitBreaker) {
       const cb = provider._circuitBreaker.canProceed();
       if (!cb.allowed) {
         logger?.warn("Provider skipped by circuit breaker", { requestId: ctx.requestId, provider: entry.provider });
         return { response: circuitBreakerErr(entry.provider), actualModel: entry.model, actualProvider: entry.provider };
       }
+      singleProbeId = cb.probeId;
     }
 
     onAttempt?.(entry.provider, 0);
 
     const singleStart = Date.now();
-    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging, undefined, sessionPool);
+    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging, singleProbeId, sessionPool);
     const success = response.status >= 200 && response.status < 300;
     const isConnErr = response.status === 502 && await isConnectionErrorBody(response);
     if (!isConnErr) {
@@ -1358,7 +1389,14 @@ export async function forwardWithFallback(
 
         if (provider._circuitBreaker) {
           const prevCB = provider._circuitBreaker.getState();
-          provider._circuitBreaker.recordResult(response.status, cbProbeId);
+          // Skip connection-error 502s — these are local artifacts (stale pool,
+          // TTFB timeout), not upstream failures.  But MUST release the probe
+          // slot if one was granted, otherwise the breaker gets permanently stuck.
+          if (!isConnectionErrorResponse(response)) {
+            provider._circuitBreaker.recordResult(response.status, cbProbeId);
+          } else if (cbProbeId !== undefined) {
+            provider._circuitBreaker.recordProbeTimeout(cbProbeId);
+          }
           // Re-warm pool on circuit breaker recovery (half-open → closed)
           if (prevCB === "half-open" && provider._circuitBreaker.getState() === "closed") {
             warmupProvider(provider).catch(() => {});
