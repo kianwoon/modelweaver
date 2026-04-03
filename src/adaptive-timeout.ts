@@ -2,7 +2,6 @@
 
 import type { ProviderConfig } from "./types.js";
 import type { LatencyTracker } from "./hedging.js";
-import { getHealthScore } from "./health-score.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -17,12 +16,6 @@ const TTFB_FLOOR_MS = 2000;
  */
 const MIN_SAMPLES = 5;
 
-/**
- * Minimum health score multiplier floor.
- * Even a very unhealthy provider (score → 0) gets at least 20% of configured TTFB.
- */
-const HEALTH_TTFB_MIN_MULTIPLIER = 0.2;
-
 // ---------------------------------------------------------------------------
 // Adaptive TTFB timeout
 // ---------------------------------------------------------------------------
@@ -30,16 +23,13 @@ const HEALTH_TTFB_MIN_MULTIPLIER = 0.2;
 /**
  * Resolve an adaptive TTFB timeout for a provider.
  *
- * Composes two independent signals via min():
- *   1. Latency-based: uses LatencyTracker's rolling window to compute approximate p95.
- *      Tightens timeout for consistently slow providers.
- *   2. Health-based: scales configured TTFB by max(healthScore, HEALTH_TTFB_MIN_MULTIPLIER).
- *      Fails unhealthy providers faster so the fallback chain can start sooner.
+ * Uses latency-based adaptation only: when a provider is consistently fast,
+ * the timeout is tightened to match observed p95 (capped at configured value).
+ * When insufficient data is available, falls back to the static configured value.
  *
- * Taking the min() of both signals means a provider gets fast-failed if it's
- * either slow OR unhealthy — whichever is more aggressive.
- *
- * Falls back to the static configured value when there aren't enough samples.
+ * Previously, a health-based signal shrank the timeout on unhealthy providers,
+ * creating a death spiral: unhealthy → shorter timeout → more failures → worse health.
+ * Health-based TTFB was removed because it prevented providers from recovering.
  *
  * @param provider - Provider config (reads `ttfbTimeout`)
  * @param tracker - LatencyTracker instance from hedging module
@@ -48,25 +38,17 @@ const HEALTH_TTFB_MIN_MULTIPLIER = 0.2;
 export function resolveAdaptiveTTFB(provider: ProviderConfig, tracker: LatencyTracker): number {
   const base = provider.ttfbTimeout ?? 8000;
 
-  // Signal 1: latency-based (from existing implementation)
+  // Latency-based signal: tighten timeout when observed p95 is below configured base.
+  // This helps fast providers fail bad connections sooner without penalizing slow ones.
   const stats = tracker.getStats(provider.name);
-  let latencyBased = base;
   if (stats.count >= MIN_SAMPLES) {
     // Approximate p95 using mean + 2*stddev (normal distribution).
     // cv = stddev / mean, so stddev = cv * mean.
     // p95 ≈ mean * (1 + 2*cv)
     const p95Approx = Math.round(stats.mean * (1 + 2 * stats.cv));
-    latencyBased = Math.max(TTFB_FLOOR_MS, Math.min(base, p95Approx));
+    return Math.max(TTFB_FLOOR_MS, Math.min(base, p95Approx));
   }
 
-  // Signal 2: health-score-based
-  // Scale TTFB by health score, floor at 20% of base to avoid too-aggressive timeouts.
-  // Provider at 100% health → full base
-  // Provider at 30% health → 30% of base (or HEALTH_TTFB_MIN_MULTIPLIER, whichever is higher)
-  const healthScore = getHealthScore(provider.name);
-  const healthMultiplier = Math.max(healthScore, HEALTH_TTFB_MIN_MULTIPLIER);
-  const healthBased = Math.round(base * healthMultiplier);
-
-  // Compose: use the tighter of the two signals
-  return Math.min(latencyBased, healthBased);
+  // Not enough samples — use configured value as-is
+  return base;
 }
