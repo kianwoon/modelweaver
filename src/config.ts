@@ -137,9 +137,15 @@ const providerSchema = z.object({
   connectionRetries: z.number().int().min(0).max(10).optional(),
   circuitBreaker: z.object({
     failureThreshold: z.number().int().min(1).optional(),
+    threshold: z.number().int().min(1).optional(),
     windowSeconds: z.number().int().min(1).optional(),
     cooldownSeconds: z.number().int().min(1).optional(),
-  }).optional(),
+    cooldown: z.number().int().min(1).optional(),
+  }).transform((cb) => ({
+    failureThreshold: cb.failureThreshold ?? cb.threshold,
+    windowSeconds: cb.windowSeconds,
+    cooldownSeconds: cb.cooldownSeconds ?? cb.cooldown,
+  })).optional(),
 });
 
 const routingEntrySchema = z.object({
@@ -241,9 +247,9 @@ export function peekConfig(
     // Extract circuitBreaker config if present
     const cbRaw = config.circuitBreaker as Record<string, unknown> | undefined;
     const circuitBreaker = cbRaw ? {
-      threshold: cbRaw.failureThreshold !== undefined ? Number(cbRaw.failureThreshold) : undefined,
+      threshold: cbRaw.failureThreshold !== undefined ? Number(cbRaw.failureThreshold) : cbRaw.threshold !== undefined ? Number(cbRaw.threshold) : undefined,
       windowSeconds: cbRaw.windowSeconds !== undefined ? Number(cbRaw.windowSeconds) : undefined,
-      cooldown: cbRaw.cooldownSeconds !== undefined ? Number(cbRaw.cooldownSeconds) : undefined,
+      cooldown: cbRaw.cooldownSeconds !== undefined ? Number(cbRaw.cooldownSeconds) : cbRaw.cooldown !== undefined ? Number(cbRaw.cooldown) : undefined,
     } : undefined;
 
     providers.set(id, {

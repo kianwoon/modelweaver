@@ -1,8 +1,7 @@
 // tests/adaptive-timeout.test.ts
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { resolveAdaptiveTTFB } from "../src/adaptive-timeout.js";
 import { LatencyTracker } from "../src/hedging.js";
-import { recordHealthEvent, clearHealthScores } from "../src/health-score.js";
 import type { ProviderConfig } from "../src/types.js";
 
 function makeProvider(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
@@ -125,71 +124,45 @@ describe("resolveAdaptiveTTFB", () => {
   });
 });
 
-describe("resolveAdaptiveTTFB — health score composition", () => {
+describe("resolveAdaptiveTTFB — health score no longer shrinks TTFB", () => {
   const tracker = new LatencyTracker(30);
 
-  beforeEach(() => {
-    clearHealthScores();
-  });
-
   afterEach(() => {
-    clearHealthScores();
     tracker.clear("test");
   });
 
-  it("reduces TTFB for unhealthy provider even with no latency data", () => {
-    const provider = makeProvider({ name: "sick", ttfbTimeout: 10000 });
+  it("returns configured TTFB when no latency data regardless of provider health", () => {
+    // Previously, an unhealthy provider would get a shortened TTFB.
+    // Now health score is ignored — only latency data matters.
+    const provider = makeProvider({ name: "sick", ttfbTimeout: 15000 });
 
-    // Make provider unhealthy (50% success rate)
-    for (let i = 0; i < 20; i++) {
-      recordHealthEvent("sick", i % 2 === 0, 300);
-    }
-
+    // No latency samples → should return configured value as-is
     const result = resolveAdaptiveTTFB(provider, tracker);
-    // No latency data → latency-based falls back to 10000
-    // Health-based: 0.5 × 10000 = 5000
-    // min(10000, 5000) = 5000
-    expect(result).toBeLessThanOrEqual(5000);
-    expect(result).toBeGreaterThan(0);
+    expect(result).toBe(15000);
   });
 
-  it("health score floor at 20% prevents too-aggressive timeout", () => {
-    const provider = makeProvider({ name: "dead", ttfbTimeout: 10000 });
+  it("latency-based adaptation still works for fast providers", () => {
+    const provider = makeProvider({ name: "fast", ttfbTimeout: 15000 });
 
-    // Make provider score near 0 (all failures)
-    for (let i = 0; i < 20; i++) {
-      recordHealthEvent("dead", false, 30000);
-    }
-
-    const result = resolveAdaptiveTTFB(provider, tracker);
-    // Health-based: max(0, 0.2) × 10000 = 2000 (floor)
-    // min(10000, 2000) = 2000
-    expect(result).toBe(2000);
-  });
-
-  it("takes min of latency-based and health-based signals", () => {
-    const provider = makeProvider({ name: "combo", ttfbTimeout: 10000 });
-
-    // Latency data: consistently ~300ms → latency-based = floor = 2000
+    // Consistently fast ~500ms TTFB
     for (let i = 0; i < 10; i++) {
-      tracker.record("combo", 300);
-    }
-
-    // Health data: 100% healthy → health-based = 10000 (full)
-    for (let i = 0; i < 10; i++) {
-      recordHealthEvent("combo", true, 300);
+      tracker.record("fast", 450 + Math.floor(Math.random() * 100));
     }
 
     const result = resolveAdaptiveTTFB(provider, tracker);
-    // Latency-based: 2000 (floor), Health-based: 10000 (full)
-    // min(2000, 10000) = 2000
-    expect(result).toBe(2000);
+    // p95 approximation should be well below configured 15000
+    expect(result).toBeLessThan(15000);
+    // But should respect the floor of 2000ms
+    expect(result).toBeGreaterThanOrEqual(2000);
+    expect(result).toBe(2000); // floor hit since p95 ≈ 600ms
+
+    tracker.clear("fast");
   });
 
-  it("healthy provider with no latency data uses static TTFB", () => {
-    const provider = makeProvider({ name: "healthy", ttfbTimeout: 15000 });
+  it("slow provider keeps full configured TTFB when no latency samples", () => {
+    const provider = makeProvider({ ttfbTimeout: 15000 });
 
-    // No latency data, no health data
+    // No samples at all — returns configured value
     const result = resolveAdaptiveTTFB(provider, tracker);
     expect(result).toBe(15000);
   });
