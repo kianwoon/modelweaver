@@ -34,6 +34,8 @@ describe('ActiveProbeManager', () => {
     assert.include(fetchMock.mock.calls[0][0], 'glm');
     assert.equal(recordResult.mock.calls.length, 1);
     assert.equal(recordResult.mock.calls[0][0], 200);
+    // probeId should be undefined for half-open (canProceed is NOT called)
+    assert.equal(recordResult.mock.calls[0][1], undefined);
     assert.equal(recordProbeTimeout.mock.calls.length, 0);
   });
 
@@ -107,6 +109,9 @@ describe('ActiveProbeManager', () => {
     assert.equal(recordResult.mock.calls.length, 1);
     assert.equal(recordResult.mock.calls[0][0], 200);
     assert.equal(recordResult.mock.calls[0][1], 42); // probeId passed through
+    // canProceed called exactly ONCE — the probeId was captured in tick() and
+    // passed through to probeProvider(), which does NOT call canProceed again.
+    assert.equal(canProceed.mock.calls.length, 1);
   });
 
   it('treats 404 HEAD response as success (provider reachable)', async () => {
@@ -125,6 +130,27 @@ describe('ActiveProbeManager', () => {
     assert.equal(recordResult.mock.calls.length, 1);
     // 404 should be treated as 200 (provider is reachable, endpoint just doesn't handle HEAD)
     assert.equal(recordResult.mock.calls[0][0], 200);
+  });
+
+  it('does NOT call canProceed for half-open providers (slot-stealing regression)', async () => {
+    const recordResult = vi.fn();
+    const canProceed = vi.fn().mockReturnValue({ allowed: true, probeId: 99 });
+    const getState = vi.fn().mockReturnValue('half-open');
+
+    providers.set('glm', {
+      baseUrl: 'https://glm.example.com',
+      _circuitBreaker: { getState, canProceed, recordResult },
+    });
+
+    fetchMock.mockResolvedValue({ status: 200 });
+    const mgr = new ActiveProbeManager(providers, fetchMock as any);
+    await mgr.tick();
+
+    // canProceed must NEVER be called for half-open providers — that would
+    // steal the probe slot from real in-flight requests.
+    assert.equal(canProceed.mock.calls.length, 0);
+    assert.equal(recordResult.mock.calls.length, 1);
+    assert.equal(recordResult.mock.calls[0][1], undefined); // probeId undefined
   });
 
   it('records 500 probe response as failure (not mapped to 200)', async () => {
