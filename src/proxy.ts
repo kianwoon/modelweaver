@@ -131,15 +131,14 @@ async function isConnectionErrorBody(response: Response): Promise<boolean> {
   }
 }
 
-function makeErrorResponse(status: number, type: string, message: string): Response {
+function makeErrorResponse(status: number, type: string, message: string, tagConnError: boolean = false): Response {
   const body = JSON.stringify({ type: "error", error: { type, message } });
-  return new Response(body, {
-    status,
-    headers: {
-      "content-type": "application/json",
-      "content-length": textEncoder.encode(body).byteLength.toString(),
-    },
-  });
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    "content-length": textEncoder.encode(body).byteLength.toString(),
+  };
+  if (tagConnError) headers[CONN_ERROR_HEADER] = CONN_ERROR_VALUE;
+  return new Response(body, { status, headers });
 }
 
 function unknownProviderErr(providerName: string): Response {
@@ -1016,7 +1015,13 @@ export async function forwardRequest(
       });
     });
 
-    return makeErrorResponse(502, "overloaded_error", message);
+    // Tag TTFB/total-timeout/connection-failure 502s with CONN_ERROR_HEADER so that
+    // recordResult() call sites can distinguish them from real upstream 502s.
+    // Race-cancellation 502s ("cancelled by race winner") are NOT tagged — they
+    // should not count toward the circuit breaker threshold either way.
+    const isConnError = isTTFB || !isAbort;
+    const response = makeErrorResponse(502, "overloaded_error", message, isConnError);
+    return response;
   } finally {
     removeAbortListener?.();
   }
@@ -1138,8 +1143,14 @@ async function hedgedForwardRequest(
       // Record circuit breaker result here — but only for race (non-distribution) mode.
       // Distribution mode records in forwardWithFallback() to include re-warm logic.
       // Skip connection-error 502s — local artifacts that shouldn't count toward threshold.
-      if (provider._circuitBreaker && !ctx.hasDistribution && !isCircuitBreakerSkipResponse(r) && !isConnectionErrorResponse(r)) {
-        provider._circuitBreaker.recordResult(r.status, probeId);
+      // But MUST release the probe slot if one was granted, otherwise the breaker
+      // gets permanently stuck in half-open with halfOpenInProgress=true.
+      if (provider._circuitBreaker && !ctx.hasDistribution) {
+        if (!isCircuitBreakerSkipResponse(r) && !isConnectionErrorResponse(r)) {
+          provider._circuitBreaker.recordResult(r.status, probeId);
+        } else if (isConnectionErrorResponse(r) && probeId !== undefined) {
+          provider._circuitBreaker.recordProbeTimeout(probeId);
+        }
       }
       return r;
     } finally {
@@ -1298,18 +1309,20 @@ export async function forwardWithFallback(
       return { response: unknownProviderErr(entry.provider), actualModel: entry.model, actualProvider: entry.provider };
     }
 
+    let singleProbeId: number | undefined;
     if (provider._circuitBreaker) {
       const cb = provider._circuitBreaker.canProceed();
       if (!cb.allowed) {
         logger?.warn("Provider skipped by circuit breaker", { requestId: ctx.requestId, provider: entry.provider });
         return { response: circuitBreakerErr(entry.provider), actualModel: entry.model, actualProvider: entry.provider };
       }
+      singleProbeId = cb.probeId;
     }
 
     onAttempt?.(entry.provider, 0);
 
     const singleStart = Date.now();
-    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging, undefined, sessionPool);
+    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging, singleProbeId, sessionPool);
     const success = response.status >= 200 && response.status < 300;
     const isConnErr = response.status === 502 && await isConnectionErrorBody(response);
     if (!isConnErr) {
@@ -1377,9 +1390,12 @@ export async function forwardWithFallback(
         if (provider._circuitBreaker) {
           const prevCB = provider._circuitBreaker.getState();
           // Skip connection-error 502s — these are local artifacts (stale pool,
-          // TTFB timeout), not upstream failures.
+          // TTFB timeout), not upstream failures.  But MUST release the probe
+          // slot if one was granted, otherwise the breaker gets permanently stuck.
           if (!isConnectionErrorResponse(response)) {
             provider._circuitBreaker.recordResult(response.status, cbProbeId);
+          } else if (cbProbeId !== undefined) {
+            provider._circuitBreaker.recordProbeTimeout(cbProbeId);
           }
           // Re-warm pool on circuit breaker recovery (half-open → closed)
           if (prevCB === "half-open" && provider._circuitBreaker.getState() === "closed") {
