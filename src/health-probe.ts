@@ -16,6 +16,11 @@ export class ActiveProbeManager {
     this.fetchFn = fetchFn;
   }
 
+  /** Update the providers reference after config hot-reload */
+  updateProviders(providers: Map<string, { baseUrl: string; _circuitBreaker?: CircuitBreaker }>): void {
+    this.providers = providers;
+  }
+
   start(intervalMs: number = PROBE_INTERVAL_MS): void {
     if (this.intervalId !== null) return; // already running
     this.intervalId = setInterval(() => { this.tick().catch(() => {}); }, intervalMs);

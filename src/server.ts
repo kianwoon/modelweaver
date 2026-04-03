@@ -845,6 +845,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
 
       await Promise.all(closePromises);
       config = newConfig;
+      activeProbeManager.updateProviders(newConfig.providers);
       clearRoutingCache();
       clearHedgeStats();
     },
