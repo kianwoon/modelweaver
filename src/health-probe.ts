@@ -45,7 +45,7 @@ export class ActiveProbeManager {
     this._tickInProgress = true;
 
     try {
-      const probeable: Array<{ name: string; baseUrl: string; cb: CircuitBreaker; fromHalfOpen: boolean }> = [];
+      const probeable: Array<{ name: string; baseUrl: string; cb: CircuitBreaker; probeId: number | undefined }> = [];
 
       for (const [name, provider] of this.providers) {
         const cb = provider._circuitBreaker;
@@ -55,16 +55,16 @@ export class ActiveProbeManager {
         if (state === 'half-open') {
           // Already half-open — a real request may have the probe slot in flight.
           // Fire a probe directly without calling canProceed() to avoid slot-stealing.
-          // If a real request is in-flight, this is a redundant duplicate probe — harmless.
-          // recordResult() will handle the response correctly regardless.
-          probeable.push({ name, baseUrl: provider.baseUrl, cb, fromHalfOpen: true });
+          // probeId=undefined tells recordResult() to clear half-open flags regardless
+          // of which probe slot is active.
+          probeable.push({ name, baseUrl: provider.baseUrl, cb, probeId: undefined });
         } else if (state === 'open') {
-          // Open — call canProceed() to trigger open→half-open transition
-          // when cooldown has elapsed. This is safe since no real request
-          // is in-flight (the breaker is blocking all traffic).
-          const { allowed } = cb.canProceed();
+          // Open — call canProceed() ONCE to trigger open→half-open transition
+          // when cooldown has elapsed. Capture probeId here and pass it through
+          // to probeProvider() — do NOT call canProceed() again there.
+          const { allowed, probeId } = cb.canProceed();
           if (allowed) {
-            probeable.push({ name, baseUrl: provider.baseUrl, cb, fromHalfOpen: false });
+            probeable.push({ name, baseUrl: provider.baseUrl, cb, probeId });
           }
         }
         // 'closed': nothing to do
@@ -77,22 +77,12 @@ export class ActiveProbeManager {
     }
   }
 
-  private async probeProvider(entry: { name: string; baseUrl: string; cb: CircuitBreaker; fromHalfOpen: boolean }): Promise<void> {
-    // For half-open providers: tick() skipped canProceed() to avoid slot-stealing,
-    // so we probe with probeId=undefined. recordResult() with undefined probeId
-    // will clear the half-open flags, transitioning back to closed on success.
-    // If a real request already holds the probe slot, this is a harmless duplicate.
-    // For open→half-open: canProceed() was called in tick() and granted a probeId.
-    let probeId: number | undefined;
-    if (entry.fromHalfOpen) {
-      // Don't call canProceed() — it would steal the slot from a real request
-      probeId = undefined;
-    } else {
-      const { allowed, probeId: pid } = entry.cb.canProceed();
-      // Re-check: another tick or real request may have already handled this
-      if (!allowed) return;
-      probeId = pid;
-    }
+  private async probeProvider(entry: { name: string; baseUrl: string; cb: CircuitBreaker; probeId: number | undefined }): Promise<void> {
+    // probeId is pre-captured in tick():
+    //   - undefined for half-open providers (canProceed skipped to avoid slot-stealing)
+    //   - number for open→half-open providers (canProceed called once in tick())
+    // Do NOT call canProceed() here — it would consume a second slot or get denied.
+    const { probeId } = entry;
 
     try {
       const controller = new AbortController();
