@@ -151,7 +151,7 @@ const providerSchema = z.object({
 const routingEntrySchema = z.object({
   provider: z.string(),
   model: z.string().optional(),
-  weight: z.number().min(0).optional(),
+  weight: z.number().positive().optional(),
 });
 
 const hedgingSchema = z.object({
@@ -448,6 +448,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       keepAliveMaxTimeout: 60000,
       connections: poolSize ?? 10,
       allowH2: true,
+      pingInterval: 10_000, // HTTP/2 PING every 10s — detect dead connections in background
     });
     createdAgents.push(providerConfig._agent);
     providerConfig.poolSize = poolSize ?? 10;
