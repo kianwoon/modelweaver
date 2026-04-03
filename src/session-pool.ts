@@ -1,10 +1,18 @@
 // src/session-pool.ts
 import { Agent, type Dispatcher } from "undici";
 
+export interface SessionStats {
+  id: string;
+  providerCount: number;
+  lastActivity: string; // ISO 8601
+  idleMs: number;
+  providers: string[];
+}
+
 const SESSION_AGENT_CONNECTIONS = 1;
 const SESSION_KEEPALIVE_MS = 30_000;
 const SESSION_KEEPALIVE_MAX_MS = 60_000;
-const SESSION_IDLE_TTL_MS = 120_000; // 2 minutes idle → close
+const DEFAULT_SESSION_IDLE_TTL_MS = 600_000; // 10 minutes idle → close
 const SWEEP_INTERVAL_MS = 60_000; // sweep every 60s
 
 /**
@@ -20,8 +28,10 @@ export class SessionAgentPool {
   /** sessionId → providerName → last activity timestamp */
   private lastActivity = new Map<string, Map<string, number>>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
+  private readonly idleTtlMs: number;
 
-  constructor() {
+  constructor(idleTtlMs: number = DEFAULT_SESSION_IDLE_TTL_MS) {
+    this.idleTtlMs = idleTtlMs;
     this.sweepTimer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
     // Don't prevent process exit
     if (this.sweepTimer.unref) this.sweepTimer.unref();
@@ -70,7 +80,7 @@ export class SessionAgentPool {
     for (const [sessionId, providerMap] of this.lastActivity) {
       let allIdle = true;
       for (const [providerName, lastActive] of providerMap) {
-        if (now - lastActive > SESSION_IDLE_TTL_MS) {
+        if (now - lastActive > this.idleTtlMs) {
           // Close the idle agent
           const agent = this.agents.get(sessionId)?.get(providerName);
           if (agent) agent.close().catch(() => {});
@@ -116,6 +126,23 @@ export class SessionAgentPool {
     this.agents.clear();
     this.lastActivity.clear();
     await Promise.all(promises);
+  }
+
+  /** Per-session stats for observability */
+  getStats(): SessionStats[] {
+    const now = Date.now();
+    const result: SessionStats[] = [];
+    for (const [sessionId, providerMap] of this.lastActivity) {
+      const entries = [...providerMap.entries()];
+      result.push({
+        id: sessionId,
+        providerCount: entries.length,
+        lastActivity: new Date(Math.max(...entries.map(([, ts]) => ts))).toISOString(),
+        idleMs: now - Math.max(...entries.map(([, ts]) => ts)),
+        providers: entries.map(([name]) => name),
+      });
+    }
+    return result;
   }
 
   /** Number of active sessions */

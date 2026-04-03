@@ -56,6 +56,8 @@ export interface ServerConfig {
   unhealthyThreshold?: number;
   /** Maximum request body size in MB — rejects requests exceeding this limit */
   maxBodySizeMB?: number;
+  /** Session idle TTL in ms — closes per-session agent connections after this idle period. Default: 600000 (10min) */
+  sessionIdleTtlMs?: number;
 }
 
 export interface AppConfig {

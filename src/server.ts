@@ -389,6 +389,7 @@ export interface AppHandle {
   app: Hono;
   getConfig: () => AppConfig;
   setConfig: (config: AppConfig) => Promise<void>;
+  closeSessionPool: () => Promise<void>;
   closeAgents: () => Promise<void>;
   getInFlightCount: () => number;
 }
@@ -403,7 +404,8 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   let config: AppConfig = initConfig;
   const logger = createLogger(logLevel);
   const app = new Hono();
-  const sessionPool = new SessionAgentPool();
+  const sessionIdleTtlMs = initConfig.server?.sessionIdleTtlMs ?? 600_000;
+  const sessionPool = new SessionAgentPool(sessionIdleTtlMs);
 
   // Share MetricsStore with proxy.ts for connection error tracking (GUI counters)
   if (metricsStore) setProxyMetricsStore(metricsStore);
@@ -784,9 +786,10 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
 
   // Session pool: active sessions and their per-provider connections
   app.get("/api/sessions", (c) => {
+    const sessions = sessionPool.getStats();
     return c.json({
       activeSessions: sessionPool.sessionCount,
-      description: "Each session gets 1 HTTP/2 connection per provider. Idle sessions are evicted after 2min.",
+      sessions,
     });
   });
 
@@ -844,6 +847,9 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       config = newConfig;
       clearRoutingCache();
       clearHedgeStats();
+    },
+    closeSessionPool: async () => {
+      await sessionPool.closeAll();
     },
     closeAgents: async () => {
       const closePromises: Promise<void>[] = [];
