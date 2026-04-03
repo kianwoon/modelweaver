@@ -276,11 +276,13 @@ export function resolveRequest(
   let hasDistribution = false;
   if (providerChain.some(e => e.weight !== undefined)) {
     hasDistribution = true;
-    // Collect circuit-opened providers
+    // Collect circuit-opened providers (read-only state check — do NOT call canProceed()
+    // here as it has a side-effect of consuming the half-open probe slot, which would
+    // prevent the actual request in forwardWithFallback() from probing the provider)
     const openCircuits: string[] = [];
     for (const entry of providerChain) {
       const provider = config.providers.get(entry.provider);
-      if (provider?._circuitBreaker?.canProceed()?.allowed === false) {
+      if (provider?._circuitBreaker?.getState() === "open") {
         openCircuits.push(entry.provider);
       }
     }
