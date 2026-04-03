@@ -83,8 +83,12 @@ export class ActiveProbeManager {
         clearTimeout(timeout);
       }
 
-      entry.cb.recordResult(status, probeId);
-      console.warn(`[health-probe] half-open probe result for ${entry.name}: ${status}`);
+      // Treat any HTTP response as "provider is reachable" — the circuit breaker
+      // cares about server availability, not endpoint correctness.
+      // Only 5xx/429 indicates the provider is actually struggling.
+      const effectiveStatus = (status >= 500 || status === 429) ? status : 200;
+      entry.cb.recordResult(effectiveStatus, probeId);
+      console.warn(`[health-probe] half-open probe result for ${entry.name}: ${status}${effectiveStatus !== status ? ` (treated as ${effectiveStatus})` : ''}`);
     } catch {
       // Non-fetch errors — ignore
     }

@@ -108,4 +108,39 @@ describe('ActiveProbeManager', () => {
     assert.equal(recordResult.mock.calls[0][0], 200);
     assert.equal(recordResult.mock.calls[0][1], 42); // probeId passed through
   });
+
+  it('treats 404 HEAD response as success (provider reachable)', async () => {
+    const recordResult = vi.fn();
+    const getState = vi.fn().mockReturnValue('half-open');
+    const canProceed = vi.fn().mockReturnValue({ allowed: true, probeId: 7 });
+    providers.set('minimax', {
+      baseUrl: 'https://api.minimax.io/anthropic',
+      _circuitBreaker: { getState, canProceed, recordResult },
+    });
+
+    fetchMock.mockResolvedValue({ status: 404 });
+    const mgr = new ActiveProbeManager(providers, fetchMock as any);
+    await mgr.tick();
+
+    assert.equal(recordResult.mock.calls.length, 1);
+    // 404 should be treated as 200 (provider is reachable, endpoint just doesn't handle HEAD)
+    assert.equal(recordResult.mock.calls[0][0], 200);
+  });
+
+  it('records 500 probe response as failure (not mapped to 200)', async () => {
+    const recordResult = vi.fn();
+    const getState = vi.fn().mockReturnValue('half-open');
+    const canProceed = vi.fn().mockReturnValue({ allowed: true, probeId: 8 });
+    providers.set('glm', {
+      baseUrl: 'https://glm.example.com',
+      _circuitBreaker: { getState, canProceed, recordResult },
+    });
+
+    fetchMock.mockResolvedValue({ status: 500 });
+    const mgr = new ActiveProbeManager(providers, fetchMock as any);
+    await mgr.tick();
+
+    assert.equal(recordResult.mock.calls.length, 1);
+    assert.equal(recordResult.mock.calls[0][0], 500);
+  });
 });
