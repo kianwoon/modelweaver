@@ -655,7 +655,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       // Error / non-2xx responses — record metrics so provider error tracking
       // picks them up (metricsStore.recordRequest → _providerErrors population).
       // Without this, error responses were never recorded and the GUI showed 0 errors.
-      const errorProvider = successfulProvider || result.actualProvider || (ctx.providerChain[0]?.provider ?? "unknown");
+      const errorProvider = result.actualProvider || successfulProvider || (ctx.providerChain[0]?.provider ?? "unknown");
       const errorTarget = result.actualProvider || (ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : errorProvider);
       const latencyMs = Date.now() - ctx.startTime;
 
