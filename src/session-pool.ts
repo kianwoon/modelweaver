@@ -14,6 +14,14 @@ const SESSION_KEEPALIVE_MS = 30_000;
 const SESSION_KEEPALIVE_MAX_MS = 60_000;
 const DEFAULT_SESSION_IDLE_TTL_MS = 600_000; // 10 minutes idle → close
 const SWEEP_INTERVAL_MS = 60_000; // sweep every 60s
+/**
+ * Staleness threshold: if an agent has been idle for this long, its underlying
+ * HTTP/2 connection is almost certainly half-closed by the upstream server
+ * (e.g. GLM closes after ~15-20s of inactivity). Closing and recreating the
+ * agent proactively avoids 20s stall timeouts on the next request.
+ * 10s is conservative — well below GLM's server-side idle timeout.
+ */
+const STALE_AGENT_THRESHOLD_MS = 10_000;
 
 /**
  * Manages per-session per-provider undici Agents.
@@ -51,12 +59,28 @@ export class SessionAgentPool {
     }
 
     let agent = providerMap.get(providerName);
+
+    // Connection pre-check: if the agent has been idle beyond the staleness
+    // threshold, its HTTP/2 connection may be half-closed by the upstream.
+    // Destroy and create fresh — TCP/TLS handshake happens lazily on next request.
+    if (agent) {
+      const lastActive = this.lastActivity.get(sessionId)?.get(providerName);
+      if (lastActive && Date.now() - lastActive > STALE_AGENT_THRESHOLD_MS) {
+        const idleS = Math.round((Date.now() - lastActive) / 1000);
+        console.log(`[session-pool] refreshing stale agent ${sessionId.slice(0, 8)}…/${providerName} (idle ${idleS}s > ${STALE_AGENT_THRESHOLD_MS / 1000}s threshold)`);
+        agent.close().catch(() => {});
+        providerMap.delete(providerName);
+        agent = undefined;
+      }
+    }
+
     if (!agent) {
       agent = new Agent({
         connections: SESSION_AGENT_CONNECTIONS,
         keepAliveTimeout: SESSION_KEEPALIVE_MS,
         keepAliveMaxTimeout: SESSION_KEEPALIVE_MAX_MS,
         allowH2: true,
+        pingInterval: 10_000, // HTTP/2 PING every 10s — detect dead connections in background
       });
       providerMap.set(providerName, agent);
     }
@@ -139,6 +163,7 @@ export class SessionAgentPool {
     const result: SessionStats[] = [];
     for (const [sessionId, providerMap] of this.lastActivity) {
       const entries = [...providerMap.entries()];
+      if (entries.length === 0) continue; // skip stale entries (sweep may have emptied the map)
       result.push({
         id: sessionId,
         providerCount: entries.length,
