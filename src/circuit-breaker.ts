@@ -80,13 +80,39 @@ export class CircuitBreaker {
   }
 
   /**
+   * Record a timeout on a probe request in half-open state.
+   * Clears probe flags and transitions back to open (counts as a flap)
+   * so the next request after cooldown can probe again.
+   *
+   * For non-probe timeouts (regular requests in closed state), timeouts
+   * are still a no-op — they don't count toward the failure threshold.
+   */
+  recordProbeTimeout(probeId: number): void {
+    // Only act if this probe is the one in flight
+    if (!this.halfOpenInProgress || probeId !== this.halfOpenProbeId) return;
+
+    // Timeout of a half-open probe = treat as a flap, go back to open
+    // and let the next cooldown-elapsed request trigger a fresh probe.
+    this.halfOpenInProgress = false;
+    this.halfOpenProbeId = null;
+    this._probeGranted = false;
+    this.state = "open";
+    this.openedAt = Date.now();
+    this._cooldownMs = this.escalateCooldown(false /* not a rate-limit */);
+    this._flapCount++;
+    console.warn(`[circuit-breaker] HALF-OPEN PROBE TIMED OUT — back to OPEN (flap=${this._flapCount}, cooldown=${this._cooldownMs}ms)`);
+  }
+
+  /**
    * Record a timeout without tripping the circuit breaker.
    * Timeouts are often caused by stale connections or transient load —
    * retrying with a fresh connection usually succeeds. Only actual server
    * errors (5xx, 429) should count toward the failure threshold.
+   * NOTE: For probe timeouts, use recordProbeTimeout() instead — that
+   * clears probe flags so a new probe can be attempted.
    */
   recordTimeout(): void {
-    // No-op: timeouts do not count as circuit breaker failures.
+    // No-op for non-probe requests: timeouts don't count as circuit breaker failures.
     // This prevents cascading breaker trips during upstream degradation.
   }
 

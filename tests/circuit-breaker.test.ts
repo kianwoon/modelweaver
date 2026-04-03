@@ -115,6 +115,20 @@ describe("CircuitBreaker", () => {
       breaker.recordResult(429);
       expect(breaker.getState()).toBe("open");
     });
+
+    it("recordProbeTimeout clears probe flags and transitions to open", () => {
+      // Use any casts to access private state — test file only
+      const cb = new CircuitBreaker({ cooldownSeconds: 1 });
+      (cb as any).state = "half-open";
+      (cb as any).halfOpenInProgress = true;
+      (cb as any).halfOpenProbeId = 99;
+      (cb as any)._probeGranted = true;
+
+      cb.recordProbeTimeout(99);
+
+      const s = cb.getStatus();
+      expect(s.state).toBe("open");
+    });
   });
 
   describe("custom config", () => {
