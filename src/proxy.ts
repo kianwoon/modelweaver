@@ -1129,6 +1129,11 @@ async function hedgedForwardRequest(
     try {
       const r = await forwardWithRetry(provider, entry, ctx, incomingRequest, chainSignal, index, probeId, sessionPool);
       latencyTracker.record(provider.name, Date.now() - start);
+      // Record circuit breaker result here so the outer race loop doesn't need to
+      // (avoids double-recording when hedgedForwardRequest is used in race mode).
+      if (provider._circuitBreaker && !isCircuitBreakerSkipResponse(r)) {
+        provider._circuitBreaker.recordResult(r.status, probeId);
+      }
       return r;
     } finally {
       inFlightCounter.decrement(provider.name);
@@ -1532,16 +1537,14 @@ export async function forwardWithFallback(
 
       if (winner.response.status >= 200 && winner.response.status < 300) {
         sharedController.abort();
-        // Record winner's result for circuit breaker (mirrors distribution path pattern)
+        // Circuit breaker recording is handled inside hedgedForwardRequest()
+        // (both single-copy and multi-copy paths record via recordResult).
+        // Skip recording here to avoid double-recording in race+hedge mode.
         const winningEntry = chain[winner.index];
         const winningProvider = winningEntry ? providers.get(winningEntry.provider) : undefined;
-        if (winningProvider?._circuitBreaker && !isCircuitBreakerSkipResponse(winner.response)) {
-          const prevCB = winningProvider._circuitBreaker.getState();
-          winningProvider._circuitBreaker.recordResult(winner.response.status);
-          // Re-warm pool on circuit breaker recovery (half-open → closed)
-          if (prevCB === "half-open" && winningProvider._circuitBreaker.getState() === "closed") {
-            warmupProvider(winningProvider).catch(() => {});
-          }
+        // Re-warm pool on circuit breaker recovery (half-open → closed)
+        if (winningProvider?._circuitBreaker?.getState() === "closed") {
+          warmupProvider(winningProvider).catch(() => {});
         }
         for (const f of failures) {
           void f.response.body?.cancel?.().catch(() => {});
@@ -1552,11 +1555,6 @@ export async function forwardWithFallback(
       if (!isRetriable(winner.response.status)) {
         sharedController.abort();
         const winnerEntry = chain[winner.index];
-        // Record non-retriable failure to circuit breaker — skip CB-skip responses
-        const nrProvider = winnerEntry ? providers.get(winnerEntry.provider) : undefined;
-        if (nrProvider?._circuitBreaker && !isCircuitBreakerSkipResponse(winner.response)) {
-          nrProvider._circuitBreaker.recordResult(winner.response.status);
-        }
         if ((winner.response.status === 400 || winner.response.status === 413) && winner.response.body) {
           try {
             const errBody = await winner.response.text();
@@ -1580,14 +1578,8 @@ export async function forwardWithFallback(
 
       failures.push(winner);
 
-      // Record losing provider's failure to circuit breaker.
-      // Without this, providers that consistently return 429/5xx in race mode
-      // never trip their breaker because only the winner is recorded.
-      const failEntry = chain[winner.index];
-      const failProvider = failEntry ? providers.get(failEntry.provider) : undefined;
-      if (failProvider?._circuitBreaker && !isCircuitBreakerSkipResponse(winner.response)) {
-        failProvider._circuitBreaker.recordResult(winner.response.status);
-      }
+      // Circuit breaker recording for losing providers is handled inside
+      // hedgedForwardRequest() — skip here to avoid double-recording.
     }
 
     sharedController.abort();
