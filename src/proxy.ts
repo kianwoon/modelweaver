@@ -1162,13 +1162,14 @@ async function hedgedForwardRequest(
     const hedgeSignal = chainSignal
       ? AbortSignal.any([chainSignal, hedgeController.signal])
       : hedgeController.signal;
-    // Reset stream state per hedge copy — each copy races independently
+    // Isolate stream state per hedge copy — each copy races independently
     // and may set _streamState/_stallFired via stall timers or error handlers.
-    ctx._streamState = "start";
-    (ctx as any)._stallFired = false;
+    // Shallow clone ensures mutations don't leak to sibling copies or the parent ctx.
+    const hedgeCtx: typeof ctx = { ...ctx, _streamState: "start" };
+    (hedgeCtx as any)._stallFired = false;
     hedgeStarts.push(Date.now());
     launched.push(
-      forwardRequest(provider, entry, ctx, incomingRequest, hedgeSignal, index, undefined, sessionPool)
+      forwardRequest(provider, entry, hedgeCtx, incomingRequest, hedgeSignal, index, undefined, sessionPool)
         .finally(() => inFlightCounter.decrement(provider.name))
     );
   }
@@ -1461,17 +1462,18 @@ export async function forwardWithFallback(
 
     onAttempt?.(entry.provider, index);
 
-    // Reset stream state for each racing provider — previous attempt may have
-    // set _streamState to "error" and _stallFired to true.
-    ctx._streamState = "start";
-    (ctx as any)._stallFired = false;
+    // Isolate stream state for each racing provider — previous attempt may have
+    // set _streamState to "error" and _stallFired to true. Shallow clone prevents
+    // concurrent providers from corrupting each other's stream state machine.
+    const raceCtx: typeof ctx = { ...ctx, _streamState: "start" };
+    (raceCtx as any)._stallFired = false;
 
     const attemptStart = Date.now();
     try {
       const response = await hedgedForwardRequest(
         provider,
         entry,
-        ctx,
+        raceCtx,
         incomingRequest,
         sharedController.signal,
         index,
@@ -1542,7 +1544,9 @@ export async function forwardWithFallback(
         // Skip recording here to avoid double-recording in race+hedge mode.
         const winningEntry = chain[winner.index];
         const winningProvider = winningEntry ? providers.get(winningEntry.provider) : undefined;
-        // Re-warm pool on circuit breaker recovery (half-open → closed)
+        // Re-warm pool on circuit breaker recovery (half-open → closed).
+        // hedgedForwardRequest may have already called recordResult internally,
+        // transitioning half-open → closed. Warmup is idempotent.
         if (winningProvider?._circuitBreaker?.getState() === "closed") {
           warmupProvider(winningProvider).catch(() => {});
         }
