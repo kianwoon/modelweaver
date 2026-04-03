@@ -782,6 +782,14 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     return c.json(Object.fromEntries(scores));
   });
 
+  // Session pool: active sessions and their per-provider connections
+  app.get("/api/sessions", (c) => {
+    return c.json({
+      activeSessions: sessionPool.sessionCount,
+      description: "Each session gets 1 HTTP/2 connection per provider. Idle sessions are evicted after 2min.",
+    });
+  });
+
   let inFlightCount = 0;
 
   // Periodically broadcast provider health to all connected GUI clients
