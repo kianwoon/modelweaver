@@ -1,6 +1,6 @@
 // tests/router.test.ts
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { matchTier, buildRoutingChain, resolveRequest, clearRoutingCache, selectByWeight } from "../src/router.js";
+import { matchTier, buildRoutingChain, resolveRequest, clearRoutingCache, selectByWeight, resetGlobalBackoffState } from "../src/router.js";
 import { recordHealthEvent, clearHealthScores } from "../src/health-score.js";
 import type { RoutingEntry, AppConfig } from "../src/types.js";
 
@@ -218,9 +218,11 @@ describe("resolveRequest — global backoff", () => {
   beforeEach(() => {
     clearRoutingCache();
     clearHealthScores();
+    resetGlobalBackoffState();
   });
   afterEach(() => {
     clearHealthScores();
+    resetGlobalBackoffState();
   });
 
   it("sets _globalBackoff when all providers in chain are unhealthy", () => {

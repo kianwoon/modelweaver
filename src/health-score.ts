@@ -93,8 +93,12 @@ export function clearHealthScores(): void {
  *   - latencyScore: inverse of p99 latency, normalized to 0-1 range
  *
  * Formula:
- *   healthScore = successRate * latencyScore
- *   where latencyScore = 1 - min(1, p99_latency / latencyCeiling)
+ *   healthScore = SUCCESS_WEIGHT * successRate + LATENCY_WEIGHT * latencyScore
+ *   (latencyScore = 1 - min(1, p99_latency / 30000))
+ *
+ * Uses weighted average instead of multiplication to avoid amplification:
+ * a provider slightly degraded on both axes (e.g. 90% success, 50% latency)
+ * gets 0.78 (weighted avg) instead of 0.45 (product) — avoiding false negatives.
  *
  * @param providerName - Provider identifier
  * @returns Health score between 0 and 1. Returns 1 (healthy) when insufficient data.
@@ -119,7 +123,11 @@ export function getHealthScore(providerName: string): number {
   const LATENCY_CEILING_MS = 30_000; // 30s — anything above this is considered slow
   const latencyScore = Math.max(0, 1 - p99 / LATENCY_CEILING_MS);
 
-  return successRate * latencyScore;
+  // Weighted average: success rate is the primary signal, latency is secondary.
+  // Avoids multiplicative amplification where dual-axis degradation causes false negatives.
+  const SUCCESS_WEIGHT = 0.7;
+  const LATENCY_WEIGHT = 0.3;
+  return SUCCESS_WEIGHT * successRate + LATENCY_WEIGHT * latencyScore;
 }
 
 /**

@@ -4,6 +4,13 @@ import { getAllHealthScores } from "./health-score.js";
 
 const ROUTING_CACHE_MAX_SIZE = 200;
 
+/**
+ * Minimum duration (ms) that global backoff persists after triggering,
+ * even if health data ages out. Prevents oscillation where health events
+ * expire during retry-after → score returns to 1 → traffic resumes → fails again.
+ */
+const GLOBAL_BACKOFF_MIN_DURATION_MS = 60_000; // 60 seconds
+
 /** Health score threshold below which a provider gets deprioritized in fallback chains. */
 const UNHEALTHY_THRESHOLD = 0.5;
 
@@ -65,6 +72,13 @@ interface RoutingCacheEntry {
  * Map insertion order serves as LRU ordering (first = oldest).
  */
 const routingCache = new Map<string, RoutingCacheEntry>();
+
+/** Tracks when global backoff was last triggered to prevent oscillation. */
+let lastGlobalBackoffAt = 0;
+
+export function resetGlobalBackoffState(): void {
+  lastGlobalBackoffAt = 0;
+}
 
 /**
  * Invalidate the routing cache. Called on config hot-reload.
@@ -244,6 +258,16 @@ export function resolveRequest(
       e => (allScores.get(e.provider) ?? 1) < unhealthyThreshold
     );
     if (allUnhealthy) {
+      globalBackoff = true;
+      lastGlobalBackoffAt = Date.now();
+    }
+  }
+
+  // Prevent oscillation: if global backoff was recently triggered, stay in backoff
+  // even if health data aged out (fewer than 5 events → score returns to 1).
+  if (!globalBackoff && globalBackoffEnabled && lastGlobalBackoffAt > 0) {
+    const elapsed = Date.now() - lastGlobalBackoffAt;
+    if (elapsed < GLOBAL_BACKOFF_MIN_DURATION_MS) {
       globalBackoff = true;
     }
   }

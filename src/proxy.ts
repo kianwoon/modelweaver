@@ -1022,7 +1022,7 @@ async function forwardWithRetry(
       headers: { "content-type": "application/json" },
     });
 
-    if (attempt < CONNECTION_RETRY_MAX) {
+    if (attempt < maxRetries) {
       // Evict stale connections from the pool before retrying
       try { await provider._agent?.close(); } catch { /* pool may already be closed */ }
       if (provider._agent) {
@@ -1103,6 +1103,9 @@ async function hedgedForwardRequest(
   const start = Date.now();
   const launched: Promise<Response>[] = [];
   const hedgeController = new AbortController();
+  // Track per-copy start times for accurate TTFB measurement.
+  // Using Date.now() at launch captures the speculative delay for staggered copies.
+  const hedgeStarts: number[] = [];
 
   for (let h = 0; h < count; h++) {
     inFlightCounter.increment(provider.name);
@@ -1113,6 +1116,7 @@ async function hedgedForwardRequest(
     // and may set _streamState/_stallFired via stall timers or error handlers.
     ctx._streamState = "start";
     (ctx as any)._stallFired = false;
+    hedgeStarts.push(Date.now());
     launched.push(
       forwardRequest(provider, entry, ctx, incomingRequest, hedgeSignal, index)
         .finally(() => inFlightCounter.decrement(provider.name))
@@ -1141,7 +1145,11 @@ async function hedgedForwardRequest(
       }
 
       if (winner.response.status >= 200 && winner.response.status < 300) {
-        latencyTracker.record(provider.name, Date.now() - start);
+        // Record the winning copy's actual TTFB (from its launch to resolution),
+        // not the overall hedge wall-clock time. This prevents speculative delay
+        // from inflating latency measurements and CV calculations.
+        const hedgeLatency = Date.now() - (hedgeStarts[winner.hedgeIndex] ?? start);
+        latencyTracker.record(provider.name, hedgeLatency);
         recordHedgeWin(provider.name);
         // Record losses for copies that didn't win
         const loserCount = wrapped.length - 1;
@@ -1487,6 +1495,11 @@ export async function forwardWithFallback(
       if (!isRetriable(winner.response.status)) {
         sharedController.abort();
         const winnerEntry = chain[winner.index];
+        // Record non-retriable failure to circuit breaker.
+        const nrProvider = winnerEntry ? providers.get(winnerEntry.provider) : undefined;
+        if (nrProvider?._circuitBreaker) {
+          nrProvider._circuitBreaker.recordResult(winner.response.status);
+        }
         if ((winner.response.status === 400 || winner.response.status === 413) && winner.response.body) {
           try {
             const errBody = await winner.response.text();
@@ -1509,6 +1522,15 @@ export async function forwardWithFallback(
       }
 
       failures.push(winner);
+
+      // Record losing provider's failure to circuit breaker.
+      // Without this, providers that consistently return 429/5xx in race mode
+      // never trip their breaker because only the winner is recorded.
+      const failEntry = chain[winner.index];
+      const failProvider = failEntry ? providers.get(failEntry.provider) : undefined;
+      if (failProvider?._circuitBreaker) {
+        failProvider._circuitBreaker.recordResult(winner.response.status);
+      }
     }
 
     sharedController.abort();

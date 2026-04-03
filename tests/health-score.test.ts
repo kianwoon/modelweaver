@@ -34,8 +34,9 @@ describe("health score basics", () => {
     for (let i = 0; i < 20; i++) {
       recordHealthEvent("half-fail", i % 2 === 0, 300);
     }
-    // successRate = 0.5, latencyScore ≈ 0.99 → score ≈ 0.495
-    expect(getHealthScore("half-fail")).toBeCloseTo(0.495, 1);
+    // successRate = 0.5, latencyScore ≈ 0.99
+    // Weighted average: 0.7*0.5 + 0.3*0.99 ≈ 0.647 (not 0.495 product)
+    expect(getHealthScore("half-fail")).toBeCloseTo(0.647, 1);
   });
 
   it("penalizes slow p99 latency", () => {
@@ -43,8 +44,9 @@ describe("health score basics", () => {
     for (let i = 0; i < 20; i++) {
       recordHealthEvent("slow", true, i < 19 ? 100 : 15000);
     }
-    // successRate = 1.0, latencyScore = 1 - 15000/30000 = 0.5
-    expect(getHealthScore("slow")).toBeCloseTo(0.5, 1);
+    // successRate = 1.0, latencyScore = 0.5
+    // Weighted average: 0.7*1.0 + 0.3*0.5 = 0.85 (not 0.5 product)
+    expect(getHealthScore("slow")).toBeCloseTo(0.85, 1);
   });
 
   it("returns 0 when all requests fail at max latency", () => {
@@ -61,8 +63,9 @@ describe("health score basics", () => {
     }
     const score = getHealthScore("capped");
     // Should reflect ~50% success rate of the last 100 events
+    // Weighted: 0.7*0.5 + 0.3*0.983 ≈ 0.645 (higher than product 0.491)
     expect(score).toBeGreaterThan(0.4);
-    expect(score).toBeLessThan(0.6);
+    expect(score).toBeLessThan(0.7);
   });
 });
 
