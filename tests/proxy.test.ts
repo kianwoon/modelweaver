@@ -1,7 +1,7 @@
 // tests/proxy.test.ts
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createMockProvider } from "./helpers/mock-provider.js";
-import { forwardRequest, forwardWithFallback, isRetriable, buildOutboundUrl, buildOutboundHeaders } from "../src/proxy.js";
+import { forwardRequest, forwardWithFallback, isRetriable, buildOutboundUrl, buildOutboundHeaders, sanitizeSSEChunk } from "../src/proxy.js";
 import type { RoutingEntry, ProviderConfig, RequestContext } from "../src/types.js";
 
 describe("isRetriable", () => {
@@ -428,4 +428,70 @@ describe("forwardRequest stall detection", () => {
     // Stream should be empty (or contain only partial data before stall) — no SSE error payload
     expect(text).not.toContain("event: error");
   }, 20_000);
+});
+
+describe("sanitizeSSEChunk", () => {
+  it("returns original chunk unchanged when no null patterns present", () => {
+    const chunk = 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}\n\n';
+    expect(sanitizeSSEChunk(chunk)).toBe(chunk);
+  });
+
+  it("replaces content:null with content:[]", () => {
+    const chunk = 'data: {"type":"message","role":"assistant","content":null}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).toContain('"content":[]');
+    expect(result).not.toContain('"content":null');
+  });
+
+  it("replaces message:null with message:{}", () => {
+    const chunk = 'data: {"type":"message_start","message":null}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).toContain('"message":{}');
+    expect(result).not.toContain('"message":null');
+  });
+
+  it("replaces delta:null with delta:{}", () => {
+    const chunk = 'data: {"type":"content_block_delta","delta":null}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).toContain('"delta":{}');
+    expect(result).not.toContain('"delta":null');
+  });
+
+  it("handles multiple null fields in one chunk", () => {
+    const chunk = 'data: {"content":null,"message":null,"delta":null}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).toContain('"content":[]');
+    expect(result).toContain('"message":{}');
+    expect(result).toContain('"delta":{}');
+    expect(result).not.toContain(":null");
+  });
+
+  it("handles whitespace variations around null", () => {
+    const chunk = 'data: {"content" : null , "message":  null}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).toContain('"content":[]');
+    expect(result).toContain('"message":{}');
+  });
+
+  it("does not corrupt unrelated fields containing 'null' substring", () => {
+    const chunk = 'data: {"type":"text_delta","text":"nullable value is nullish"}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).toBe(chunk); // no :null pattern in JSON value positions
+  });
+
+  it("fast-paths chunks without :null substring (zero allocation)", () => {
+    const chunk = 'data: {"type":"ping"}\n\n';
+    expect(sanitizeSSEChunk(chunk)).toBe(chunk);
+  });
+
+  it("handles real SSE event: message_start with null content", () => {
+    const chunk = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_xxx","type":"message","role":"assistant","content":null,"model":"claude-sonnet-4-20250514","stop_reason":null,"stop_sequence":null}}
+
+`;
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).toContain('"content":[]');
+    // stop_reason:null and stop_sequence:null should NOT be replaced (not in our regex)
+    expect(result).toContain('"stop_reason":null');
+  });
 });

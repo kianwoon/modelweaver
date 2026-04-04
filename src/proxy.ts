@@ -99,6 +99,31 @@ const REPLACEMENT_REGEX_MODEL = new RegExp(MODEL_KEY_REGEX.source, "g");
 const REPLACEMENT_REGEX_MAX_TOKENS = new RegExp(MAX_TOKENS_REGEX.source, "g");
 const REPLACEMENT_REGEX_BOTH = new RegExp(MODEL_KEY_REGEX.source + "|" + MAX_TOKENS_REGEX.source, "g");
 
+/**
+ * Sanitize an SSE data payload to prevent "null is not an object (evaluating 'X.content')"
+ * crashes in the Anthropic SDK. Upstream providers (GLM, MiniMax, etc.) may return
+ * null values for content, message, or delta fields that the SDK expects to be objects.
+ *
+ * Operates on a single SSE event's `data:` JSON payload — replaces:
+ *   "content":null  → "content":[]
+ *   "message":null  → "message":{}
+ *   "delta":null    → "delta":{}
+ *
+ * Returns the sanitized string, or the original if no patterns matched (fast path).
+ */
+export function sanitizeSSEChunk(chunk: string): string {
+  // Fast path: skip if no null patterns present.
+  // Check for both ":null" and ": null" since JSON may have whitespace after the colon.
+  if (!chunk.includes("null")) return chunk;
+
+  // Replace known null patterns that crash the Anthropic SDK.
+  // Use targeted regex to avoid corrupting unrelated JSON values.
+  return chunk
+    .replace(/"content"\s*:\s*null(?=[\s,}\]])/g, '"content":[]')
+    .replace(/"message"\s*:\s*null(?=[\s,}\]])/g, '"message":{}')
+    .replace(/"delta"\s*:\s*null(?=[\s,}\]])/g, '"delta":{}');
+}
+
 // --- Pre-built error response helpers ---
 
 const ERR_HEADERS = Object.freeze({ "content-type": "application/json" });
@@ -1025,23 +1050,43 @@ export async function forwardRequest(
           );
         }
 
+        // Rolling tail buffer for cross-chunk "event: error" detection.
+        // The string "event: error" can be split across TCP chunks (e.g. "event:" in one,
+        // " error" in the next). We keep the last N bytes to detect this pattern.
+        const EVENT_ERROR_LEN = "event: error".length; // 12
+        let tailBuffer = "";
+
         passThrough.on("data", (chunk: Buffer) => {
           // Guard: don't enqueue data if stream is already in a terminal state
           // (this is a pure read guard, no transition — safe as-is)
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
+
+          const text = chunk.toString("utf-8");
+
           // Filter: upstream providers may send `event: error` SSE events that the
           // Anthropic SDK doesn't recognize and crashes on ("null is not an object
-          // evaluating Y8.content"). When detected, end the stream cleanly — the SDK
-          // will detect the incomplete stream and throw a retryable streaming error.
-          if (chunk.toString("utf-8").includes("event: error")) {
+          // evaluating Y8.content"). Check current chunk AND cross-chunk boundary.
+          const combined = tailBuffer + text;
+          if (combined.includes("event: error")) {
             if (passThrough) (passThrough as any)._intentionalClose = true;
             passThrough?.end();
             return;
           }
+          // Update rolling tail for next chunk's cross-boundary check
+          tailBuffer = combined.length > EVENT_ERROR_LEN
+            ? combined.slice(-EVENT_ERROR_LEN)
+            : combined;
+
+          // Sanitize null objects that crash the Anthropic SDK.
+          const sanitized = sanitizeSSEChunk(text);
+          const outChunk = sanitized === text
+            ? new Uint8Array(chunk)      // no changes — use original buffer (zero-alloc fast path)
+            : textEncoder.encode(sanitized);
+
           if (sseBuffer) {
-            sseBuffer.write(new Uint8Array(chunk));
+            sseBuffer.write(outChunk);
           } else {
-            try { controller.enqueue(new Uint8Array(chunk)); } catch { /* already closed */ }
+            try { controller.enqueue(outChunk); } catch { /* already closed */ }
           }
         });
         passThrough.on("end", () => {
