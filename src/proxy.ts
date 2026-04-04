@@ -1,5 +1,5 @@
 // src/proxy.ts
-import type { HedgingConfig, ProviderConfig, RequestContext, RoutingEntry, StreamState } from "./types.js";
+import type { HedgingConfig, ProviderConfig, RequestContext, RoutingEntry } from "./types.js";
 import { transitionStreamState } from "./types.js";
 import { request as undiciRequest } from "undici";
 import { PassThrough } from "node:stream";
@@ -139,6 +139,13 @@ function makeErrorResponse(status: number, type: string, message: string, tagCon
   };
   if (tagConnError) headers[CONN_ERROR_HEADER] = CONN_ERROR_VALUE;
   return new Response(body, { status, headers });
+}
+
+/** Strip transfer-encoding from a Headers object (used when converting streaming body to static). */
+function stripTransferEncoding(headers: Headers): Headers {
+  const h = new Headers(headers);
+  h.delete("transfer-encoding");
+  return h;
 }
 
 function unknownProviderErr(providerName: string): Response {
@@ -634,6 +641,11 @@ export async function forwardRequest(
       reject(new Error(`TTFB timeout after ${ttfbTimeout}ms`));
     }, ttfbTimeout);
   });
+  // Suppress unhandled rejection if undiciRequest wins the race before the TTFB timer fires.
+  // When undiciRequest resolves first, Promise.race discards ttfbPromise — but if the
+  // timer fires in the tiny window between race resolution and clearTimeout, the reject()
+  // would create an unhandled promise rejection. This .catch() absorbs it.
+  ttfbPromise.catch(() => {});
 
   // Listen for external abort (from race cancellation) to abort this request
   let removeAbortListener: (() => void) | undefined;
@@ -683,11 +695,21 @@ export async function forwardRequest(
     };
   }
 
+  // Key by actualModel (the model the upstream provider uses) for true per-model isolation.
+  // Hoisted from try block so the finally clause can access it for sessionPool.release().
+  const poolModel = ctx.actualModel ?? ctx.model;
+  // Hoisted so both start()/cancel() AND the finally clause can access it.
+  // start() and cancel() are sibling functions in the ReadableStream object literal
+  // and don't share inner scope. finally needs it to guard against double-release.
+  let controllerClosed = false;
+  // Track whether the ReadableStream wrapper was created. If yes, safeClose/cancel()
+  // owns the release. If no (4xx/5xx, non-standard body, catch), finally owns it.
+  // Without this, finally releases on the normal streaming path → count drops to 0
+  // while the stream is still being consumed → sweep() could close the agent mid-stream.
+  let streamCreated = false;
+
   try {
     // Use session-scoped agent when available (per-session, per-model connection isolation),
-    // Key by actualModel (the model the upstream provider uses) for true per-model isolation.
-    // Fall back to ctx.model when no routing override exists.
-    const poolModel = ctx.actualModel ?? ctx.model;
     const dispatcher = sessionPool?.get(ctx.sessionId, poolModel) ?? provider._agent;
     const undiciResponse = await Promise.race([
       undiciRequest(url, {
@@ -706,6 +728,10 @@ export async function forwardRequest(
     // Track upstream body for cleanup on error paths
     upstreamBody = undiciResponse.body;
 
+    // Flag: if upstream errors before passThrough is created (lines 788+),
+    // we need to inject the SSE error payload after passThrough exists.
+    let earlyUpstreamError: Error | undefined;
+
     // Guard against uncaught error events when the pipe is torn down
     // after passThrough.destroy() fires before upstreamBody.destroy().
     // When _intentionalClose is set (hedge cancel or stall abort), swallow
@@ -718,41 +744,60 @@ export async function forwardRequest(
       // When the upstream provider closes the socket mid-stream (e.g. GLM dropping
       // connection), Node.js pipe does NOT forward the error to passThrough — it
       // just breaks the pipe silently.  The passThrough stream hangs with no events.
-      // Detect retriable socket/network errors and write an SSE error payload so
-      // the client receives a proper retriable error instead of a raw socket failure.
+      // ALL upstream body errors (socket, HTTP parse, timeout, etc.) leave passThrough
+      // hanging. Always write an SSE error payload so the client receives a proper
+      // retriable error instead of a raw socket failure.
       const code = (err as any).code;
-      if (code === 'ECONNRESET' || code === 'ECONNREFUSED' ||
-          code === 'EPIPE' || code === 'ETIMEDOUT' ||
-          code === 'UND_ERR_SOCKET' ||
-          (err.message && /socket|closed unexpectedly/i.test(err.message))) {
-        if (passThrough && !passThrough.destroyed) {
-          const errMsg = `Provider connection lost: ${err.message}`;
-          const ssePayload = `event: error\ndata: ${JSON.stringify({
-            type: "error",
-            error: { type: "api_error", message: errMsg },
-          })}\n\n`;
+      const isSocketError = code === 'ECONNRESET' || code === 'ECONNREFUSED' ||
+          code === 'EPIPE' || code === 'ETIMEDOUT' || code === 'ECONNABORTED' ||
+          code === 'UND_ERR_SOCKET' || code === 'UND_ERR_SOCKET_CLOSED' ||
+          code === 'UND_ERR_CONNECT_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT' ||
+          code === 'UND_ERR_HEADERS_TIMEOUT' ||
+          code?.startsWith('HPE_') ||
+          (err.message && /socket closed unexpectedly/i.test(err.message));
+      const errMsg = isSocketError
+        ? `Provider connection lost: ${err.message}`
+        : `Provider error: ${err.message}`;
 
-          // Mark upstream as intentionally closed to suppress undici warnings
-          (upstreamBody as any)._intentionalClose = true;
-          // Unpipe upstream body FIRST so it can't inject data after SSE error write
-          try { undiciResponse.body.unpipe(passThrough) } catch { /* not piped */ }
-          // Mark passThrough as intentional close so safeError delegates to safeClose
-          (passThrough as any)._intentionalClose = true;
-          // Write SSE error payload, then destroy
-          passThrough.write(ssePayload);
-          passThrough.destroy();
+      if (passThrough && !passThrough.destroyed) {
+        // Mark upstream as intentionally closed to suppress undici warnings
+        (upstreamBody as any)._intentionalClose = true;
+        // Unpipe upstream body FIRST so it can't inject data after error
+        try { undiciResponse.body.unpipe(passThrough) } catch { /* not piped */ }
+        // Mark passThrough as intentional close so safeError delegates to safeClose
+        (passThrough as any)._intentionalClose = true;
+        // End passThrough WITHOUT data — the passThrough error event will trigger
+        // safeError in the ReadableStream wrapper, which closes the controller cleanly.
+        // Do NOT write SSE "event: error" — the Anthropic SDK doesn't handle that
+        // event type and crashes with "null is not an object (evaluating Y8.content)".
+        passThrough.end();
 
-          // Update stream state
-          ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
-          broadcastStreamEvent({
-            requestId: ctx.requestId,
-            model: String(ctx.actualModel ?? entry.model ?? ""),
-            tier: "",
-            state: ctx._streamState!,
-            message: errMsg,
-            timestamp: Date.now(),
-          });
-        }
+        // Wait for passThrough to finish before destroying upstream body.
+        // Destroying immediately can close the HTTP/2 stream before the stream
+        // closure propagates, causing "socket closed unexpectedly" on the client.
+        passThrough.once("finish", () => {
+          if (upstreamBody && !upstreamBody.destroyed) {
+            try { (upstreamBody.destroy(err) as any).catch?.(() => {}); } catch { /* already done */ }
+          }
+        });
+
+        // Update stream state
+        ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
+        broadcastStreamEvent({
+          requestId: ctx.requestId,
+          model: String(ctx.actualModel ?? entry.model ?? ""),
+          tier: "",
+          state: ctx._streamState!,
+          message: errMsg,
+          timestamp: Date.now(),
+        });
+      } else if (!passThrough) {
+        // Upstream errored before passThrough was created (between TTFB and
+        // PassThrough instantiation). Stash the error so we can inject the
+        // SSE payload after passThrough is created and piped.
+        earlyUpstreamError = err;
+        (upstreamBody as any)._intentionalClose = true;
+        console.warn(`[proxy] Early upstream error on "${provider.name}" (before passThrough): ${err.message}`);
       }
     });
 
@@ -761,10 +806,18 @@ export async function forwardRequest(
     if (undiciResponse.statusCode >= 400) {
       clearTimeout(timeout);
       const errBody = await undiciResponse.body.text();
+      // Explicitly destroy the upstream body — prevents undici from holding the
+      // HTTP/2 connection open until GC collects the Readable.
+      try { (undiciResponse.body as any).destroy(); } catch { /* already done */ }
+      // Filter out transfer-encoding — we consumed the body to a static string,
+      // so chunked encoding no longer applies. Forwarding it would violate
+      // HTTP framing and cause "socket closed unexpectedly" on the client.
+      const errHeaders = new Headers(undiciResponse.headers as unknown as HeadersInit);
+      errHeaders.delete("transfer-encoding");
       return new Response(errBody, {
         status: undiciResponse.statusCode,
         statusText: undiciResponse.statusText,
-        headers: undiciResponse.headers as unknown as HeadersInit,
+        headers: errHeaders,
       });
     }
 
@@ -774,9 +827,20 @@ export async function forwardRequest(
       const fallback = undiciResponse.body
         ? new ReadableStream({ start(controller) { controller.enqueue(textEncoder.encode(String(undiciResponse.body))); controller.close(); } })
         : new ReadableStream({ start(controller) { controller.close(); } });
+      // Explicitly destroy the upstream body to prevent HTTP/2 connection leaks.
+      if (undiciResponse.body) {
+        try { (undiciResponse.body as any).destroy(); } catch { /* already done */ }
+      }
+      // Strip transfer-encoding AND content-length — we've re-wrapped the body
+      // in a new ReadableStream, so upstream framing no longer applies.
+      // Keeping content-length could cause client-side framing errors if the
+      // new body size differs from the original upstream content-length.
+      const fallbackHeaders = new Headers(undiciResponse.headers as unknown as HeadersInit);
+      fallbackHeaders.delete("transfer-encoding");
+      fallbackHeaders.delete("content-length");
       return new Response(fallback, {
         status: undiciResponse.statusCode,
-        headers: undiciResponse.headers as unknown as HeadersInit,
+        headers: fallbackHeaders,
       });
     }
 
@@ -787,13 +851,43 @@ export async function forwardRequest(
     const stallTimeout = provider.stallTimeout ?? 15000;
     passThrough = new PassThrough();
 
+    // If upstream errored before passThrough was created (earlyUpstreamError),
+    // end the passThrough now and abort the pipe setup.
+    // Do NOT write SSE "event: error" — the Anthropic SDK doesn't handle that
+    // event type and crashes with "null is not an object (evaluating Y8.content)".
+    if (earlyUpstreamError) {
+      const errMsg = `Provider connection lost: ${earlyUpstreamError.message}`;
+      (passThrough as any)._intentionalClose = true;
+      (upstreamBody as any)._intentionalClose = true;
+      passThrough.end();
+      // Destroy upstream body after passThrough finishes — without this, the
+      // undici response body leaks and could cause "socket closed unexpectedly"
+      // when undici later tries to read from a half-closed HTTP/2 stream.
+      passThrough.once("finish", () => {
+        if (upstreamBody && !upstreamBody.destroyed) {
+          try { (upstreamBody.destroy(earlyUpstreamError) as any).catch?.(() => {}); } catch { /* already done */ }
+        }
+      });
+      ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
+      broadcastStreamEvent({
+        requestId: ctx.requestId,
+        model: String(ctx.actualModel ?? entry.model ?? ""),
+        tier: "",
+        state: ctx._streamState!,
+        message: errMsg,
+        timestamp: Date.now(),
+      });
+    }
+
     const stallMsg = `Body stalled: no data after ${stallTimeout}ms`;
     let lastDataTime = Date.now();
 
     const handleStall = () => {
-      // Guard: bail if already fired or stream is in a terminal state
+      // Guard: bail if already fired, stream is in a terminal state, or
+      // the upstream error handler already closed this stream.
       if ((ctx as any)._stallFired) return;
-      if (ctx._streamState === "error" || ctx._streamState === "complete") return; // fast-path for _stallFired
+      if (ctx._streamState === "error" || ctx._streamState === "complete") return;
+      if ((passThrough as any)?._intentionalClose) return;
       (ctx as any)._stallFired = true;
       if (probeId !== undefined) {
         provider._circuitBreaker?.recordProbeTimeout(probeId);
@@ -803,39 +897,33 @@ export async function forwardRequest(
       _metricsStore?.recordConnectionError(provider.name, "stalls");
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
 
-      // Inject an Anthropic-compatible SSE error event so Claude Code's SDK
-      // parses it as a retriable error and fires again automatically.
-      // Format: "event: error\ndata: {"type":"error","error":{"type":"api_error","message":"..."}}\n\n"
-      const sseError = JSON.stringify({
-        type: "error",
-        error: {
-          type: "api_error",
-          message: stallMsg,
-        },
-      });
-      const ssePayload = `event: error\ndata: ${sseError}\n\n`;
-
       // Mark upstream as intentionally closed to prevent undici from
       // propagating "socket closed unexpectedly" during stall abort
       if (upstreamBody && !upstreamBody.destroyed) {
         (upstreamBody as any)._intentionalClose = true;
       }
 
-      // Unpipe upstream body FIRST so it can't inject data after SSE error write.
+      // Unpipe upstream body FIRST so it can't inject data.
       try { undiciResponse.body.unpipe(passThrough!); } catch { /* not piped */ }
       // Mark passThrough as intentional close so safeError delegates to safeClose
       // instead of propagating the destroy error to the ReadableStream.
       (passThrough! as any)._intentionalClose = true;
-      // Use .end() (not .write() + .destroy()) to flush the SSE error payload
-      // before closing. destroy() can fire "close" before the write is pushed
-      // to the ReadableStream, causing result.text() to hang indefinitely
-      // (especially on Node 22).
-      passThrough!.end(ssePayload);
+      // End WITHOUT data — the passThrough error event will trigger safeError
+      // in the ReadableStream wrapper, which closes the controller cleanly.
+      // Do NOT write SSE "event: error" — the Anthropic SDK doesn't handle that
+      // event type and crashes with "null is not an object (evaluating Y8.content)".
+      passThrough!.end();
 
-      // Destroy upstream — after passThrough has flushed the SSE error.
-      try { (upstreamBody?.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
+      // Wait for passThrough to finish before destroying upstream body.
+      // Destroying immediately can close the HTTP/2 stream before the stream
+      // closure propagates, causing "socket closed unexpectedly" on the client.
+      passThrough!.once("finish", () => {
+        if (upstreamBody && !upstreamBody.destroyed) {
+          try { (upstreamBody.destroy(new Error(stallMsg)) as any).catch?.(() => {}); } catch { /* already consumed */ }
+        }
+      });
 
-      // Now update stream state — after SSE payload has been written to passThrough.
+      // Now update stream state.
       ctx._streamState = transitionStreamState(ctx, "error", ctx.requestId);
       broadcastStreamEvent({
         requestId: ctx.requestId,
@@ -872,53 +960,53 @@ export async function forwardRequest(
 
     passThrough.on("error", () => {
       if (stallTimerRef) { clearTimeout(stallTimerRef); stallTimerRef = undefined; }
+      // Mark intentional close BEFORE destroy so safeError() in the
+      // ReadableStream wrapper suppresses the raw error instead of
+      // propagating "socket closed unexpectedly" to the client.
+      (passThrough as any)._intentionalClose = true;
       try { passThrough!.destroy(); } catch { /* already destroyed */ }
     });
 
-    // Pipe undici body → PassThrough. Data flows through without mode conflicts.
-    undiciResponse.body.pipe(passThrough);
+    // If upstream errored before passThrough, the passThrough already has the SSE
+    // error payload written — skip the pipe setup to avoid redundant data flow.
+    if (!earlyUpstreamError) {
+      undiciResponse.body.pipe(passThrough);
+    }
 
     // Wrap in a ReadableStream to catch undici's internal double-close bug.
     // When handleStall() destroys passThrough, undici's async GC can fire a
     // second close on the underlying controller, throwing ERR_INVALID_STATE.
     // The guarded controller.* calls below absorb that safely.
+    // controllerClosed is declared in the outer forwardRequest scope so
+    // start(), cancel(), AND the finally clause can all access it.
+    streamCreated = true;
     const wrappedStream = new ReadableStream({
       start(controller) {
         if (!passThrough) { controller.close(); return; }
         // Guard against double controller.close() race between 'end' event
         // and cancel handler (undici ERR_INVALID_STATE).
-        let controllerClosed = false;
         const safeClose = () => {
           if (controllerClosed) return;
           controllerClosed = true;
+          // Decrement in-flight count so the stale refresh knows this stream is done.
+          // This is safe to call multiple times since release() is idempotent.
+          if (sessionPool && ctx.sessionId) {
+            sessionPool.release(ctx.sessionId, ctx.actualModel ?? ctx.model);
+          }
           try { controller.close(); } catch { /* already closed — undici bug */ }
         };
-        const safeError = (err: Error) => {
+        const safeError = (_err: Error) => {
           if (controllerClosed) return;
           // When handleStall() intentionally destroys passThrough, don't propagate
-          // the error — the SSE payload was already written and "close" will
-          // safely complete the ReadableStream via safeClose.
+          // the error — safeClose() will cleanly end the stream.
           if ((passThrough as any)._intentionalClose) return;
           controllerClosed = true;
-          // Upstream socket/network errors (e.g. provider closed connection, stale
-          // pooled connection, HTTP/2 GOAWAY).  Write an SSE error payload so the
-          // client sees a retriable error instead of a hard stream failure.
-          const code = (err as any).code;
-          if (code === 'ECONNRESET' || code === 'ECONNREFUSED' ||
-              code === 'EPIPE' || code === 'ETIMEDOUT' ||
-              code === 'UND_ERR_SOCKET' ||
-              (err.message && /socket|closed unexpectedly/i.test(err.message))) {
-            const sseError = JSON.stringify({
-              type: "error",
-              error: { type: "api_error", message: `Provider connection lost: ${err.message}` },
-            });
-            try {
-              controller.enqueue(textEncoder.encode(`event: error\ndata: ${sseError}\n\n`));
-              controller.close();
-            } catch { /* already closed */ }
-          } else {
-            try { controller.error(err); } catch { /* already closed */ }
-          }
+          // Just close the ReadableStream cleanly. Do NOT write an SSE error event
+          // ("event: error") — the Anthropic SDK doesn't handle that event type
+          // and crashes with "null is not an object (evaluating Y8.content)".
+          // Closing the stream without message_stop causes the SDK to detect an
+          // incomplete stream and throw a retryable streaming error instead.
+          try { controller.close(); } catch { /* already closed */ }
         };
         // Check if streaming buffer is enabled via server config
         const serverConfig = (provider as any)._serverConfig;
@@ -941,6 +1029,15 @@ export async function forwardRequest(
           // Guard: don't enqueue data if stream is already in a terminal state
           // (this is a pure read guard, no transition — safe as-is)
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
+          // Filter: upstream providers may send `event: error` SSE events that the
+          // Anthropic SDK doesn't recognize and crashes on ("null is not an object
+          // evaluating Y8.content"). When detected, end the stream cleanly — the SDK
+          // will detect the incomplete stream and throw a retryable streaming error.
+          if (chunk.toString("utf-8").includes("event: error")) {
+            if (passThrough) (passThrough as any)._intentionalClose = true;
+            passThrough?.end();
+            return;
+          }
           if (sseBuffer) {
             sseBuffer.write(new Uint8Array(chunk));
           } else {
@@ -951,9 +1048,11 @@ export async function forwardRequest(
           if (sseBuffer) sseBuffer.end();
           safeClose();
         });
-        passThrough.on("error", () => {
+        passThrough.on("error", (err: Error) => {
           if (sseBuffer) sseBuffer.end();
-          safeError(new Error("PassThrough error"));
+          // Wrap in safeError — if _intentionalClose is set (stall, hedge cancel,
+          // upstream error), safeError returns silently. Otherwise write SSE error.
+          safeError(err);
         });
         // Listen for "close" which fires on both end() and destroy(), ensuring
         // the ReadableStream completes even if "end" doesn't fire (e.g. after
@@ -961,7 +1060,21 @@ export async function forwardRequest(
         passThrough.on("close", safeClose);
       },
       cancel() {
-        if (passThrough) { try { passThrough.destroy(); } catch { /* already done */ } }
+        // Mark both streams as intentionally closed so upstream error handler
+        // and safeError() suppress the raw error instead of propagating it.
+        if (upstreamBody && !upstreamBody.destroyed) {
+          (upstreamBody as any)._intentionalClose = true;
+        }
+        if (passThrough) {
+          (passThrough as any)._intentionalClose = true;
+          try { passThrough.destroy(); } catch { /* already done */ }
+        }
+        // Release the session agent so the stale refresh knows this stream is done.
+        // Guard against double-release: safeClose() (from passThrough "close" event)
+        // may have already released if cancel() fires after the stream ended.
+        if (sessionPool && ctx.sessionId && !controllerClosed) {
+          sessionPool.release(ctx.sessionId, ctx.actualModel ?? ctx.model);
+        }
       },
     });
 
@@ -976,6 +1089,15 @@ export async function forwardRequest(
     clearTimeout(timeout);
     if (ttfbTimer) clearTimeout(ttfbTimer);
     if (stallTimerRef) clearTimeout(stallTimerRef);
+
+    // Clean up upstream body if it was assigned before the error.
+    // If undiciRequest resolved (setting upstreamBody at line ~724) but the TTFB
+    // promise rejection won Promise.race, the code enters catch with upstreamBody
+    // set to the actual response body. Without explicit destroy, undici holds the
+    // HTTP/2 connection open until GC collects the Readable.
+    if (upstreamBody && !upstreamBody.destroyed) {
+      try { (upstreamBody as any).destroy(); } catch { /* already done */ }
+    }
 
     // Network errors / timeouts — return a synthetic 502
     // If TTFB timer was still pending when we hit an AbortError, it means the
@@ -1030,6 +1152,14 @@ export async function forwardRequest(
     return response;
   } finally {
     removeAbortListener?.();
+    // Release session pool in-flight count ONLY for early-return paths where
+    // safeClose/cancel() will NOT be called (4xx/5xx, non-standard body, catch).
+    // On the normal streaming path, streamCreated=true and safeClose/cancel() owns
+    // the release — finally does NOT release there (would cause count=0 while stream
+    // is still active → sweep() could close the agent mid-stream).
+    if (sessionPool && ctx.sessionId && !streamCreated) {
+      sessionPool.release(ctx.sessionId, poolModel);
+    }
   }
 }
 
@@ -1424,7 +1554,8 @@ export async function forwardWithFallback(
                 response: new Response(errBody, {
                   status: response.status,
                   statusText: response.statusText,
-                  headers: response.headers,
+                  // Filter transfer-encoding — body was consumed to static string
+                  headers: stripTransferEncoding(response.headers),
                 }),
                 actualModel: entry.model,
                 actualProvider: entry.provider,
@@ -1604,7 +1735,8 @@ export async function forwardWithFallback(
               response: new Response(errBody, {
                 status: winner.response.status,
                 statusText: winner.response.statusText,
-                headers: winner.response.headers,
+                // Filter transfer-encoding — body was consumed to static string
+                headers: stripTransferEncoding(winner.response.headers),
               }),
               actualModel: winnerEntry?.model,
               actualProvider: winnerEntry?.provider,

@@ -201,6 +201,15 @@ export class MetricsStore {
       buf.push({ status: metrics.status, timestamp: metrics.timestamp });
       if (buf.length > 100) buf.shift();
       this.pruneMap(this._providerErrors, (e) => e.total, this._providerErrorsMin);
+      // Also clean up the error buffer for the evicted provider to prevent orphaned entries
+      const evictedKey = this._providerErrorsMin.current;
+      // pruneMap already deleted the entry from _providerErrors; if the key was the min,
+      // the buffer entry is now orphaned — delete it.
+      // (pruneMap sets _providerErrorsMin.current = null after eviction, so if it's
+      // still null after the call, the eviction happened and we need to check.)
+      if (evictedKey && !this._providerErrors.has(evictedKey)) {
+        this._providerErrorsBuffer.delete(evictedKey);
+      }
     }
 
     // Increment session counter

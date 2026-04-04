@@ -395,7 +395,7 @@ describe("forwardRequest stall detection", () => {
     await mock.close();
   });
 
-  it("emits SSE error event when body stalls after headers received", async () => {
+  it("closes stream cleanly when body stalls after headers received", async () => {
     const provider: ProviderConfig = {
       name: "mock",
       baseUrl: mock.url,
@@ -419,12 +419,13 @@ describe("forwardRequest stall detection", () => {
       headers: { "content-type": "application/json" },
       body,
     }));
-    // Stall detection returns a 200 with an SSE error event injected into the stream
+    // Stall detection closes the stream cleanly — does NOT inject SSE error events
+    // because the Anthropic SDK crashes on unrecognized event types (e.g. "event: error").
+    // The client SDK detects the incomplete stream and throws a retryable error.
     expect(result.status).toBe(200);
 
     const text = await result.text();
-    expect(text).toContain("event: error");
-    expect(text).toContain("stalled");
-    expect(text).toContain("no data after");
+    // Stream should be empty (or contain only partial data before stall) — no SSE error payload
+    expect(text).not.toContain("event: error");
   }, 20_000);
 });

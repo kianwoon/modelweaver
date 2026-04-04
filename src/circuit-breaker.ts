@@ -180,6 +180,7 @@ export class CircuitBreaker {
       this.openedAt = now;
       this._cooldownMs = this.escalateCooldown(isRateLimit);
       this._probeGranted = false;
+      this.halfOpenProbeId = null;
       console.warn(`[circuit-breaker] back to OPEN — probe failed (${isRateLimit ? 'rate-limited' : 'server error'}, cooldown=${this._cooldownMs}ms, flap=${this._flapCount})`);
       return;
     }

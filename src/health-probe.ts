@@ -29,6 +29,7 @@ export class ActiveProbeManager {
         console.error('[health-probe] tick failed:', err);
       });
     }, intervalMs);
+    if (this.intervalId.unref) this.intervalId.unref();
   }
 
   stop(): void {
@@ -116,7 +117,10 @@ export class ActiveProbeManager {
       // cares about server availability, not endpoint correctness.
       // Only 5xx/429 indicates the provider is actually struggling.
       const effectiveStatus = (status >= 500 || status === 429) ? status : 200;
-      entry.cb.recordResult(effectiveStatus, probeId);
+      // For half-open providers (probeId=undefined), a real request has the probe slot
+      // in flight. Do NOT call recordResult — it would clear halfOpenProbeId and
+      // cause the real request's result to be silently dropped (Finding #1).
+      if (probeId !== undefined) entry.cb.recordResult(effectiveStatus, probeId);
       console.warn(`[health-probe] half-open probe result for ${entry.name}: ${status}${effectiveStatus !== status ? ` (treated as ${effectiveStatus})` : ''}`);
     } catch (err: any) {
       // Non-fetch errors — log and treat as probe failure

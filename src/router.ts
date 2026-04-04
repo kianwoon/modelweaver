@@ -143,9 +143,11 @@ export function selectByWeight(
     e => !openSet.has(e.provider)
   );
 
-  // If all providers are circuit-opened, return original chain
+  // If all providers are circuit-opened, return empty — forwardWithFallback
+  // handles empty chains with a 502 immediately, rather than iterating through
+  // circuit-opened providers and wasting latency on guaranteed-failed attempts.
   if (available.length === 0) {
-    return entries;
+    return [];
   }
 
   // Filter out zero/negative weight entries to avoid degenerate weighted selection
@@ -267,7 +269,7 @@ export function resolveRequest(
   // even if health data aged out (fewer than 5 events → score returns to 1).
   if (!globalBackoff && globalBackoffEnabled && lastGlobalBackoffAt > 0) {
     const elapsed = Date.now() - lastGlobalBackoffAt;
-    if (elapsed < GLOBAL_BACKOFF_MIN_DURATION_MS) {
+    if (elapsed < 0 || elapsed < GLOBAL_BACKOFF_MIN_DURATION_MS) {
       globalBackoff = true;
     }
   }

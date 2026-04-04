@@ -368,14 +368,15 @@ describe("selectByWeight", () => {
     expect(counts.b).toBe(1000);
   });
 
-  it("falls back to original chain when all providers circuit-opened", () => {
+  it("returns empty chain when all providers circuit-opened", () => {
     const entries: RoutingEntry[] = [
       { provider: "a", weight: 50 },
       { provider: "b", weight: 50 },
     ];
     const result = selectByWeight(entries, ["a", "b"]);
-    expect(result[0].provider).toBe("a");
-    expect(result[1].provider).toBe("b");
+    // Empty chain → forwardWithFallback returns 502 immediately,
+    // avoiding wasted latency on guaranteed-failed circuit-opened providers
+    expect(result).toEqual([]);
   });
 
   it("returns original chain when no weights present", () => {

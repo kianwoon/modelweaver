@@ -308,23 +308,20 @@ export function broadcastStreamEvent(data: StreamEvent): void {
           const msgSize = Buffer.byteLength(msg, 'utf-8');
           totalQueuedBytes += msgSize;
           clientQueuedBytes.set(client, msgSize);
-          const sendOnDrain = () => {
+          let handled = false; // guard against drain+timer race
+          const flush = () => {
+            if (handled) return;
+            handled = true;
+            clearTimeout(timer);
             pendingDrains.delete(client);
             releaseClientQueuedBytes(client);
             if (client.readyState === client.OPEN) {
               for (const queuedMsg of queue) client.send(queuedMsg);
             }
           };
-          const timer = setTimeout(() => {
-            pendingDrains.delete(client);
-            releaseClientQueuedBytes(client);
-            client.removeListener('drain', sendOnDrain);
-            if (client.readyState === client.OPEN) {
-              for (const queuedMsg of queue) client.send(queuedMsg);
-            }
-          }, 5_000).unref();
+          const timer = setTimeout(flush, 5_000).unref();
           pendingDrains.set(client, { timer, queue });
-          client.once('drain', sendOnDrain);
+          client.once('drain', flush);
         }
         continue;
       }
@@ -380,13 +377,22 @@ export function broadcastProviderHealth(providerHealth: ProviderHealth): void {
 
 export function closeWebSocket(): void {
   if (!wssInstance) return;
-  // Clear all pending drain timers before terminating clients
-  for (const [, pending] of pendingDrains) {
-    clearTimeout(pending.timer);
+  // Flush any queued messages before terminating clients — without this,
+  // in-flight stream events (e.g. "complete") are silently dropped.
+  for (const client of wssInstance.clients) {
+    const pending = pendingDrains.get(client);
+    if (pending) {
+      try {
+        for (const msg of pending.queue) client.send(msg);
+      } catch { /* socket may already be closing */ }
+      clearTimeout(pending.timer);
+      pendingDrains.delete(client);
+    }
   }
   pendingDrains.clear();
   clientStreamThrottle.clear();
   clientQueuedBytes.clear();
+  totalQueuedBytes = 0; // reset global counter for fresh sessions
   for (const client of wssInstance.clients) {
     client.terminate();
   }

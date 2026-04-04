@@ -112,6 +112,9 @@ export class SSEBuffer {
   }
 
   end(): void {
+    // Clear timer FIRST — prevents a stale timer from firing after end()
+    // and enqueueing to an already-closed ReadableStream controller.
+    this.resetTimer();
     // Flush everything — no boundary check on stream end
     this.flushAll();
   }

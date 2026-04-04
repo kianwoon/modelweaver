@@ -85,7 +85,68 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
 }
 
 /**
- * Creates a TransformStream that forwards chunks unchanged while extracting
+ * Sanitize upstream provider responses that return null where Claude Code
+ * expects an object. Without this, Claude Code crashes with:
+ * "null is not an object (evaluating 'X.content')"
+ *
+ * Replaces:
+ *   "message":null        → message object with essential fields
+ *   "content_block":null  → content_block object with essential fields
+ *   "delta":null          → delta object with essential fields
+ *   "content":null        → empty array (safe for Anthropic content field)
+ */
+const NULL_SANITIZE_RE = /"(message|content_block|delta|content)"\s*:\s*null(?!["\w])/g;
+const NULL_REPLACEMENTS: Record<string, string> = {
+  message:        '"message":{"id":"","type":"message","role":"assistant","content":[]}',
+  content_block:  '"content_block":{"type":"text","text":""}',
+  delta:          '"delta":{"type":"text_delta","text":""}',
+  content:        '"content":[]',
+};
+function sanitizeNullObjects(text: string): string {
+  if (!text.includes(":null")) return text;
+  return text.replace(NULL_SANITIZE_RE, (_, key: string) => NULL_REPLACEMENTS[key] ?? _);
+}
+
+/**
+ * Lightweight TransformStream that only sanitizes null objects — used when
+ * there is no MetricsStore (i.e. no metrics collection needed).
+ * Buffers complete SSE events (delimited by \n\n) before sanitizing to avoid
+ * null patterns split across TCP chunk boundaries.
+ */
+function createSanitizeTransform(): TransformStream<Uint8Array, Uint8Array> {
+  const td = new TextDecoder();
+  const te = new TextEncoder();
+  let isSSE: boolean | null = null;
+  let forwardBuf = "";
+  return new TransformStream({
+    transform(chunk, controller) {
+      const decoded = td.decode(chunk, { stream: true });
+      if (isSSE === null) {
+        // Detect SSE from chunk content: event:, data:, or comment lines
+        isSSE = decoded.startsWith("event:") || decoded.startsWith("data:") || decoded.startsWith(":");
+      }
+      if (isSSE) {
+        forwardBuf += decoded;
+        let eventEnd: number;
+        while ((eventEnd = forwardBuf.indexOf("\n\n")) !== -1) {
+          const eventText = forwardBuf.slice(0, eventEnd);
+          forwardBuf = forwardBuf.slice(eventEnd + 2);
+          controller.enqueue(te.encode(sanitizeNullObjects(eventText) + "\n\n"));
+        }
+      } else {
+        controller.enqueue(te.encode(sanitizeNullObjects(decoded)));
+      }
+    },
+    flush(controller) {
+      if (forwardBuf) {
+        controller.enqueue(te.encode(sanitizeNullObjects(forwardBuf)));
+      }
+    },
+  });
+}
+
+/**
+ * Creates a TransformStream that sanitizes null objects AND extracts
  * token counts for metrics inline (no tee() or separate reader needed).
  * For SSE responses, extracts token counts from usage events incrementally.
  * For non-streaming JSON responses, uses a bounded sliding-window regex scan.
@@ -100,6 +161,7 @@ function createMetricsTransform(
   contentType: string,
 ): TransformStream<Uint8Array, Uint8Array> {
   const td = new TextDecoder();
+  const te = new TextEncoder();
 
   // --- SSE state ---
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
@@ -282,7 +344,7 @@ function createMetricsTransform(
     }
   };
 
-  const processChunk = (decoded: string, isFinal: boolean) => {
+  const processChunk = (decoded: string, isFinal: boolean, controller: TransformStreamDefaultController<Uint8Array>) => {
     if (isSSE === null) {
       // First chunk — detect format
       isSSE = contentType.includes("text/event-stream") || decoded.startsWith("event:");
@@ -297,6 +359,8 @@ function createMetricsTransform(
         if (line === "") {
           if (eventBuf) {
             drainEvents(eventBuf);
+            // Forward complete event with null sanitization applied
+            controller.enqueue(te.encode(sanitizeNullObjects(eventBuf) + "\n\n"));
             eventBuf = "";
           }
         } else {
@@ -304,7 +368,14 @@ function createMetricsTransform(
         }
       }
 
-      if (isFinal && eventBuf.trim()) drainEvents(eventBuf);
+      if (isFinal) {
+        if (eventBuf.trim()) {
+          drainEvents(eventBuf);
+          controller.enqueue(te.encode(sanitizeNullObjects(eventBuf)));
+        }
+        recordMetrics(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheCreation);
+        return;
+      }
 
       // Emit streaming progress (throttled ~4 Hz)
       const now = Date.now();
@@ -331,16 +402,15 @@ function createMetricsTransform(
           });
         });
       }
-
-      if (isFinal) {
-        recordMetrics(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheCreation);
-      }
     } else {
       windowBuf += decoded;
       if (windowBuf.length > WINDOW_SIZE) {
         windowBuf = windowBuf.slice(-WINDOW_SIZE);
       }
       scanWindow(windowBuf);
+
+      // Forward sanitized bytes (non-SSE path — metrics + forwarding in one pass)
+      controller.enqueue(te.encode(sanitizeNullObjects(decoded)));
 
       // Emit streaming progress (throttled ~4 Hz)
       const nowJson = Date.now();
@@ -376,11 +446,10 @@ function createMetricsTransform(
 
   return new TransformStream({
     transform(chunk, controller) {
-      controller.enqueue(chunk);
-      processChunk(td.decode(chunk, { stream: true }), false);
+      processChunk(td.decode(chunk, { stream: true }), false, controller);
     },
-    flush() {
-      processChunk("", true);
+    flush(controller) {
+      processChunk("", true, controller);
     },
   });
 }
@@ -636,7 +705,10 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, metricsStore, config, response.status, response.headers.get("content-type") || "");
       responseBody = response.body.pipeThrough(transform) as typeof responseBody;
     } else if (response.status >= 200 && response.status < 300 && !metricsStore) {
-      // No metricsStore — broadcast complete directly so the GUI progress bar finishes
+      // No metricsStore — sanitize stream and broadcast complete so the GUI progress bar finishes
+      if (response.body) {
+        responseBody = response.body.pipeThrough(createSanitizeTransform()) as typeof responseBody;
+      }
       const latencyMs = Date.now() - ctx.startTime;
       setImmediate(() => {
         ctx._streamState = transitionStreamState(ctx, "complete", ctx.requestId);
@@ -684,6 +756,21 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     // Add request ID to response (responses from fetch have immutable headers, so create new)
     const newHeaders = new Headers(response.headers);
     newHeaders.set("x-request-id", requestId);
+    // Force Transfer-Encoding: chunked to bypass @hono/node-server's buffering logic.
+    // The buffering phase (which reads up to 2 chunks before deciding to stream) causes
+    // "socket closed unexpectedly" when the upstream body is a slow/long SSE stream — if the
+    // initial read() rejects, the adapter sends an empty 200 with Content-Length: 0,
+    // which undici interprets as a truncated response and throws.
+    // Setting Transfer-Encoding: chunked forces streaming mode and skips buffering.
+    // IMPORTANT: only apply to streaming responses (ReadableStream body). Static error
+    // responses from makeErrorResponse() already set content-length; having BOTH
+    // content-length and Transfer-Encoding is invalid per RFC 7230 §3.3.3 and causes
+    // malformed responses that undici may reject with "socket closed unexpectedly".
+    if (responseBody instanceof ReadableStream) {
+      newHeaders.set("Transfer-Encoding", "chunked");
+      // Remove content-length if present — it's incompatible with Transfer-Encoding
+      newHeaders.delete("content-length");
+    }
     const finalResponse = new Response(responseBody, {
       status: response.status,
       statusText: response.statusText,

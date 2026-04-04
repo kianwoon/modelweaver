@@ -36,6 +36,8 @@ export class SessionAgentPool {
   private agents = new Map<string, Map<string, Agent>>();
   /** sessionId → modelName → last activity timestamp */
   private lastActivity = new Map<string, Map<string, number>>();
+  /** sessionId → modelName → in-flight request count (prevents stale close on active streams) */
+  private inFlight = new Map<string, Map<string, number>>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private readonly idleTtlMs: number;
 
@@ -62,13 +64,16 @@ export class SessionAgentPool {
     let agent = modelMap.get(modelName);
 
     // Connection pre-check: if the agent has been idle beyond the staleness
-    // threshold, its HTTP/2 connection may be half-closed by the upstream.
-    // Destroy and create fresh — TCP/TLS handshake happens lazily on next request.
+    // threshold AND has no in-flight requests, its HTTP/2 connection may be
+    // half-closed by the upstream. Destroy and create fresh.
+    // IMPORTANT: never close an agent with in-flight streams — that kills the
+    // HTTP/2 connection mid-stream, causing "socket closed unexpectedly" errors.
     if (agent) {
       const lastActive = this.lastActivity.get(sessionId)?.get(modelName);
-      if (lastActive && Date.now() - lastActive > STALE_AGENT_THRESHOLD_MS) {
+      const active = this.inFlight.get(sessionId)?.get(modelName) ?? 0;
+      if (lastActive && Date.now() - lastActive > STALE_AGENT_THRESHOLD_MS && active === 0) {
         const idleS = Math.round((Date.now() - lastActive) / 1000);
-        console.log(`[session-pool] refreshing stale agent ${sessionId.slice(0, 8)}…/${modelName} (idle ${idleS}s > ${STALE_AGENT_THRESHOLD_MS / 1000}s threshold)`);
+        console.log(`[session-pool] refreshing stale agent ${sessionId.slice(0, 8)}…/${modelName} (idle ${idleS}s > ${STALE_AGENT_THRESHOLD_MS / 1000}s threshold, no in-flight streams)`);
         agent.close().catch(() => {});
         modelMap.delete(modelName);
         agent = undefined;
@@ -86,7 +91,7 @@ export class SessionAgentPool {
       modelMap.set(modelName, agent);
     }
 
-    // Track activity
+    // Track activity and in-flight count
     let activityMap = this.lastActivity.get(sessionId);
     if (!activityMap) {
       activityMap = new Map();
@@ -94,7 +99,28 @@ export class SessionAgentPool {
     }
     activityMap.set(modelName, Date.now());
 
+    let flightMap = this.inFlight.get(sessionId);
+    if (!flightMap) {
+      flightMap = new Map();
+      this.inFlight.set(sessionId, flightMap);
+    }
+    flightMap.set(modelName, (flightMap.get(modelName) ?? 0) + 1);
+
     return agent;
+  }
+
+  /** Decrement in-flight count for a session+model (call when request completes) */
+  release(sessionId: string, modelName: string): void {
+    const flightMap = this.inFlight.get(sessionId);
+    if (flightMap) {
+      const count = (flightMap.get(modelName) ?? 1) - 1;
+      if (count <= 0) {
+        flightMap.delete(modelName);
+        if (flightMap.size === 0) this.inFlight.delete(sessionId);
+      } else {
+        flightMap.set(modelName, count);
+      }
+    }
   }
 
   /** Close and remove agents idle beyond SESSION_IDLE_TTL_MS */
@@ -111,6 +137,7 @@ export class SessionAgentPool {
           if (agent) agent.close().catch(() => {});
           this.agents.get(sessionId)?.delete(modelName);
           providerMap.delete(modelName);
+          this.inFlight.get(sessionId)?.delete(modelName);
         } else {
           allIdle = false;
         }
@@ -138,10 +165,12 @@ export class SessionAgentPool {
       this.agents.get(sessionId)?.delete(modelName);
       this.lastActivity.get(sessionId)?.delete(modelName);
     }
+    this.inFlight.get(sessionId)?.delete(modelName);
     // Clean up empty session entries
     if (this.agents.get(sessionId)?.size === 0) {
       this.agents.delete(sessionId);
       this.lastActivity.delete(sessionId);
+      this.inFlight.delete(sessionId);
     }
   }
 
@@ -155,6 +184,7 @@ export class SessionAgentPool {
     }
     this.agents.clear();
     this.lastActivity.clear();
+    this.inFlight.clear();
     await Promise.all(promises);
   }
 

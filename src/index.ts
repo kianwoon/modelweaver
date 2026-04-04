@@ -7,6 +7,8 @@ import type { LogLevel } from "./logger.js";
 import { MetricsStore } from "./metrics.js";
 import { latencyTracker, clearHedgeStats } from "./hedging.js";
 import { pruneProviderLatencySamples } from "./proxy.js";
+import { pruneHealthScores } from "./health-score.js";
+import { pruneWarmupStates } from "./pool.js";
 import { attachWebSocket, closeWebSocket } from "./ws.js";
 import { startMonitor } from "./monitor.js";
 
@@ -434,6 +436,8 @@ async function main() {
             await handle.setConfig(newConfig);
             latencyTracker.prune([...newConfig.providers.keys()]);
             pruneProviderLatencySamples([...newConfig.providers.keys()]);
+            pruneHealthScores([...newConfig.providers.keys()]);
+            pruneWarmupStates([...newConfig.providers.keys()]);
             clearHedgeStats();
           },
         })
