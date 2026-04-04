@@ -684,9 +684,11 @@ export async function forwardRequest(
   }
 
   try {
-    // Use session-scoped agent when available (per-session connection isolation),
-    // otherwise fall back to shared per-provider pool
-    const dispatcher = sessionPool?.get(ctx.sessionId, provider.name) ?? provider._agent;
+    // Use session-scoped agent when available (per-session, per-model connection isolation),
+    // Key by actualModel (the model the upstream provider uses) for true per-model isolation.
+    // Fall back to ctx.model when no routing override exists.
+    const poolModel = ctx.actualModel ?? ctx.model;
+    const dispatcher = sessionPool?.get(ctx.sessionId, poolModel) ?? provider._agent;
     const undiciResponse = await Promise.race([
       undiciRequest(url, {
         method: "POST",
@@ -1090,7 +1092,7 @@ async function forwardWithRetry(
       // to this provider. The session pool eviction gives the retry a fresh
       // session-scoped connection while leaving the shared pool intact.
       if (sessionPool && ctx.sessionId) {
-        sessionPool.evict(ctx.sessionId, provider.name);
+        sessionPool.evict(ctx.sessionId, ctx.actualModel ?? ctx.model);
       }
 
       const delay = CONNECTION_RETRY_BASE_MS * Math.pow(2, attempt);

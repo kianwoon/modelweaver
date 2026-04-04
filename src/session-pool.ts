@@ -3,13 +3,13 @@ import { Agent, type Dispatcher } from "undici";
 
 export interface SessionStats {
   id: string;
-  providerCount: number;
+  modelCount: number;
   lastActivity: string; // ISO 8601
   idleMs: number;
-  providers: string[];
+  models: string[];
 }
 
-const SESSION_AGENT_CONNECTIONS = 3; // Support parallel subagent streams per session
+const SESSION_AGENT_CONNECTIONS = 1; // One TCP connection per model — HTTP/2 multiplexing handles concurrent streams
 const SESSION_KEEPALIVE_MS = 30_000;
 const SESSION_KEEPALIVE_MAX_MS = 60_000;
 const DEFAULT_SESSION_IDLE_TTL_MS = 600_000; // 10 minutes idle → close
@@ -24,16 +24,17 @@ const SWEEP_INTERVAL_MS = 60_000; // sweep every 60s
 const STALE_AGENT_THRESHOLD_MS = 10_000;
 
 /**
- * Manages per-session per-provider undici Agents.
- * Each session gets its own dedicated HTTP/2 connection to each provider,
- * enabling TCP isolation between concurrent Claude Code sessions.
+ * Manages per-session per-model undici Agents.
+ * Each session gets its own dedicated HTTP/2 connection per model name,
+ * enabling TCP isolation between concurrent model streams (e.g. main agent
+ * on sonnet + subagents on haiku never contend for the same connection).
  *
  * Falls back to the shared provider agent when no session ID is present.
  */
 export class SessionAgentPool {
-  /** sessionId → providerName → Agent */
+  /** sessionId → modelName → Agent */
   private agents = new Map<string, Map<string, Agent>>();
-  /** sessionId → providerName → last activity timestamp */
+  /** sessionId → modelName → last activity timestamp */
   private lastActivity = new Map<string, Map<string, number>>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private readonly idleTtlMs: number;
@@ -46,30 +47,30 @@ export class SessionAgentPool {
   }
 
   /**
-   * Get or create a session-scoped agent for the given provider.
+   * Get or create a session-scoped agent for the given model.
    * Returns null if no sessionId (caller should use shared pool).
    */
-  get(sessionId: string | undefined, providerName: string): Dispatcher | null {
+  get(sessionId: string | undefined, modelName: string): Dispatcher | null {
     if (!sessionId) return null;
 
-    let providerMap = this.agents.get(sessionId);
-    if (!providerMap) {
-      providerMap = new Map();
-      this.agents.set(sessionId, providerMap);
+    let modelMap = this.agents.get(sessionId);
+    if (!modelMap) {
+      modelMap = new Map();
+      this.agents.set(sessionId, modelMap);
     }
 
-    let agent = providerMap.get(providerName);
+    let agent = modelMap.get(modelName);
 
     // Connection pre-check: if the agent has been idle beyond the staleness
     // threshold, its HTTP/2 connection may be half-closed by the upstream.
     // Destroy and create fresh — TCP/TLS handshake happens lazily on next request.
     if (agent) {
-      const lastActive = this.lastActivity.get(sessionId)?.get(providerName);
+      const lastActive = this.lastActivity.get(sessionId)?.get(modelName);
       if (lastActive && Date.now() - lastActive > STALE_AGENT_THRESHOLD_MS) {
         const idleS = Math.round((Date.now() - lastActive) / 1000);
-        console.log(`[session-pool] refreshing stale agent ${sessionId.slice(0, 8)}…/${providerName} (idle ${idleS}s > ${STALE_AGENT_THRESHOLD_MS / 1000}s threshold)`);
+        console.log(`[session-pool] refreshing stale agent ${sessionId.slice(0, 8)}…/${modelName} (idle ${idleS}s > ${STALE_AGENT_THRESHOLD_MS / 1000}s threshold)`);
         agent.close().catch(() => {});
-        providerMap.delete(providerName);
+        modelMap.delete(modelName);
         agent = undefined;
       }
     }
@@ -82,7 +83,7 @@ export class SessionAgentPool {
         allowH2: true,
         pingInterval: 10_000, // HTTP/2 PING every 10s — detect dead connections in background
       });
-      providerMap.set(providerName, agent);
+      modelMap.set(modelName, agent);
     }
 
     // Track activity
@@ -91,7 +92,7 @@ export class SessionAgentPool {
       activityMap = new Map();
       this.lastActivity.set(sessionId, activityMap);
     }
-    activityMap.set(providerName, Date.now());
+    activityMap.set(modelName, Date.now());
 
     return agent;
   }
@@ -103,13 +104,13 @@ export class SessionAgentPool {
 
     for (const [sessionId, providerMap] of this.lastActivity) {
       let allIdle = true;
-      for (const [providerName, lastActive] of providerMap) {
+      for (const [modelName, lastActive] of providerMap) {
         if (now - lastActive > this.idleTtlMs) {
           // Close the idle agent
-          const agent = this.agents.get(sessionId)?.get(providerName);
+          const agent = this.agents.get(sessionId)?.get(modelName);
           if (agent) agent.close().catch(() => {});
-          this.agents.get(sessionId)?.delete(providerName);
-          providerMap.delete(providerName);
+          this.agents.get(sessionId)?.delete(modelName);
+          providerMap.delete(modelName);
         } else {
           allIdle = false;
         }
@@ -129,13 +130,13 @@ export class SessionAgentPool {
     }
   }
 
-  /** Close and remove a specific session+provider agent (e.g., on connection error) */
-  evict(sessionId: string, providerName: string): void {
-    const agent = this.agents.get(sessionId)?.get(providerName);
+  /** Close and remove a specific session+model agent (e.g., on connection error) */
+  evict(sessionId: string, modelName: string): void {
+    const agent = this.agents.get(sessionId)?.get(modelName);
     if (agent) {
       agent.close().catch(() => {});
-      this.agents.get(sessionId)?.delete(providerName);
-      this.lastActivity.get(sessionId)?.delete(providerName);
+      this.agents.get(sessionId)?.delete(modelName);
+      this.lastActivity.get(sessionId)?.delete(modelName);
     }
     // Clean up empty session entries
     if (this.agents.get(sessionId)?.size === 0) {
@@ -166,10 +167,10 @@ export class SessionAgentPool {
       if (entries.length === 0) continue; // skip stale entries (sweep may have emptied the map)
       result.push({
         id: sessionId,
-        providerCount: entries.length,
+        modelCount: entries.length,
         lastActivity: new Date(Math.max(...entries.map(([, ts]) => ts))).toISOString(),
         idleMs: now - Math.max(...entries.map(([, ts]) => ts)),
-        providers: entries.map(([name]) => name),
+        models: entries.map(([name]) => name),
       });
     }
     return result;

@@ -390,6 +390,7 @@ export interface AppHandle {
   getConfig: () => AppConfig;
   setConfig: (config: AppConfig) => Promise<void>;
   closeSessionPool: () => Promise<void>;
+  getSessionPoolStats: () => import("./session-pool.js").SessionStats[];
   closeAgents: () => Promise<void>;
   getInFlightCount: () => number;
 }
@@ -852,6 +853,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     closeSessionPool: async () => {
       await sessionPool.closeAll();
     },
+    getSessionPoolStats: () => sessionPool.getStats(),
     closeAgents: async () => {
       const closePromises: Promise<void>[] = [];
       for (const provider of config.providers.values()) {

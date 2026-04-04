@@ -781,7 +781,6 @@ function handleProviderHealth(data) {
 
 function renderSessions(summary) {
   const sessions = summary?.sessionStats || [];
-  const providerCount = Object.keys(summary?.providerDistribution || {}).length || 0;
   const sessionKeys = new Set(sessions.map(s => s.sessionId));
 
   // Remove rows for sessionIds no longer present
@@ -839,9 +838,10 @@ function renderSessions(summary) {
       ? s.sessionId.slice(0, 8) + '\u2026'
       : s.sessionId;
     if (row._idEl.textContent !== shortId) row._idEl.textContent = shortId;
-    // Connection count badge
-    const connCount = providerCount > 0 ? providerCount + ' conns' : '\u2014';
-    if (row._connEl.textContent !== connCount) row._connEl.textContent = connCount;
+    // Connection count badge (show modelCount from pool, or "—" if unavailable)
+    const connCount = s.modelCount ?? 0;
+    const badgeText = connCount > 0 ? connCount + ' conn' + (connCount !== 1 ? 's' : '') : '\u2014';
+    if (row._connEl.textContent !== badgeText) row._connEl.textContent = badgeText;
     // Meta line: request count + last seen
     const reqCount = s.requestCount || 0;
     const ago = s.lastSeen ? Math.round((now - s.lastSeen) / 1000) : null;
@@ -849,7 +849,7 @@ function renderSessions(summary) {
       : ago !== null && ago < 3600 ? Math.round(ago / 60) + 'm ago'
       : ago !== null ? Math.round(ago / 3600) + 'h ago'
       : '\u2014';
-    const metaText = reqCount + ' requests \u00B7 Last seen: ' + agoText;
+    const metaText = reqCount + ' reqs \u00B7 ' + agoText;
     if (row._metaEl.textContent !== metaText) row._metaEl.textContent = metaText;
   }
 }

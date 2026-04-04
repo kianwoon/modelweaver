@@ -5,6 +5,7 @@ import type { MetricsStore } from "./metrics.js";
 import type { RequestMetrics, MetricsSummary, MetricsSummaryDelta, StreamEvent, ProviderHealth } from "./types.js";
 import type { ConfigFieldError } from "./config.js";
 import type { AppConfig } from "./types.js";
+import type { SessionStats } from "./session-pool.js";
 
 interface WsMessage {
   type: "request" | "summary" | "summary_delta" | "provider_health";
@@ -81,7 +82,7 @@ function computeSummaryDelta(prev: MetricsSummary, next: MetricsSummary): Metric
       for (let i = 0; i < nextSessions.length; i++) {
         const p = prevSessions[i];
         const n = nextSessions[i];
-        if (!p || !n || p.sessionId !== n.sessionId || p.requestCount !== n.requestCount || p.lastSeen !== n.lastSeen) {
+        if (!p || !n || p.sessionId !== n.sessionId || p.requestCount !== n.requestCount || p.lastSeen !== n.lastSeen || p.modelCount !== n.modelCount) {
           sessionsChanged = true;
           break;
         }
@@ -138,13 +139,29 @@ export function buildProviderHealth(config: AppConfig, metricsStore: MetricsStor
   return health;
 }
 
-export function attachWebSocket(server: Server, config: AppConfig, metricsStore: MetricsStore): void {
+/** Merge session pool model data into the metrics summary's sessionStats entries. */
+function enrichWithPoolStats(summary: MetricsSummary, getPoolStats?: () => SessionStats[]): MetricsSummary {
+  if (!getPoolStats) return summary;
+  const poolStats = getPoolStats();
+  if (poolStats.length === 0) return summary;
+  const poolMap = new Map(poolStats.map(s => [s.id, s]));
+  summary.sessionStats = summary.sessionStats.map(entry => {
+    const poolEntry = poolMap.get(entry.sessionId);
+    if (poolEntry) {
+      return { ...entry, modelCount: poolEntry.modelCount, models: poolEntry.models };
+    }
+    return entry;
+  });
+  return summary;
+}
+
+export function attachWebSocket(server: Server, config: AppConfig, metricsStore: MetricsStore, getPoolStats?: () => SessionStats[]): void {
   const wss = new WebSocketServer({ server, path: "/ws" });
   wssInstance = wss;
 
   wss.on("connection", (ws) => {
     // Send current summary as initial state
-    const summary = metricsStore.getSummary();
+    const summary = enrichWithPoolStats(metricsStore.getSummary(), getPoolStats);
     lastSummarySent.set(ws, summary);
     const initialMsg: WsMessage = { type: "summary", data: summary };
     ws.send(JSON.stringify(initialMsg));
@@ -181,7 +198,7 @@ export function attachWebSocket(server: Server, config: AppConfig, metricsStore:
       pendingSummaryTimer = setTimeout(() => {
         pendingSummaryTimer = undefined;
         if (!alive()) return;
-        const summary = metricsStore.getSummary();
+        const summary = enrichWithPoolStats(metricsStore.getSummary(), getPoolStats);
         let msg: WsMessage;
         const prev = lastSummarySent.get(ws);
         if (prev) {
