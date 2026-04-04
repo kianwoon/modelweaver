@@ -480,7 +480,7 @@ async function main() {
       }
     });
     server.listen(port, host);
-    attachWebSocket(server as any, handle.getConfig(), metricsStore);
+    attachWebSocket(server as any, handle.getConfig(), metricsStore, handle.getSessionPoolStats);
 
     // Connection pool warmup (fire-and-forget — non-blocking)
     warmupAll(handle.getConfig().providers).catch(() => {});
@@ -566,7 +566,7 @@ async function main() {
     }
   });
   server.listen(port, host);
-  attachWebSocket(server as any, config, metricsStore);
+  attachWebSocket(server as any, config, metricsStore, handle.getSessionPoolStats);
 
   // Connection pool warmup (fire-and-forget — non-blocking)
   warmupAll(handle.getConfig().providers).catch(() => {});
