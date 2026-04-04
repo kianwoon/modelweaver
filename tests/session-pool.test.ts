@@ -42,7 +42,7 @@ describe("SessionAgentPool", () => {
       expect(pool.getStats()).toEqual([]);
     });
 
-    it("returns per-session stats with providers", () => {
+    it("returns per-session stats with models", () => {
       pool = new SessionAgentPool();
       const now = Date.now();
       vi.setSystemTime(now);
@@ -53,14 +53,14 @@ describe("SessionAgentPool", () => {
       const stats = pool.getStats();
       expect(stats).toHaveLength(2);
       const s1 = stats.find(s => s.id === "sess-1")!;
-      expect(s1.providerCount).toBe(2);
-      expect(s1.providers).toContain("anthropic");
-      expect(s1.providers).toContain("openai");
+      expect(s1.modelCount).toBe(2);
+      expect(s1.models).toContain("anthropic");
+      expect(s1.models).toContain("openai");
       expect(s1.idleMs).toBe(0);
 
       const s2 = stats.find(s => s.id === "sess-2")!;
-      expect(s2.providerCount).toBe(1);
-      expect(s2.providers).toEqual(["anthropic"]);
+      expect(s2.modelCount).toBe(1);
+      expect(s2.models).toEqual(["anthropic"]);
     });
 
     it("reports correct idleMs", () => {
@@ -75,7 +75,7 @@ describe("SessionAgentPool", () => {
   });
 
   describe("evict", () => {
-    it("removes specific session+provider agent", () => {
+    it("removes specific session+model agent", () => {
       pool = new SessionAgentPool();
       pool.get("sess-1", "anthropic");
       pool.get("sess-1", "openai");
@@ -84,7 +84,7 @@ describe("SessionAgentPool", () => {
       pool.evict("sess-1", "anthropic");
       expect(pool.sessionCount).toBe(1);
       const stats = pool.getStats();
-      expect(stats[0].providers).toEqual(["openai"]);
+      expect(stats[0].models).toEqual(["openai"]);
     });
 
     it("removes session when last provider is evicted", () => {
