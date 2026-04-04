@@ -101,13 +101,14 @@ export class ActiveProbeManager {
       } catch (err: any) {
         clearTimeout(timeout);
         if (err.name === 'AbortError' || err.code === 'ECONNRESET' || err.code === 'ETIMEDOUT') {
-          if (probeId !== undefined) entry.cb.recordProbeTimeout(probeId);
+          // recordProbeTimeout handles probeId=undefined gracefully for half-open providers
+          entry.cb.recordProbeTimeout(probeId!);
           console.warn(`[health-probe] half-open probe timed out for ${entry.name}: ${err.message}`);
           return;
         }
         // Network errors (ENOTFOUND, ECONNREFUSED, TLS errors, etc.) — treat as probe failure
         console.warn(`[health-probe] probe error for ${entry.name}: ${err.message}`);
-        if (probeId !== undefined) entry.cb.recordProbeTimeout(probeId);
+        entry.cb.recordProbeTimeout(probeId!);
         return;
       } finally {
         clearTimeout(timeout);
@@ -117,15 +118,14 @@ export class ActiveProbeManager {
       // cares about server availability, not endpoint correctness.
       // Only 5xx/429 indicates the provider is actually struggling.
       const effectiveStatus = (status >= 500 || status === 429) ? status : 200;
-      // For half-open providers (probeId=undefined), a real request has the probe slot
-      // in flight. Do NOT call recordResult — it would clear halfOpenProbeId and
-      // cause the real request's result to be silently dropped (Finding #1).
-      if (probeId !== undefined) entry.cb.recordResult(effectiveStatus, probeId);
+      // recordResult handles probeId=undefined by clearing half-open flags regardless
+      // of which probe slot is active — safe to call for all probe types.
+      entry.cb.recordResult(effectiveStatus, probeId);
       console.warn(`[health-probe] half-open probe result for ${entry.name}: ${status}${effectiveStatus !== status ? ` (treated as ${effectiveStatus})` : ''}`);
     } catch (err: any) {
       // Non-fetch errors — log and treat as probe failure
       console.warn(`[health-probe] probe unexpected error for ${entry.name}: ${err.message}`);
-      if (probeId !== undefined) entry.cb.recordProbeTimeout(probeId);
+      entry.cb.recordProbeTimeout(probeId!);
     }
   }
 }

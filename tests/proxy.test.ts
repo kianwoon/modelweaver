@@ -1,7 +1,7 @@
 // tests/proxy.test.ts
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createMockProvider } from "./helpers/mock-provider.js";
-import { forwardRequest, forwardWithFallback, isRetriable, buildOutboundUrl, buildOutboundHeaders, sanitizeSSEChunk } from "../src/proxy.js";
+import { forwardRequest, forwardWithFallback, isRetriable, buildOutboundUrl, buildOutboundHeaders, sanitizeSSEChunk, shouldDropNullDelta } from "../src/proxy.js";
 import type { RoutingEntry, ProviderConfig, RequestContext } from "../src/types.js";
 
 describe("isRetriable", () => {
@@ -457,6 +457,20 @@ describe("sanitizeSSEChunk", () => {
     expect(result).not.toContain('"delta":null');
   });
 
+  it("replaces thinking:null with empty string", () => {
+    const chunk = 'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":null}}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).toContain('"thinking":""');
+    expect(result).not.toContain('"thinking":null');
+  });
+
+  it("replaces content_block:null with safe object", () => {
+    const chunk = 'data: {"type":"content_block_start","content_block":null}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).toContain('"content_block":{"type":"text","text":""}');
+    expect(result).not.toContain('"content_block":null');
+  });
+
   it("handles multiple null fields in one chunk", () => {
     const chunk = 'data: {"content":null,"message":null,"delta":null}\n\n';
     const result = sanitizeSSEChunk(chunk);
@@ -491,7 +505,81 @@ data: {"type":"message_start","message":{"id":"msg_xxx","type":"message","role":
 `;
     const result = sanitizeSSEChunk(chunk);
     expect(result).toContain('"content":[]');
-    // stop_reason:null and stop_sequence:null should NOT be replaced (not in our regex)
+    // stop_reason:null is preserved — replacing it causes SDK crash (Y8.content null object error)
     expect(result).toContain('"stop_reason":null');
+    // stop_sequence:null is preserved (not in replacement map)
+    expect(result).toContain('"stop_sequence":null');
+  });
+
+  it("replaces bare 'data: null' SSE lines with empty object", () => {
+    const chunk = "data: null\n\nevent: message_start\ndata: {\"type\":\"message_start\"}\n\n";
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).not.toContain("data: null");
+    expect(result).toContain("data: {}");
+    // Other events should be preserved
+    expect(result).toContain("message_start");
+  });
+
+  it("replaces thinking_bytes:null inside thinking content block", () => {
+    const chunk = 'data: {"type":"content_block_start","content_block":{"type":"thinking","thinking":"hello","thinking_bytes":null}}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).not.toContain('"thinking_bytes":null');
+    expect(result).toContain('"thinking_bytes":""');
+  });
+
+  it("replaces thinking_control:null inside thinking content block", () => {
+    const chunk = 'data: {"type":"content_block_start","content_block":{"type":"thinking","thinking":"hello","thinking_control":null}}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).not.toContain('"thinking_control":null');
+    expect(result).toContain('"thinking_control":""');
+  });
+
+  it("replaces signature:null inside thinking block", () => {
+    const chunk = 'data: {"type":"content_block_stop","content_block":{"type":"thinking","thinking":"done","signature":null}}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).not.toContain('"signature":null');
+    expect(result).toContain('"signature":""');
+  });
+
+  it("replaces all thinking nested nulls in a single chunk", () => {
+    const chunk = 'data: {"type":"content_block_start","content_block":{"type":"thinking","thinking":null,"thinking_bytes":null,"thinking_control":null,"signature":null}}\n\n';
+    const result = sanitizeSSEChunk(chunk);
+    expect(result).not.toContain(':null');
+    expect(result).toContain('"thinking":""');
+    expect(result).toContain('"thinking_bytes":""');
+    expect(result).toContain('"thinking_control":""');
+    expect(result).toContain('"signature":""');
+  });
+});
+
+describe("shouldDropNullDelta", () => {
+  it("returns true for content_block_delta with only null thinking", () => {
+    const text = 'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":null}}\n\n';
+    expect(shouldDropNullDelta(text)).toBe(true);
+  });
+
+  it("returns true for content_block_delta with only null text", () => {
+    const text = 'data: {"type":"content_block_delta","delta":{"type":"text_delta","text":null}}\n\n';
+    expect(shouldDropNullDelta(text)).toBe(true);
+  });
+
+  it("returns false for content_block_delta with non-null content", () => {
+    const text = 'data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"hello world"}}\n\n';
+    expect(shouldDropNullDelta(text)).toBe(false);
+  });
+
+  it("returns false for non-delta events (message_start, etc.)", () => {
+    expect(shouldDropNullDelta('event: message_start\ndata: {"type":"message_start"}\n\n')).toBe(false);
+  });
+
+  it("returns false for content_block_delta with index but no content fields", () => {
+    const text = 'data: {"type":"content_block_delta","index":0}\n\n';
+    expect(shouldDropNullDelta(text)).toBe(false);
+  });
+
+  it("returns true for null-only delta even when index is present", () => {
+    // index is present but it's not a content field — still null-only content
+    const text = 'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":null}}\n\n';
+    expect(shouldDropNullDelta(text)).toBe(true);
   });
 });

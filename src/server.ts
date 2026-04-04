@@ -95,16 +95,69 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
  *   "delta":null          → delta object with essential fields
  *   "content":null        → empty array (safe for Anthropic content field)
  */
-const NULL_SANITIZE_RE = /"(message|content_block|delta|content)"\s*:\s*null(?!["\w])/g;
+const NULL_SANITIZE_RE = /"(message|content_block|delta|content|thinking|thinking_bytes|thinking_control|signature|text|partial_json|name|input)"\s*:\s*null(?!["\w])/g;
+// Pre-compiled regex for token fields (used in scanWindow — hoisted to module level to avoid per-chunk recompilation)
+const TOKEN_FIELDS_RE = /"(input_tokens|prompt_tokens|cache_read_input_tokens|cache_creation_input_tokens|output_tokens|completion_tokens)"\s*:\s*(\d+)/g;
 const NULL_REPLACEMENTS: Record<string, string> = {
   message:        '"message":{"id":"","type":"message","role":"assistant","content":[]}',
   content_block:  '"content_block":{"type":"text","text":""}',
   delta:          '"delta":{"type":"text_delta","text":""}',
   content:        '"content":[]',
+  thinking:       '"thinking":""',
+  thinking_bytes: '"thinking_bytes":""',
+  thinking_control: '"thinking_control":""',
+  signature:      '"signature":""',
+  text:          '"text":""',
+  partial_json: '"partial_json":""',
+  name:          '"name":""',
+  input:          '"input":{}',
 };
 function sanitizeNullObjects(text: string): string {
-  if (!text.includes(":null")) return text;
-  return text.replace(NULL_SANITIZE_RE, (_, key: string) => NULL_REPLACEMENTS[key] ?? _);
+  if (!text.includes("null")) return text;
+  // Critical: replace bare "data: null" SSE lines
+  // sometimes send these, and the Anthropic SDK crashes with "null is not an object
+  // (evaluating 'Y8.content')" when it tries to parse and access properties on null.
+  // This is the server.ts defense-in-depth layer — proxy.ts also handles this per-chunk,
+  // but this catches any cases where TCP chunk boundaries split the line.
+  let result = text.replace(/^data:\s*null\s*$/gm, 'data: {}');
+  result = result.replace(NULL_SANITIZE_RE, (_, key: string) => NULL_REPLACEMENTS[key] ?? _);
+  return result;
+}
+
+/**
+ * Check if an SSE event text contains only null content fields in its delta.
+ * Used to drop spurious spacer deltas that crash the Anthropic SDK (v2.1.88+).
+ */
+function isNullOnlyDelta(eventText: string): boolean {
+  if (!eventText.includes("content_block_delta")) return false;
+  if (!/"(thinking|text|partial_json)"\s*:\s*null(?=[\s,}\]])/.test(eventText)) return false;
+  // Has at least one non-null content field? Then it's a real delta, keep it.
+  if (/"(thinking|text|partial_json)"\s*:\s*"[^"]+"/.test(eventText)) return false;
+  return true;
+}
+
+/**
+ * Check if an SSE event is a content_block_start for a thinking block.
+ * Returns the block index if it is, or -1 if not.
+ */
+function getThinkingBlockIndex(eventText: string): number {
+  if (!eventText.includes("content_block_start")) return -1;
+  if (!eventText.includes('"thinking"')) return -1;
+  const m = eventText.match(/"index"\s*:\s*(\d+)/);
+  return m ? parseInt(m[1], 10) : -1;
+}
+
+/**
+ * Check if an SSE event references a block index in the omitted set.
+ */
+function isForOmittedIndex(eventText: string, omittedIndices: Set<number>): boolean {
+  if (!eventText.includes("content_block_delta") && !eventText.includes("content_block_stop")) return false;
+  for (const idx of omittedIndices) {
+    if (eventText.includes(`"index":${idx}`) || eventText.match(new RegExp(`"index"\\s*:\\s*${idx}\\b`))) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -112,12 +165,28 @@ function sanitizeNullObjects(text: string): string {
  * there is no MetricsStore (i.e. no metrics collection needed).
  * Buffers complete SSE events (delimited by \n\n) before sanitizing to avoid
  * null patterns split across TCP chunk boundaries.
+ *
+ * Defense layers:
+ * 1. Omit thinking blocks entirely — prevents Y8.content crash from null thinking data
+ * 2. Drop null-only delta events — catches spacer deltas from any provider
+ * 3. message_start pre-flight — ensures SDK state is initialized before content
  */
 function createSanitizeTransform(): TransformStream<Uint8Array, Uint8Array> {
   const td = new TextDecoder();
   const te = new TextEncoder();
   let isSSE: boolean | null = null;
   let forwardBuf = "";
+  let seenMessageStart = false;
+  const preflightBuf: string[] = [];
+  const omittedBlockIndices = new Set<number>();
+
+  const flushPreflight = (controller: TransformStreamDefaultController<Uint8Array>) => {
+    for (const event of preflightBuf) {
+      controller.enqueue(te.encode(sanitizeNullObjects(event) + "\n\n"));
+    }
+    preflightBuf.length = 0;
+  };
+
   return new TransformStream({
     transform(chunk, controller) {
       const decoded = td.decode(chunk, { stream: true });
@@ -131,13 +200,41 @@ function createSanitizeTransform(): TransformStream<Uint8Array, Uint8Array> {
         while ((eventEnd = forwardBuf.indexOf("\n\n")) !== -1) {
           const eventText = forwardBuf.slice(0, eventEnd);
           forwardBuf = forwardBuf.slice(eventEnd + 2);
-          controller.enqueue(te.encode(sanitizeNullObjects(eventText) + "\n\n"));
+
+          // Layer 1: Omit thinking blocks entirely
+          const thinkingIdx = getThinkingBlockIndex(eventText);
+          if (thinkingIdx >= 0) {
+            omittedBlockIndices.add(thinkingIdx);
+            continue; // drop the content_block_start for thinking
+          }
+          if (isForOmittedIndex(eventText, omittedBlockIndices)) continue;
+
+          // Layer 2: Drop null-only delta events (spacers from any upstream provider)
+          if (isNullOnlyDelta(eventText)) continue;
+
+          // Layer 3: Pre-flight — buffer until message_start is seen
+          if (!seenMessageStart) {
+            if (eventText.includes('"message_start"') || eventText.includes('"type":"message_start"')) {
+              seenMessageStart = true;
+              flushPreflight(controller);
+              controller.enqueue(te.encode(sanitizeNullObjects(eventText) + "\n\n"));
+            } else if (eventText.startsWith(":")) {
+              // SSE comments (keep-alive pings) — forward immediately
+              controller.enqueue(te.encode(eventText + "\n\n"));
+            } else {
+              preflightBuf.push(eventText);
+            }
+          } else {
+            controller.enqueue(te.encode(sanitizeNullObjects(eventText) + "\n\n"));
+          }
         }
       } else {
         controller.enqueue(te.encode(sanitizeNullObjects(decoded)));
       }
     },
     flush(controller) {
+      // Flush any remaining preflight buffer (stream ended without message_start)
+      if (!seenMessageStart) flushPreflight(controller);
       if (forwardBuf) {
         controller.enqueue(te.encode(sanitizeNullObjects(forwardBuf)));
       }
@@ -167,6 +264,7 @@ function createMetricsTransform(
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let lineBuf = "";
   let eventBuf = "";
+  const omittedBlockIndices = new Set<number>();
 
   // --- JSON state ---
   const WINDOW_SIZE = 4096;
@@ -237,7 +335,10 @@ function createMetricsTransform(
             }
           }
         }
-      } catch { /* skip malformed */ }
+      } catch {
+        // JSON parse failed — malformed data from upstream (e.g. truncated SSE,
+        // partial JSON). Skip silently to avoid crashing the metrics pipeline.
+      }
     }
   };
 
@@ -245,11 +346,11 @@ function createMetricsTransform(
     // Fast bailout: most chunks don't contain usage data
     const hasUsage = text.includes('"usage"');
 
-    // Single combined regex pass for all token fields
-    const TOKEN_RE = /"(input_tokens|prompt_tokens|cache_read_input_tokens|cache_creation_input_tokens|output_tokens|completion_tokens)"\s*:\s*(\d+)/g;
+    // Use module-level pre-compiled regex — reset lastIndex for global flag
     if (hasUsage) {
+      TOKEN_FIELDS_RE.lastIndex = 0;
       let m: RegExpExecArray | null;
-      while ((m = TOKEN_RE.exec(text)) !== null) {
+      while ((m = TOKEN_FIELDS_RE.exec(text)) !== null) {
         const val = parseInt(m[2], 10);
         const field = m[1];
         if (field === "input_tokens" || field === "prompt_tokens") {
@@ -347,7 +448,7 @@ function createMetricsTransform(
   const processChunk = (decoded: string, isFinal: boolean, controller: TransformStreamDefaultController<Uint8Array>) => {
     if (isSSE === null) {
       // First chunk — detect format
-      isSSE = contentType.includes("text/event-stream") || decoded.startsWith("event:");
+      isSSE = contentType.includes("text/event-stream") || decoded.startsWith("event:") || decoded.startsWith("data:");
     }
 
     if (isSSE) {
@@ -358,6 +459,22 @@ function createMetricsTransform(
       for (const line of lines) {
         if (line === "") {
           if (eventBuf) {
+            // Omit thinking blocks entirely
+            const thinkingIdx = getThinkingBlockIndex(eventBuf);
+            if (thinkingIdx >= 0) {
+              omittedBlockIndices.add(thinkingIdx);
+              eventBuf = "";
+              continue;
+            }
+            if (isForOmittedIndex(eventBuf, omittedBlockIndices)) {
+              eventBuf = "";
+              continue;
+            }
+            // Drop null-only delta events (spacers from any upstream provider)
+            if (isNullOnlyDelta(eventBuf)) {
+              eventBuf = "";
+              continue;
+            }
             drainEvents(eventBuf);
             // Forward complete event with null sanitization applied
             controller.enqueue(te.encode(sanitizeNullObjects(eventBuf) + "\n\n"));
@@ -370,8 +487,14 @@ function createMetricsTransform(
 
       if (isFinal) {
         if (eventBuf.trim()) {
-          drainEvents(eventBuf);
-          controller.enqueue(te.encode(sanitizeNullObjects(eventBuf)));
+          const thinkingIdx = getThinkingBlockIndex(eventBuf);
+          const isOmitted = thinkingIdx >= 0 || isForOmittedIndex(eventBuf, omittedBlockIndices);
+          if (isOmitted || isNullOnlyDelta(eventBuf)) {
+            // Drop thinking blocks and null-only deltas even in final flush
+          } else {
+            drainEvents(eventBuf);
+            controller.enqueue(te.encode(sanitizeNullObjects(eventBuf)));
+          }
         }
         recordMetrics(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheCreation);
         return;

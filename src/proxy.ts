@@ -111,17 +111,193 @@ const REPLACEMENT_REGEX_BOTH = new RegExp(MODEL_KEY_REGEX.source + "|" + MAX_TOK
  *
  * Returns the sanitized string, or the original if no patterns matched (fast path).
  */
+/** Returns true if the chunk is a content_block_delta with only null content fields. */
+export function shouldDropNullDelta(text: string): boolean {
+  if (!/content_block_delta/.test(text)) return false;
+  if (!/"(thinking|text|partial_json)"\s*:\s*null(?=[\s,}\]])/.test(text)) return false;
+  // Has at least one non-null content field? Then it's a real delta, keep it.
+  if (/"(thinking|text|partial_json)"\s*:\s*"[^"]+"/.test(text)) return false;
+  return true;
+}
+
+/**
+ * Returns true if the chunk contains SSE events for a thinking block that
+ * should be omitted from the stream. This implements the "Omit" strategy —
+ * thinking blocks from upstream providers (GLM, etc.) may contain null fields
+ * that crash the Anthropic SDK (v2.1.88+) with "null is not an object
+ * (evaluating Y8.content)". By omitting these blocks entirely, the CLI only
+ * sees the final answer and never encounters the problematic thinking data.
+ *
+ * @param text - raw TCP chunk text
+ * @param omittedIndices - Set of block indices that are thinking blocks
+ */
+export function shouldOmitThinkingChunk(text: string, omittedIndices: Set<number>): boolean {
+  if (omittedIndices.size === 0) return false;
+
+  // Check for content_block_start with type: "thinking" — register new index
+  const startMatch = text.match(/"index"\s*:\s*(\d+)[^}]*"type"\s*:\s*"thinking"/);
+  if (startMatch) omittedIndices.add(parseInt(startMatch[1], 10));
+  const startMatchAlt = text.match(/"type"\s*:\s*"thinking"[^}]*"index"\s*:\s*(\d+)/);
+  if (startMatchAlt) omittedIndices.add(parseInt(startMatchAlt[1], 10));
+
+  // Check for content_block_delta/stop with an omitted index
+  for (const idx of omittedIndices) {
+    // Match "index":<idx> in any SSE event (content_block_delta, content_block_stop)
+    const idxPattern = new RegExp(`"index"\\s*:\\s*${idx}\\b`);
+    if (idxPattern.test(text)) return true;
+  }
+
+  // Check for content_block_stop with thinking type (end of a thinking block)
+  if (/content_block_stop/.test(text) && /"type"\s*:\s*"thinking"/.test(text)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Parse individual SSE events within a raw TCP chunk and filter out thinking blocks.
+ *
+ * Why event-level (not chunk-level): A single TCP chunk can contain SSE events for
+ * BOTH a thinking block (index 0) and a text block (index 1). Dropping the entire
+ * chunk kills the text block's content_block_start, breaking index continuity and
+ * crashing the Anthropic SDK with "null is not an object (evaluating Y8.content)".
+ *
+ * Strategy:
+ *   1. Split chunk into individual SSE events (delimited by \n\n)
+ *   2. content_block_start with type:"thinking" → rewrite as empty text block + immediate stop
+ *   3. content_block_delta for thinking indices → drop
+ *   4. content_block_stop for thinking indices → drop (we already sent our own stop)
+ *   5. All other events → forward unchanged
+ *
+ * @param text - raw TCP chunk text (may contain multiple SSE events)
+ * @param thinkingIndices - Set of block indices identified as thinking blocks (mutated)
+ * @returns filtered text with thinking events removed/rewritten, or null if everything was filtered
+ */
+export function filterThinkingFromChunk(text: string, thinkingIndices: Set<number>): string | null {
+  // Fast path: if no thinking-related content, return as-is
+  if (!text.includes("thinking") && thinkingIndices.size === 0) return text;
+
+  // Split into individual SSE events. SSE spec uses \n\n as event delimiter.
+  // Preserve any trailing text (incomplete event) as prefix.
+  const events: string[] = [];
+  let remaining = text;
+  let prefix = "";
+
+  // Handle the case where the chunk starts mid-event from a previous chunk
+  const firstEventStart = remaining.indexOf("event:");
+  const firstDataStart = remaining.indexOf("data:");
+  const firstMarker = firstEventStart === -1
+    ? firstDataStart
+    : firstDataStart === -1
+      ? firstEventStart
+      : Math.min(firstEventStart, firstDataStart);
+
+  if (firstMarker > 0) {
+    // There's text before the first SSE marker — keep it as prefix
+    prefix = remaining.substring(0, firstMarker);
+    remaining = remaining.substring(firstMarker);
+  }
+
+  // Split on double newline (SSE event boundary)
+  const parts = remaining.split("\n\n");
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i].trim();
+    if (!part) continue;
+
+    // Last part might be incomplete (no trailing \n\n yet)
+    if (i === parts.length - 1 && !remaining.endsWith("\n\n")) {
+      // Incomplete event — append to prefix for next chunk
+      prefix += (prefix ? "\n\n" : "") + part;
+      continue;
+    }
+
+    events.push(part);
+  }
+
+  if (events.length === 0) {
+    // No complete events in this chunk — keep prefix for next chunk
+    return prefix || null;
+  }
+
+  const output: string[] = [];
+  if (prefix) output.push(prefix);
+
+  for (const event of events) {
+    // Detect content_block_start with type:"thinking"
+    const startMatch = event.match(/"index"\s*:\s*(\d+)/);
+    const blockIndex = startMatch ? parseInt(startMatch[1], 10) : -1;
+
+    if (event.includes("content_block_start") && event.includes('"thinking"')) {
+      // Register this index as a thinking block
+      if (blockIndex >= 0) thinkingIndices.add(blockIndex);
+
+      // Rewrite as an empty text block with immediate stop.
+      // The SDK expects content_block_start → content_block_stop for every block index.
+      // Skipping the index entirely breaks the stream parser.
+      if (blockIndex >= 0) {
+        output.push(
+          `event: content_block_start\ndata: {"type":"content_block_start","index":${blockIndex},"content_block":{"type":"text","text":""}}`,
+          `event: content_block_stop\ndata: {"type":"content_block_stop","index":${blockIndex}}`
+        );
+      }
+      continue;
+    }
+
+    // Drop content_block_delta events for thinking block indices
+    if (event.includes("content_block_delta") && blockIndex >= 0 && thinkingIndices.has(blockIndex)) {
+      continue;
+    }
+
+    // Drop content_block_stop events for thinking block indices (we already sent our own stop above)
+    if (event.includes("content_block_stop") && blockIndex >= 0 && thinkingIndices.has(blockIndex)) {
+      continue;
+    }
+
+    // Not a thinking event — forward unchanged
+    output.push(event);
+  }
+
+  if (output.length === 0) return null;
+  return output.join("\n\n") + "\n\n";
+}
+
 export function sanitizeSSEChunk(chunk: string): string {
   // Fast path: skip if no null patterns present.
-  // Check for both ":null" and ": null" since JSON may have whitespace after the colon.
   if (!chunk.includes("null")) return chunk;
+
+  // Critical: replace bare "data: null" SSE lines — upstream providers (GLM, MiniMax)
+  // sometimes send these, and the Anthropic SDK crashes with "null is not an object
+  // (evaluating 'Y8.content')" when it tries to parse and access properties on null.
+  // Replace data: null with data: {} so the SDK gets an empty object instead of null.
+  let result = chunk.replace(/^data:\s*null\s*$/gm, 'data: {}');
 
   // Replace known null patterns that crash the Anthropic SDK.
   // Use targeted regex to avoid corrupting unrelated JSON values.
-  return chunk
+  result = result
     .replace(/"content"\s*:\s*null(?=[\s,}\]])/g, '"content":[]')
+    .replace(/"content_block"\s*:\s*null(?=[\s,}\]])/g, '"content_block":{"type":"text","text":""}')
     .replace(/"message"\s*:\s*null(?=[\s,}\]])/g, '"message":{}')
-    .replace(/"delta"\s*:\s*null(?=[\s,}\]])/g, '"delta":{}');
+    .replace(/"delta"\s*:\s*null(?=[\s,}\]])/g, '"delta":{}')
+    .replace(/"usage"\s*:\s*null(?=[\s,}\]])/g, '"usage":{"input_tokens":0,"output_tokens":0}')
+    // Nested null fields inside non-null parent objects (MiniMax/GLM may send these)
+    .replace(/"thinking"\s*:\s*null(?=[\s,}\]])/g, '"thinking":""')
+    .replace(/"thinking_bytes"\s*:\s*null(?=[\s,}\]])/g, '"thinking_bytes":""')
+    .replace(/"thinking_control"\s*:\s*null(?=[\s,}\]])/g, '"thinking_control":""')
+    .replace(/"signature"\s*:\s*null(?=[\s,}\]])/g, '"signature":""')
+    .replace(/"text"\s*:\s*null(?=[\s,}\]])/g, '"text":""')
+    .replace(/"partial_json"\s*:\s*null(?=[\s,}\]])/g, '"partial_json":""')
+    .replace(/"name"\s*:\s*null(?=[\s,}\]])/g, '"name":""')
+    .replace(/"input"\s*:\s*null(?=[\s,}\]])/g, '"input":{}')
+    // Array elements — [null] → [], null inside array → remove
+    .replace(/\[null\]/g, '[]')
+    // stop_sequence and stop_reason — preserve null, these are valid in Anthropic spec.
+    // Replacing stop_reason:null with "end_turn" in message_start causes the SDK (v2.1.88+)
+    // to treat the message as already completed, crashing with "null is not an object
+    // (evaluating Y8.content)" when it tries to read content on the uninitialized state.
+    // DO NOT replace stop_reason:null or stop_sequence:null.
+
+  return result;
 }
 
 // --- Pre-built error response helpers ---
@@ -1056,12 +1232,20 @@ export async function forwardRequest(
         const EVENT_ERROR_LEN = "event: error".length; // 12
         let tailBuffer = "";
 
+        // Thinking block omission: track which block indices are thinking blocks.
+        // Upstream providers (GLM, MiniMax, etc.) may send thinking blocks with null
+        // content fields that crash the Anthropic SDK (v2.1.88+) with
+        // "null is not an object (evaluating Y8.content)". By suppressing the entire
+        // thinking block from the stream, we prevent the crash entirely.
+        const omittedBlockIndices = new Set<number>();
+
         passThrough.on("data", (chunk: Buffer) => {
           // Guard: don't enqueue data if stream is already in a terminal state
           // (this is a pure read guard, no transition — safe as-is)
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
 
           const text = chunk.toString("utf-8");
+
 
           // Filter: upstream providers may send `event: error` SSE events that the
           // Anthropic SDK doesn't recognize and crashes on ("null is not an object
@@ -1077,10 +1261,21 @@ export async function forwardRequest(
             ? combined.slice(-EVENT_ERROR_LEN)
             : combined;
 
+          // Thinking block filtering: parse individual SSE events within the chunk
+          // and rewrite thinking blocks as empty text blocks. We MUST parse at the
+          // event level (not chunk level) because a single TCP chunk can contain
+          // events for BOTH thinking and text blocks — dropping the whole chunk
+          // would kill valid text block_start events, breaking index continuity
+          // and crashing the SDK with "null is not an object (evaluating Y8.content)".
+          const outputText = filterThinkingFromChunk(text, omittedBlockIndices);
+          if (outputText === null) {
+            return; // entire chunk was thinking events, nothing to forward
+          }
+
           // Sanitize null objects that crash the Anthropic SDK.
-          const sanitized = sanitizeSSEChunk(text);
-          const outChunk = sanitized === text
-            ? new Uint8Array(chunk)      // no changes — use original buffer (zero-alloc fast path)
+          const sanitized = sanitizeSSEChunk(outputText);
+          const outChunk = sanitized === outputText
+            ? new Uint8Array(chunk) // no changes — zero-alloc fast path
             : textEncoder.encode(sanitized);
 
           if (sseBuffer) {

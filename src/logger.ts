@@ -13,8 +13,11 @@ export function createLogger(level: LogLevel): Logger {
 
   function log(lvl: LogLevel, message: string, data?: Record<string, unknown>) {
     if (levels[lvl] < levels[level]) return;
+    // Use Singapore time (Asia/Singapore) for all log timestamps
+    const sgDate = new Date();
+    const sgTimestamp = sgDate.toLocaleString("en-SG", { timeZone: "Asia/Singapore", hour12: false }) + "." + String(sgDate.getMilliseconds()).padStart(3, "0");
     const entry = {
-      timestamp: new Date().toISOString(),
+      timestamp: sgTimestamp,
       level: lvl,
       message,
       ...data,
