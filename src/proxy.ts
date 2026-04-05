@@ -6,22 +6,52 @@ import { PassThrough } from "node:stream";
 import { TextEncoder } from "node:util";
 
 /**
- * Write Anthropic-compatible SSE closing events to a PassThrough stream
- * before ending it. Without this, abruptly closing the stream mid-event
- * causes the SDK to crash with "null is not an object (evaluating Y8.content)".
+ * Generate Anthropic-compatible SSE closing events as Uint8Array[].
+ * Inspects the SSE state to emit only the missing events, avoiding duplicates.
+ *
+ * @param sawMessageStart     Whether message_start was forwarded to the client.
+ * @param sawContentBlockStart Whether any content_block_start was forwarded.
  */
 const _textEncoder = new TextEncoder();
-function writeSSEGracefulTermination(passThrough: PassThrough): void {
-  // Leading newline ensures any truncated SSE line is terminated
-  // so the subsequent events start on a fresh line boundary.
-  const events = [
-    "\n",
-    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+function buildMissingSSEEvents(sawMessageStart: boolean, sawContentBlockStart: boolean, sawContentBlockStop: boolean): Uint8Array[] {
+  const events: string[] = ["\n"];
+
+  if (!sawMessageStart) {
+    // No upstream SSE data reached the client. Emit a complete synthetic message.
+    const msgId = `msg_proxy_${Date.now()}`;
+    events.push(
+      `event: message_start\ndata: {"type":"message_start","message":{"id":"${msgId}","type":"message","role":"assistant","model":"proxy","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}\n\n`,
+      `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}\n\n`,
+    );
+  } else if (!sawContentBlockStart) {
+    // message_start was sent but no content block was opened — open one now
+    // so content_block_stop references a valid index.
+    events.push(
+      `event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n`,
+      `event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":""}}\n\n`,
+    );
+  }
+
+  // Only emit content_block_stop if upstream didn't already send one.
+  if (!sawContentBlockStop) {
+    events.push(
+      "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    );
+  }
+
+  // Always close with message_delta + message_stop.
+  events.push(
     "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":0}}\n\n",
     "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
-  ];
-  for (const evt of events) {
-    passThrough.write(_textEncoder.encode(evt));
+  );
+  return events.map(evt => _textEncoder.encode(evt));
+}
+
+/** Write SSE closing events into a PassThrough stream (used by stall/error handlers). */
+function writeSSEGracefulTermination(passThrough: PassThrough, sawMessageStart: boolean, sawContentBlockStart: boolean, sawContentBlockStop: boolean): void {
+  for (const evt of buildMissingSSEEvents(sawMessageStart, sawContentBlockStart, sawContentBlockStop)) {
+    passThrough.write(evt);
   }
 }
 import type { SessionAgentPool } from "./session-pool.js";
@@ -113,6 +143,7 @@ const KNOWN_FORWARD_HEADERS = new Set([
   "anthropic-beta",
   "content-type",
   "accept",
+  "user-agent",  // GLM-5.1 validates this for coding plan auth
 ]);
 
 /** Pre-built regex combinations for targeted body replacements */
@@ -120,18 +151,6 @@ const REPLACEMENT_REGEX_MODEL = new RegExp(MODEL_KEY_REGEX.source, "g");
 const REPLACEMENT_REGEX_MAX_TOKENS = new RegExp(MAX_TOKENS_REGEX.source, "g");
 const REPLACEMENT_REGEX_BOTH = new RegExp(MODEL_KEY_REGEX.source + "|" + MAX_TOKENS_REGEX.source, "g");
 
-/**
- * Sanitize an SSE data payload to prevent "null is not an object (evaluating 'X.content')"
- * crashes in the Anthropic SDK. Upstream providers (GLM, MiniMax, etc.) may return
- * null values for content, message, or delta fields that the SDK expects to be objects.
- *
- * Operates on a single SSE event's `data:` JSON payload — replaces:
- *   "content":null  → "content":[]
- *   "message":null  → "message":{}
- *   "delta":null    → "delta":{}
- *
- * Returns the sanitized string, or the original if no patterns matched (fast path).
- */
 // --- Pre-built error response helpers ---
 
 const ERR_HEADERS = Object.freeze({ "content-type": "application/json" });
@@ -816,7 +835,7 @@ export async function forwardRequest(
         // Write Anthropic-compatible SSE closing events before ending the stream.
         // Without this, the stream is truncated mid-event and the SDK crashes with
         // "null is not an object (evaluating Y8.content)".
-        try { writeSSEGracefulTermination(passThrough); } catch { /* passThrough already closed */ }
+        try { writeSSEGracefulTermination(passThrough, sawMessageStart, sawContentBlockStart, sawContentBlockStop); } catch { /* passThrough already closed */ }
         passThrough.end();
 
         // Wait for passThrough to finish before destroying upstream body.
@@ -891,12 +910,59 @@ export async function forwardRequest(
       });
     }
 
+    // Upstream returned a non-streaming JSON response (e.g., MiniMax non-stream mode).
+    // Consume the body and return it directly — do NOT wrap in a ReadableStream
+    // or inject SSE events, which would cause "Failed to parse JSON" in the SDK.
+    const upstreamContentType = undiciResponse.headers["content-type"] as string ?? "";
+    if (upstreamContentType.includes("application/json") && !upstreamContentType.includes("text/event-stream")) {
+      const jsonBody = await undiciResponse.body.text();
+      try { (undiciResponse.body as any).destroy(); } catch { /* already done */ }
+      clearTimeout(timeout);
+      if (ttfbTimer) clearTimeout(ttfbTimer);
+      const jsonHeaders = new Headers(undiciResponse.headers as unknown as HeadersInit);
+      jsonHeaders.delete("transfer-encoding");
+      return new Response(jsonBody, {
+        status: undiciResponse.statusCode,
+        statusText: undiciResponse.statusText,
+        headers: jsonHeaders,
+      });
+    }
+
     // Body stall detection: pipe through PassThrough to monitor for data without
     // interfering with undici's internal stream state (no flowing mode conflict).
     // Uses a single interval that checks a timestamp instead of per-chunk setTimeout/clearTimeout,
     // reducing syscall-level overhead on every data event.
     const stallTimeout = provider.stallTimeout ?? 15000;
     passThrough = new PassThrough();
+    // Track how many bytes were forwarded to the client — used by
+    // writeSSEGracefulTermination to decide whether to emit a full
+    // synthetic message (no data sent) or just closing events.
+    (passThrough as any)._bytesForwarded = 0;
+
+    // SSE state tracking — hoisted to outer scope so error handler (line ~837)
+    // and stall handler (line ~983) can reference them when writing closing events.
+    let sawMessageStart = false;
+    let sawContentBlockStart = false;
+    let sawContentBlockStop = false;
+    let sawMessageStop = false;
+    let _rollingTail = "";
+    passThrough.on("data", (chunk: Buffer) => {
+      // Lightweight SSE state tracking via rolling tail buffer.
+      // Accumulate last ~500 bytes across chunks to detect event types
+      // that may span chunk boundaries.
+      (passThrough as any)._bytesForwarded = ((passThrough as any)._bytesForwarded || 0) + chunk.length;
+      if (!sawMessageStop) {
+        _rollingTail = (_rollingTail + chunk.toString("utf8")).slice(-500);
+        if (!sawMessageStart && _rollingTail.includes('"message_start"')) sawMessageStart = true;
+        if (!sawContentBlockStart && _rollingTail.includes('"content_block_start"')) sawContentBlockStart = true;
+        if (!sawContentBlockStop && _rollingTail.includes('"content_block_stop"')) sawContentBlockStop = true;
+        if (_rollingTail.includes('"message_stop"')) sawMessageStop = true;
+      }
+      // Debug: dump first chunk to see actual SSE content
+      if (((passThrough as any)._bytesForwarded ?? 0) <= chunk.length) {
+        console.warn(`[tracking] First chunk (${chunk.length}b): ${chunk.toString("utf8").slice(0, 400)}`);
+      }
+    });
 
     // If upstream errored before passThrough was created (earlyUpstreamError),
     // end the passThrough now and abort the pipe setup.
@@ -958,7 +1024,7 @@ export async function forwardRequest(
       // Write Anthropic-compatible SSE closing events before ending the stream.
       // Without this, the stream is truncated mid-event and the SDK crashes with
       // "null is not an object (evaluating Y8.content)".
-      try { writeSSEGracefulTermination(passThrough!); } catch { /* passThrough already closed */ }
+      try { writeSSEGracefulTermination(passThrough!, sawMessageStart, sawContentBlockStart, sawContentBlockStop); } catch { /* passThrough already closed */ }
       passThrough!.end();
 
       // Wait for passThrough to finish before destroying upstream body.
@@ -1035,6 +1101,17 @@ export async function forwardRequest(
         const safeClose = () => {
           if (controllerClosed) return;
           controllerClosed = true;
+          // If the upstream ended without sending message_stop, the stream is incomplete.
+          // Inject the missing Anthropic SSE events to prevent Y8.content crash.
+          if (!sawMessageStop && ((passThrough as any)._bytesForwarded ?? 0) > 0) {
+            console.warn(`[safeClose] Injecting closing events: bytes=${(passThrough as any)._bytesForwarded} start=${sawMessageStart} blockStart=${sawContentBlockStart} blockStop=${sawContentBlockStop} msgStop=${sawMessageStop}`);
+            // Upstream ended without sending message_stop — stream is incomplete.
+            // Inject only the missing events to prevent Y8.content crash.
+            const missing = buildMissingSSEEvents(sawMessageStart, sawContentBlockStart, sawContentBlockStop);
+            for (const evt of missing) {
+              try { controller.enqueue(evt); } catch { /* already closed */ }
+            }
+          }
           // Decrement in-flight count so the stale refresh knows this stream is done.
           // This is safe to call multiple times since release() is idempotent.
           if (sessionPool && ctx.sessionId) {
@@ -1091,20 +1168,11 @@ export async function forwardRequest(
           );
         }
 
-        // Rolling tail buffer for cross-chunk "event: error" detection.
-        // The string "event: error" can be split across TCP chunks (e.g. "event:" in one,
-        // " error" in the next). We keep the last N bytes to detect this pattern.
-        const EVENT_ERROR_LEN = "event: error".length; // 12
-        let tailBuffer = "";
-
         passThrough.on("data", (chunk: Buffer) => {
           // Guard: don't enqueue data if stream is already in a terminal state
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
 
           // Pure passthrough — forward bytes without modification.
-          // Direct upstream connections work fine, so the proxy must be invisible.
-          // Any stream modification (null sanitization, thinking block filtering,
-          // SSE event rewriting) introduces crash paths in the Anthropic SDK.
           const outChunk = new Uint8Array(chunk);
 
           if (sseBuffer) {
@@ -1119,13 +1187,8 @@ export async function forwardRequest(
         });
         passThrough.on("error", (err: Error) => {
           if (sseBuffer) sseBuffer.end();
-          // Wrap in safeError — if _intentionalClose is set (stall, hedge cancel,
-          // upstream error), safeError returns silently. Otherwise write SSE error.
           safeError(err);
         });
-        // Listen for "close" which fires on both end() and destroy(), ensuring
-        // the ReadableStream completes even if "end" doesn't fire (e.g. after
-        // unpipe + end on Node.js 20/22 where the pipe state prevents end event).
         passThrough.on("close", safeClose);
       },
       cancel() {
