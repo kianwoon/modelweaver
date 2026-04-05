@@ -642,6 +642,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
 
     // Broadcast stream start event
     ctx._streamState = "start"; // initialization — skip transition validation
+    const parsedBody = (ctx as RequestContext & { parsedBody?: Record<string, unknown> }).parsedBody;
     broadcastStreamEvent({
       requestId,
       model: ctx.providerChain[0]?.model || ctx.model,
@@ -649,6 +650,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       state: ctx._streamState,
       provider: ctx.providerChain[0]?.provider ?? "unknown",
       timestamp: Date.now(),
+      maxTokens: typeof parsedBody?.max_tokens === "number" ? parsedBody.max_tokens : undefined,
     });
 
     // Forward with fallback chain

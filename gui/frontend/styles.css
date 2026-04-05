@@ -205,11 +205,32 @@ body {
 
 .activity-fill.state-streaming {
   background-color: var(--green);
-  background-image: none !important;
-  -webkit-animation: none !important;
-  animation: none !important;
-  transition: none;
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.2) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  -webkit-animation: activity-shimmer 1.8s ease-in-out infinite;
+  animation: activity-shimmer 1.8s ease-in-out infinite;
+  transition: width 0.3s ease;
   box-shadow: 0 0 8px rgba(76, 175, 80, 0.4);
+}
+
+.activity-fill.state-slow {
+  background-color: var(--yellow);
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(255, 255, 255, 0.25) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  -webkit-animation: activity-shimmer 1.2s ease-in-out infinite;
+  animation: activity-shimmer 1.2s ease-in-out infinite;
+  transition: width 0.3s ease;
+  box-shadow: 0 0 8px rgba(255, 193, 7, 0.4);
 }
 
 .activity-fill.state-fallback {
@@ -228,7 +249,8 @@ body {
   -webkit-animation: none;
   animation: none;
   background-color: var(--green);
-  transition: width 0.15s ease, opacity 0.5s ease 0.5s;
+  background-image: none;
+  transition: width 0.15s ease, opacity 0.4s ease 2s;
   opacity: 0;
 }
 
@@ -245,10 +267,15 @@ body {
   50% { opacity: 1; }
 }
 
+@keyframes activity-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
 .activity-track.dismissing {
   opacity: 0;
   transform: translateX(20px);
-  transition: opacity 0.5s ease, transform 0.5s ease;
+  transition: opacity 0.4s ease 2s, transform 0.4s ease 2s;
 }
 
 .activity-label {
