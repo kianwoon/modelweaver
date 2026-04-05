@@ -452,8 +452,8 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     // Create per-provider connection pool for HTTP keep-alive reuse
     const poolSize = p.poolSize;
     providerConfig._agent = new Agent({
-      keepAliveTimeout: 30000,
-      keepAliveMaxTimeout: 60000,
+      keepAliveTimeout: 120_000,     // 2min — matches server keepAliveTimeout for Claude Code
+      keepAliveMaxTimeout: 300_000,  // 5min — extended max lifetime, pingInterval detects dead conns
       connections: poolSize ?? 10,
       allowH2: true,
       pingInterval: 10_000, // HTTP/2 PING every 10s — detect dead connections in background
