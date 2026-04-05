@@ -275,4 +275,5 @@ export interface StreamEvent {
   contextPercent?: number;
   contextWindowSize?: number;
   headerSize?: number;
+  maxTokens?: number;
 }

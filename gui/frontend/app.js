@@ -521,7 +521,7 @@ function createActivityBar(requestId, model, tier) {
   barLifecycle.set(requestId, 'active');
   ensureStaleChecker();
 
-  const entry = { element: track, fill, label, statusSpan, modelName, startTime: Date.now(), lastOutputTokens: 0, prevTimestamp: 0, model, tier, ttfbTimer: null, lastStreamMs: 0 };
+  const entry = { element: track, fill, label, statusSpan, modelName, startTime: Date.now(), lastOutputTokens: 0, prevTimestamp: 0, model, tier, ttfbTimer: null, lastStreamMs: 0, maxTokens: null, provider: null, slowWarned: false };
 
   return entry;
 }
@@ -562,9 +562,9 @@ function removeActivityBar(requestId) {
     }
   };
 
-  // Wait for CSS transition + safety fallback
+  // D: Keep completed bar for 2s before dismissing — let user read final stats
   bar.addEventListener('transitionend', cleanup, { once: true });
-  setTimeout(cleanup, 600); // 600ms fallback
+  setTimeout(cleanup, 2600); // 2.5s fallback (2s visible + 0.5s animation)
 }
 
 // --- Glow helpers ---
@@ -613,9 +613,16 @@ function applyStreamingUpdate(requestId, data) {
   entry.fill.classList.remove('state-start');
   entry.fill.classList.add('state-streaming');
   const elapsed = (Date.now() - entry.startTime) / 1000;
-  const pct = Math.min(80, elapsed * 5);
-  entry.fill.style.width = pct + '%';
+  // A: Token-based progress — use outputTokens/maxTokens when available
   const tok = data.outputTokens || 0;
+  let pct;
+  if (entry.maxTokens && entry.maxTokens > 0 && tok > 0) {
+    pct = Math.min(95, (tok / entry.maxTokens) * 100);
+  } else {
+    // Fallback: logarithmic time-based progress (fast ramp, slow plateau)
+    pct = Math.min(80, Math.log(1 + elapsed * 2) / Math.log(31) * 80);
+  }
+  entry.fill.style.width = pct + '%';
   // Compute tok/s from delta between consecutive streaming events
   let tps = '';
   const prevTok = entry.lastOutputTokens;
@@ -627,10 +634,17 @@ function applyStreamingUpdate(requestId, data) {
   entry.lastOutputTokens = tok;
   entry.prevTimestamp = data.timestamp || Date.now();
   const secs = elapsed >= 1 ? elapsed.toFixed(1) + 's' : Math.round(elapsed * 1000) + 'ms';
+  // C: Slow provider warning after 10s
+  if (elapsed > 10 && !entry.slowWarned && tok === 0) {
+    entry.slowWarned = true;
+    entry.fill.classList.add('state-slow');
+    entry.statusSpan.textContent = secs + ' \u00b7 slow...';
+    return;
+  }
   let meta = tok > 0
     ? tok + ' tok' + (tps ? ' \u00b7 ' + tps : '') + ' \u00b7 ' + secs
-    : (entry.headerInfo || '') + ' \u00b7 ' + secs;
-  // Cache hit rate and context usage
+    : secs;
+  // Cache hit rate and context usage (only show when non-zero)
   const cacheHit = data.cacheHitRate;
   const ctxPct = data.contextPercent;
   if (cacheHit != null && cacheHit > 0) meta += ' \u00b7 ' + cacheHit.toFixed(0) + '% cache';
@@ -729,7 +743,7 @@ function handleStreamEvent(data) {
     if (entry) entry.ttfbTimer = null;
     entry.element.removeAttribute('data-preview');
     entry.element.style.marginBottom = '';
-    entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start');
+    entry.fill.classList.remove('state-streaming', 'state-fallback', 'state-start', 'state-slow');
     entry.fill.classList.add('state-complete');
     entry.fill.style.width = '100%';
     const tps = data.tokensPerSec ? data.tokensPerSec.toFixed(0) + ' tok/s' : '';
