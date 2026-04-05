@@ -1197,51 +1197,15 @@ export async function forwardRequest(
         const EVENT_ERROR_LEN = "event: error".length; // 12
         let tailBuffer = "";
 
-        // Thinking block omission: track which block indices are thinking blocks.
-        // Upstream providers (GLM, MiniMax, etc.) may send thinking blocks with null
-        // content fields that crash the Anthropic SDK (v2.1.88+) with
-        // "null is not an object (evaluating Y8.content)". By suppressing the entire
-        // thinking block from the stream, we prevent the crash entirely.
-        const omittedBlockIndices = new Set<number>();
-
         passThrough.on("data", (chunk: Buffer) => {
           // Guard: don't enqueue data if stream is already in a terminal state
-          // (this is a pure read guard, no transition — safe as-is)
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
 
-          const text = chunk.toString("utf-8");
-
-
-          // Filter: upstream providers may send `event: error` SSE events that the
-          // Anthropic SDK doesn't recognize and crashes on ("null is not an object
-          // evaluating Y8.content"). Check current chunk AND cross-chunk boundary.
-          const combined = tailBuffer + text;
-          if (combined.includes("event: error")) {
-            if (passThrough) (passThrough as any)._intentionalClose = true;
-            passThrough?.end();
-            return;
-          }
-          // Update rolling tail for next chunk's cross-boundary check
-          tailBuffer = combined.length > EVENT_ERROR_LEN
-            ? combined.slice(-EVENT_ERROR_LEN)
-            : combined;
-
-          // Thinking block filtering: parse individual SSE events within the chunk
-          // and rewrite thinking blocks as empty text blocks. We MUST parse at the
-          // event level (not chunk level) because a single TCP chunk can contain
-          // events for BOTH thinking and text blocks — dropping the whole chunk
-          // would kill valid text block_start events, breaking index continuity
-          // and crashing the SDK with "null is not an object (evaluating Y8.content)".
-          const outputText = filterThinkingFromChunk(text, omittedBlockIndices);
-          if (outputText === null) {
-            return; // entire chunk was thinking events, nothing to forward
-          }
-
-          // Sanitize null objects that crash the Anthropic SDK.
-          const sanitized = sanitizeSSEChunk(outputText);
-          const outChunk = sanitized === outputText
-            ? new Uint8Array(chunk) // no changes — zero-alloc fast path
-            : textEncoder.encode(sanitized);
+          // Pure passthrough — forward bytes without modification.
+          // Direct upstream connections work fine, so the proxy must be invisible.
+          // Any stream modification (null sanitization, thinking block filtering,
+          // SSE event rewriting) introduces crash paths in the Anthropic SDK.
+          const outChunk = new Uint8Array(chunk);
 
           if (sseBuffer) {
             sseBuffer.write(outChunk);

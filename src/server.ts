@@ -172,79 +172,13 @@ function isForOmittedIndex(eventText: string, omittedIndices: Set<number>): bool
  * 3. message_start pre-flight — ensures SDK state is initialized before content
  */
 function createSanitizeTransform(): TransformStream<Uint8Array, Uint8Array> {
-  const td = new TextDecoder();
-  const te = new TextEncoder();
-  let isSSE: boolean | null = null;
-  let forwardBuf = "";
-  let seenMessageStart = false;
-  const preflightBuf: string[] = [];
-  const omittedBlockIndices = new Set<number>();
-
-  const flushPreflight = (controller: TransformStreamDefaultController<Uint8Array>) => {
-    for (const event of preflightBuf) {
-      controller.enqueue(te.encode(sanitizeNullObjects(event) + "\n\n"));
-    }
-    preflightBuf.length = 0;
-  };
-
+  // Pure passthrough — forward bytes without modification.
+  // Direct upstream connections work fine, so the proxy must be invisible.
+  // Any stream modification (null sanitization, thinking block filtering,
+  // SSE event rewriting) introduces crash paths in the Anthropic SDK.
   return new TransformStream({
     transform(chunk, controller) {
-      const decoded = td.decode(chunk, { stream: true });
-      if (isSSE === null) {
-        // Detect SSE from chunk content: event:, data:, or comment lines
-        isSSE = decoded.startsWith("event:") || decoded.startsWith("data:") || decoded.startsWith(":");
-      }
-      if (isSSE) {
-        forwardBuf += decoded;
-        let eventEnd: number;
-        while ((eventEnd = forwardBuf.indexOf("\n\n")) !== -1) {
-          const eventText = forwardBuf.slice(0, eventEnd);
-          forwardBuf = forwardBuf.slice(eventEnd + 2);
-
-          // Layer 1: Rewrite thinking blocks as empty text blocks to preserve
-          // block index continuity. Dropping them entirely breaks the SDK's
-          // block index tracking (expects contiguous indices from 0).
-          const thinkingIdx = getThinkingBlockIndex(eventText);
-          if (thinkingIdx >= 0) {
-            omittedBlockIndices.add(thinkingIdx);
-            // Emit empty text block + immediate stop to keep index sequence valid
-            controller.enqueue(te.encode(
-              `event: content_block_start\ndata: {"type":"content_block_start","index":${thinkingIdx},"content_block":{"type":"text","text":""}}\n\n` +
-              `event: content_block_stop\ndata: {"type":"content_block_stop","index":${thinkingIdx}}\n\n`
-            ));
-            continue;
-          }
-          if (isForOmittedIndex(eventText, omittedBlockIndices)) continue;
-
-          // Layer 2: Drop null-only delta events (spacers from any upstream provider)
-          if (isNullOnlyDelta(eventText)) continue;
-
-          // Layer 3: Pre-flight — buffer until message_start is seen
-          if (!seenMessageStart) {
-            if (eventText.includes('"message_start"') || eventText.includes('"type":"message_start"')) {
-              seenMessageStart = true;
-              flushPreflight(controller);
-              controller.enqueue(te.encode(sanitizeNullObjects(eventText) + "\n\n"));
-            } else if (eventText.startsWith(":")) {
-              // SSE comments (keep-alive pings) — forward immediately
-              controller.enqueue(te.encode(eventText + "\n\n"));
-            } else {
-              preflightBuf.push(eventText);
-            }
-          } else {
-            controller.enqueue(te.encode(sanitizeNullObjects(eventText) + "\n\n"));
-          }
-        }
-      } else {
-        controller.enqueue(te.encode(sanitizeNullObjects(decoded)));
-      }
-    },
-    flush(controller) {
-      // Flush any remaining preflight buffer (stream ended without message_start)
-      if (!seenMessageStart) flushPreflight(controller);
-      if (forwardBuf) {
-        controller.enqueue(te.encode(sanitizeNullObjects(forwardBuf)));
-      }
+      controller.enqueue(chunk);
     },
   });
 }
@@ -271,7 +205,6 @@ function createMetricsTransform(
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let lineBuf = "";
   let eventBuf = "";
-  const omittedBlockIndices = new Set<number>();
 
   // --- JSON state ---
   const WINDOW_SIZE = 4096;
@@ -466,28 +399,9 @@ function createMetricsTransform(
       for (const line of lines) {
         if (line === "") {
           if (eventBuf) {
-            // Rewrite thinking blocks as empty text blocks to preserve index continuity
-            const thinkingIdx = getThinkingBlockIndex(eventBuf);
-            if (thinkingIdx >= 0) {
-              omittedBlockIndices.add(thinkingIdx);
-              // Emit empty text block + immediate stop to keep index sequence valid
-              drainEvents(`event: content_block_start\ndata: {"type":"content_block_start","index":${thinkingIdx},"content_block":{"type":"text","text":""}}\n\n` +
-                `event: content_block_stop\ndata: {"type":"content_block_stop","index":${thinkingIdx}}\n\n`);
-              eventBuf = "";
-              continue;
-            }
-            if (isForOmittedIndex(eventBuf, omittedBlockIndices)) {
-              eventBuf = "";
-              continue;
-            }
-            // Drop null-only delta events (spacers from any upstream provider)
-            if (isNullOnlyDelta(eventBuf)) {
-              eventBuf = "";
-              continue;
-            }
             drainEvents(eventBuf);
-            // Forward complete event with null sanitization applied
-            controller.enqueue(te.encode(sanitizeNullObjects(eventBuf) + "\n\n"));
+            // Pure passthrough — forward event unchanged
+            controller.enqueue(te.encode(eventBuf + "\n\n"));
             eventBuf = "";
           }
         } else {
@@ -497,16 +411,8 @@ function createMetricsTransform(
 
       if (isFinal) {
         if (eventBuf.trim()) {
-          const thinkingIdx = getThinkingBlockIndex(eventBuf);
-          const isOmitted = thinkingIdx >= 0 || isForOmittedIndex(eventBuf, omittedBlockIndices);
-          if (thinkingIdx >= 0) {
-            // Rewrite as empty text block in final flush too
-            drainEvents(`event: content_block_start\ndata: {"type":"content_block_start","index":${thinkingIdx},"content_block":{"type":"text","text":""}}\n\n` +
-              `event: content_block_stop\ndata: {"type":"content_block_stop","index":${thinkingIdx}}\n\n`);
-          } else if (!isOmitted && !isNullOnlyDelta(eventBuf)) {
-            drainEvents(eventBuf);
-            controller.enqueue(te.encode(sanitizeNullObjects(eventBuf)));
-          }
+          drainEvents(eventBuf);
+          controller.enqueue(te.encode(eventBuf));
         }
         recordMetrics(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheCreation);
         return;
@@ -545,7 +451,7 @@ function createMetricsTransform(
       scanWindow(windowBuf);
 
       // Forward sanitized bytes (non-SSE path — metrics + forwarding in one pass)
-      controller.enqueue(te.encode(sanitizeNullObjects(decoded)));
+      controller.enqueue(te.encode(decoded));
 
       // Emit streaming progress (throttled ~4 Hz)
       const nowJson = Date.now();
