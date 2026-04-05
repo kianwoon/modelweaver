@@ -10,7 +10,10 @@ gui/target/
 gui/node_modules/
 node-compile-cache/
 .superpowers/
+docs/superpowers/
+.playwright-mcp/
+*.cjs.bak
+diagnostic-sse.cjs
 
 # Internal review files
-REVIEW-FINDINGS.md
 CLAUDE.md
