@@ -142,7 +142,7 @@ function isNullOnlyDelta(eventText: string): boolean {
  */
 function getThinkingBlockIndex(eventText: string): number {
   if (!eventText.includes("content_block_start")) return -1;
-  if (!eventText.includes('"thinking"')) return -1;
+  if (!/"type"\s*:\s*"thinking"/.test(eventText)) return -1;
   const m = eventText.match(/"index"\s*:\s*(\d+)/);
   return m ? parseInt(m[1], 10) : -1;
 }
@@ -201,11 +201,18 @@ function createSanitizeTransform(): TransformStream<Uint8Array, Uint8Array> {
           const eventText = forwardBuf.slice(0, eventEnd);
           forwardBuf = forwardBuf.slice(eventEnd + 2);
 
-          // Layer 1: Omit thinking blocks entirely
+          // Layer 1: Rewrite thinking blocks as empty text blocks to preserve
+          // block index continuity. Dropping them entirely breaks the SDK's
+          // block index tracking (expects contiguous indices from 0).
           const thinkingIdx = getThinkingBlockIndex(eventText);
           if (thinkingIdx >= 0) {
             omittedBlockIndices.add(thinkingIdx);
-            continue; // drop the content_block_start for thinking
+            // Emit empty text block + immediate stop to keep index sequence valid
+            controller.enqueue(te.encode(
+              `event: content_block_start\ndata: {"type":"content_block_start","index":${thinkingIdx},"content_block":{"type":"text","text":""}}\n\n` +
+              `event: content_block_stop\ndata: {"type":"content_block_stop","index":${thinkingIdx}}\n\n`
+            ));
+            continue;
           }
           if (isForOmittedIndex(eventText, omittedBlockIndices)) continue;
 
@@ -452,17 +459,20 @@ function createMetricsTransform(
     }
 
     if (isSSE) {
-      lineBuf += decoded;
+      lineBuf += decoded.replace(/\r$/, ""); // strip trailing \r from \r\n line endings
       const lines = lineBuf.split("\n");
       lineBuf = lines.pop()!;
 
       for (const line of lines) {
         if (line === "") {
           if (eventBuf) {
-            // Omit thinking blocks entirely
+            // Rewrite thinking blocks as empty text blocks to preserve index continuity
             const thinkingIdx = getThinkingBlockIndex(eventBuf);
             if (thinkingIdx >= 0) {
               omittedBlockIndices.add(thinkingIdx);
+              // Emit empty text block + immediate stop to keep index sequence valid
+              drainEvents(`event: content_block_start\ndata: {"type":"content_block_start","index":${thinkingIdx},"content_block":{"type":"text","text":""}}\n\n` +
+                `event: content_block_stop\ndata: {"type":"content_block_stop","index":${thinkingIdx}}\n\n`);
               eventBuf = "";
               continue;
             }
@@ -489,9 +499,11 @@ function createMetricsTransform(
         if (eventBuf.trim()) {
           const thinkingIdx = getThinkingBlockIndex(eventBuf);
           const isOmitted = thinkingIdx >= 0 || isForOmittedIndex(eventBuf, omittedBlockIndices);
-          if (isOmitted || isNullOnlyDelta(eventBuf)) {
-            // Drop thinking blocks and null-only deltas even in final flush
-          } else {
+          if (thinkingIdx >= 0) {
+            // Rewrite as empty text block in final flush too
+            drainEvents(`event: content_block_start\ndata: {"type":"content_block_start","index":${thinkingIdx},"content_block":{"type":"text","text":""}}\n\n` +
+              `event: content_block_stop\ndata: {"type":"content_block_stop","index":${thinkingIdx}}\n\n`);
+          } else if (!isOmitted && !isNullOnlyDelta(eventBuf)) {
             drainEvents(eventBuf);
             controller.enqueue(te.encode(sanitizeNullObjects(eventBuf)));
           }

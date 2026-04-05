@@ -121,41 +121,6 @@ export function shouldDropNullDelta(text: string): boolean {
 }
 
 /**
- * Returns true if the chunk contains SSE events for a thinking block that
- * should be omitted from the stream. This implements the "Omit" strategy —
- * thinking blocks from upstream providers (GLM, etc.) may contain null fields
- * that crash the Anthropic SDK (v2.1.88+) with "null is not an object
- * (evaluating Y8.content)". By omitting these blocks entirely, the CLI only
- * sees the final answer and never encounters the problematic thinking data.
- *
- * @param text - raw TCP chunk text
- * @param omittedIndices - Set of block indices that are thinking blocks
- */
-export function shouldOmitThinkingChunk(text: string, omittedIndices: Set<number>): boolean {
-  if (omittedIndices.size === 0) return false;
-
-  // Check for content_block_start with type: "thinking" — register new index
-  const startMatch = text.match(/"index"\s*:\s*(\d+)[^}]*"type"\s*:\s*"thinking"/);
-  if (startMatch) omittedIndices.add(parseInt(startMatch[1], 10));
-  const startMatchAlt = text.match(/"type"\s*:\s*"thinking"[^}]*"index"\s*:\s*(\d+)/);
-  if (startMatchAlt) omittedIndices.add(parseInt(startMatchAlt[1], 10));
-
-  // Check for content_block_delta/stop with an omitted index
-  for (const idx of omittedIndices) {
-    // Match "index":<idx> in any SSE event (content_block_delta, content_block_stop)
-    const idxPattern = new RegExp(`"index"\\s*:\\s*${idx}\\b`);
-    if (idxPattern.test(text)) return true;
-  }
-
-  // Check for content_block_stop with thinking type (end of a thinking block)
-  if (/content_block_stop/.test(text) && /"type"\s*:\s*"thinking"/.test(text)) {
-    return true;
-  }
-
-  return false;
-}
-
-/**
  * Parse individual SSE events within a raw TCP chunk and filter out thinking blocks.
  *
  * Why event-level (not chunk-level): A single TCP chunk can contain SSE events for
@@ -228,7 +193,7 @@ export function filterThinkingFromChunk(text: string, thinkingIndices: Set<numbe
     const startMatch = event.match(/"index"\s*:\s*(\d+)/);
     const blockIndex = startMatch ? parseInt(startMatch[1], 10) : -1;
 
-    if (event.includes("content_block_start") && event.includes('"thinking"')) {
+    if (event.includes("content_block_start") && /"type"\s*:\s*"thinking"/.test(event)) {
       // Register this index as a thinking block
       if (blockIndex >= 0) thinkingIndices.add(blockIndex);
 

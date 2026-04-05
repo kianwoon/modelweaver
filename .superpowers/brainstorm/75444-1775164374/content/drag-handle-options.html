@@ -1,0 +1,69 @@
+<h2>Section Reorder — Drag Handle Style</h2>
+<p class="subtitle">Where should the drag handle be? This affects discoverability and interaction feel.</p>
+
+<div class="cards">
+  <div class="card" data-choice="header-handle" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Option A: Grip Icon on Section Header</div>
+        <div class="mockup-body" style="padding:16px;background:#1a1a2e;min-height:360px;border-radius:8px;">
+          <div style="border:1px solid #333;border-radius:6px;padding:12px;margin-bottom:8px;background:#16213e;display:flex;align-items:center;gap:8px;">
+            <span style="color:#666;font-size:14px;cursor:grab;">⠿</span>
+            <span style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;">Active Models</span>
+          </div>
+          <div style="border:1px solid #333;border-radius:6px;padding:12px;margin-bottom:8px;background:#16213e;display:flex;align-items:center;gap:8px;">
+            <span style="color:#666;font-size:14px;cursor:grab;">⠿</span>
+            <span style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;">Providers %</span>
+          </div>
+          <div style="border:1px solid #333;border-radius:6px;padding:12px;margin-bottom:8px;background:#16213e;display:flex;align-items:center;gap:8px;">
+            <span style="color:#666;font-size:14px;cursor:grab;">⠿</span>
+            <span style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;">Recent</span>
+          </div>
+          <p style="font-size:10px;color:#555;margin-top:12px;text-align:center;">Grip icon (⠿) appears on hover • Familiar pattern (Notion, Linear)</p>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Grip Icon on Header</h3>
+      <p>Small ⠿ handle appears on section title hover. Minimal, clean, follows established patterns.</p>
+    </div>
+  </div>
+
+  <div class="card" data-choice="whole-section" onclick="toggleSelect(this)">
+    <div class="card-image">
+      <div class="mockup">
+        <div class="mockup-header">Option B: Drag Entire Section</div>
+        <div class="mockup-body" style="padding:16px;background:#1a1a2e;min-height:360px;border-radius:8px;">
+          <div style="border:2px dashed #4a4a6a;border-radius:6px;padding:12px;margin-bottom:8px;background:#16213e;cursor:grab;">
+            <span style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:8px;">Active Models</span>
+            <div style="height:40px;background:#0f3460;border-radius:4px;display:flex;align-items:center;justify-content:center;">
+              <span style="font-size:10px;color:#555;">model list...</span>
+            </div>
+          </div>
+          <div style="border:1px solid #333;border-radius:6px;padding:12px;margin-bottom:8px;background:#16213e;cursor:grab;">
+            <span style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:8px;">Providers %</span>
+            <div style="height:40px;background:#0f3460;border-radius:4px;display:flex;align-items:center;justify-content:center;">
+              <span style="font-size:10px;color:#555;">provider cards...</span>
+            </div>
+          </div>
+          <div style="border:1px solid #333;border-radius:6px;padding:12px;margin-bottom:8px;background:#16213e;cursor:grab;">
+            <span style="font-size:11px;font-weight:600;color:#888;text-transform:uppercase;letter-spacing:0.5px;display:block;margin-bottom:8px;">Recent</span>
+            <div style="height:40px;background:#0f3460;border-radius:4px;display:flex;align-items:center;justify-content:center;">
+              <span style="font-size:10px;color:#555;">recent items...</span>
+            </div>
+          </div>
+          <p style="font-size:10px;color:#555;margin-top:12px;text-align:center;">Whole section is draggable • Larger target area</p>
+        </div>
+      </div>
+    </div>
+    <div class="card-body">
+      <h3>Drag Entire Section</h3>
+      <p>Grab anywhere on the section to reorder. Easier to hit but may conflict with content selection.</p>
+    </div>
+  </div>
+</div>
+
+<div class="pros-cons">
+  <div class="pros"><h4>Option A Pros</h4><ul><li>Clear affordance — user knows what's draggable</li><li>Doesn't interfere with content interaction</li><li>Industry standard (Notion, Linear, macOS lists)</li></ul></div>
+  <div class="cons"><h4>Option B Pros</h4><ul><li>Larger touch target</li><li>No extra UI element needed</li><li>Simpler to implement</li></ul></div>
+</div>
