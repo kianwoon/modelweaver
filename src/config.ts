@@ -174,6 +174,7 @@ const rawConfigSchema = z.object({
       unhealthyThreshold: z.number().min(0).max(1).default(0.5).optional(),
       maxBodySizeMB: z.number().min(1).max(100).default(10).optional(),
       sessionIdleTtlMs: z.number().int().min(60000).optional(),
+      disableThinking: z.boolean().default(false).optional(),
     })
     .default({ port: 3456, host: "localhost" }),
   providers: z.record(z.string(), providerSchema),

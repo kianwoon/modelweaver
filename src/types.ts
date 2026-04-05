@@ -58,6 +58,8 @@ export interface ServerConfig {
   maxBodySizeMB?: number;
   /** Session idle TTL in ms — closes per-session agent connections after this idle period. Default: 600000 (10min) */
   sessionIdleTtlMs?: number;
+  /** When true, strip `thinking` blocks from upstream requests to prevent heavy SSE output */
+  disableThinking?: boolean;
 }
 
 export interface AppConfig {
@@ -189,7 +191,7 @@ export type StreamState = "start" | "ttfb" | "streaming" | "fallback" | "complet
 
 const VALID_TRANSITIONS: Record<StreamState, StreamState[]> = {
   start: ["ttfb", "streaming", "error"],
-  ttfb: ["streaming", "error"],
+  ttfb: ["streaming", "complete", "error"],
   streaming: ["complete", "error", "fallback"],
   fallback: ["streaming", "complete", "error"],
   complete: [],

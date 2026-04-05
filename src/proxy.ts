@@ -3,6 +3,27 @@ import type { HedgingConfig, ProviderConfig, RequestContext, RoutingEntry } from
 import { transitionStreamState } from "./types.js";
 import { request as undiciRequest } from "undici";
 import { PassThrough } from "node:stream";
+import { TextEncoder } from "node:util";
+
+/**
+ * Write Anthropic-compatible SSE closing events to a PassThrough stream
+ * before ending it. Without this, abruptly closing the stream mid-event
+ * causes the SDK to crash with "null is not an object (evaluating Y8.content)".
+ */
+const _textEncoder = new TextEncoder();
+function writeSSEGracefulTermination(passThrough: PassThrough): void {
+  // Leading newline ensures any truncated SSE line is terminated
+  // so the subsequent events start on a fresh line boundary.
+  const events = [
+    "\n",
+    "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+    "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\",\"stop_sequence\":null},\"usage\":{\"output_tokens\":0}}\n\n",
+    "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+  ];
+  for (const evt of events) {
+    passThrough.write(_textEncoder.encode(evt));
+  }
+}
 import type { SessionAgentPool } from "./session-pool.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -111,160 +132,6 @@ const REPLACEMENT_REGEX_BOTH = new RegExp(MODEL_KEY_REGEX.source + "|" + MAX_TOK
  *
  * Returns the sanitized string, or the original if no patterns matched (fast path).
  */
-/** Returns true if the chunk is a content_block_delta with only null content fields. */
-export function shouldDropNullDelta(text: string): boolean {
-  if (!/content_block_delta/.test(text)) return false;
-  if (!/"(thinking|text|partial_json)"\s*:\s*null(?=[\s,}\]])/.test(text)) return false;
-  // Has at least one non-null content field? Then it's a real delta, keep it.
-  if (/"(thinking|text|partial_json)"\s*:\s*"[^"]+"/.test(text)) return false;
-  return true;
-}
-
-/**
- * Parse individual SSE events within a raw TCP chunk and filter out thinking blocks.
- *
- * Why event-level (not chunk-level): A single TCP chunk can contain SSE events for
- * BOTH a thinking block (index 0) and a text block (index 1). Dropping the entire
- * chunk kills the text block's content_block_start, breaking index continuity and
- * crashing the Anthropic SDK with "null is not an object (evaluating Y8.content)".
- *
- * Strategy:
- *   1. Split chunk into individual SSE events (delimited by \n\n)
- *   2. content_block_start with type:"thinking" → rewrite as empty text block + immediate stop
- *   3. content_block_delta for thinking indices → drop
- *   4. content_block_stop for thinking indices → drop (we already sent our own stop)
- *   5. All other events → forward unchanged
- *
- * @param text - raw TCP chunk text (may contain multiple SSE events)
- * @param thinkingIndices - Set of block indices identified as thinking blocks (mutated)
- * @returns filtered text with thinking events removed/rewritten, or null if everything was filtered
- */
-export function filterThinkingFromChunk(text: string, thinkingIndices: Set<number>): string | null {
-  // Fast path: if no thinking-related content, return as-is
-  if (!text.includes("thinking") && thinkingIndices.size === 0) return text;
-
-  // Split into individual SSE events. SSE spec uses \n\n as event delimiter.
-  // Preserve any trailing text (incomplete event) as prefix.
-  const events: string[] = [];
-  let remaining = text;
-  let prefix = "";
-
-  // Handle the case where the chunk starts mid-event from a previous chunk
-  const firstEventStart = remaining.indexOf("event:");
-  const firstDataStart = remaining.indexOf("data:");
-  const firstMarker = firstEventStart === -1
-    ? firstDataStart
-    : firstDataStart === -1
-      ? firstEventStart
-      : Math.min(firstEventStart, firstDataStart);
-
-  if (firstMarker > 0) {
-    // There's text before the first SSE marker — keep it as prefix
-    prefix = remaining.substring(0, firstMarker);
-    remaining = remaining.substring(firstMarker);
-  }
-
-  // Split on double newline (SSE event boundary)
-  const parts = remaining.split("\n\n");
-  for (let i = 0; i < parts.length; i++) {
-    const part = parts[i].trim();
-    if (!part) continue;
-
-    // Last part might be incomplete (no trailing \n\n yet)
-    if (i === parts.length - 1 && !remaining.endsWith("\n\n")) {
-      // Incomplete event — append to prefix for next chunk
-      prefix += (prefix ? "\n\n" : "") + part;
-      continue;
-    }
-
-    events.push(part);
-  }
-
-  if (events.length === 0) {
-    // No complete events in this chunk — keep prefix for next chunk
-    return prefix || null;
-  }
-
-  const output: string[] = [];
-  if (prefix) output.push(prefix);
-
-  for (const event of events) {
-    // Detect content_block_start with type:"thinking"
-    const startMatch = event.match(/"index"\s*:\s*(\d+)/);
-    const blockIndex = startMatch ? parseInt(startMatch[1], 10) : -1;
-
-    if (event.includes("content_block_start") && /"type"\s*:\s*"thinking"/.test(event)) {
-      // Register this index as a thinking block
-      if (blockIndex >= 0) thinkingIndices.add(blockIndex);
-
-      // Rewrite as an empty text block with immediate stop.
-      // The SDK expects content_block_start → content_block_stop for every block index.
-      // Skipping the index entirely breaks the stream parser.
-      if (blockIndex >= 0) {
-        output.push(
-          `event: content_block_start\ndata: {"type":"content_block_start","index":${blockIndex},"content_block":{"type":"text","text":""}}`,
-          `event: content_block_stop\ndata: {"type":"content_block_stop","index":${blockIndex}}`
-        );
-      }
-      continue;
-    }
-
-    // Drop content_block_delta events for thinking block indices
-    if (event.includes("content_block_delta") && blockIndex >= 0 && thinkingIndices.has(blockIndex)) {
-      continue;
-    }
-
-    // Drop content_block_stop events for thinking block indices (we already sent our own stop above)
-    if (event.includes("content_block_stop") && blockIndex >= 0 && thinkingIndices.has(blockIndex)) {
-      continue;
-    }
-
-    // Not a thinking event — forward unchanged
-    output.push(event);
-  }
-
-  if (output.length === 0) return null;
-  return output.join("\n\n") + "\n\n";
-}
-
-export function sanitizeSSEChunk(chunk: string): string {
-  // Fast path: skip if no null patterns present.
-  if (!chunk.includes("null")) return chunk;
-
-  // Critical: replace bare "data: null" SSE lines — upstream providers (GLM, MiniMax)
-  // sometimes send these, and the Anthropic SDK crashes with "null is not an object
-  // (evaluating 'Y8.content')" when it tries to parse and access properties on null.
-  // Replace data: null with data: {} so the SDK gets an empty object instead of null.
-  let result = chunk.replace(/^data:\s*null\s*$/gm, 'data: {}');
-
-  // Replace known null patterns that crash the Anthropic SDK.
-  // Use targeted regex to avoid corrupting unrelated JSON values.
-  result = result
-    .replace(/"content"\s*:\s*null(?=[\s,}\]])/g, '"content":[]')
-    .replace(/"content_block"\s*:\s*null(?=[\s,}\]])/g, '"content_block":{"type":"text","text":""}')
-    .replace(/"message"\s*:\s*null(?=[\s,}\]])/g, '"message":{}')
-    .replace(/"delta"\s*:\s*null(?=[\s,}\]])/g, '"delta":{}')
-    .replace(/"usage"\s*:\s*null(?=[\s,}\]])/g, '"usage":{"input_tokens":0,"output_tokens":0}')
-    // Nested null fields inside non-null parent objects (MiniMax/GLM may send these)
-    .replace(/"thinking"\s*:\s*null(?=[\s,}\]])/g, '"thinking":""')
-    .replace(/"thinking_bytes"\s*:\s*null(?=[\s,}\]])/g, '"thinking_bytes":""')
-    .replace(/"thinking_control"\s*:\s*null(?=[\s,}\]])/g, '"thinking_control":""')
-    .replace(/"signature"\s*:\s*null(?=[\s,}\]])/g, '"signature":""')
-    .replace(/"text"\s*:\s*null(?=[\s,}\]])/g, '"text":""')
-    .replace(/"partial_json"\s*:\s*null(?=[\s,}\]])/g, '"partial_json":""')
-    .replace(/"name"\s*:\s*null(?=[\s,}\]])/g, '"name":""')
-    .replace(/"input"\s*:\s*null(?=[\s,}\]])/g, '"input":{}')
-    // Array elements — [null] → [], null inside array → remove
-    .replace(/\[null\]/g, '[]')
-    // stop_sequence and stop_reason — preserve null, these are valid in Anthropic spec.
-    // Replacing stop_reason:null with "end_turn" in message_start causes the SDK (v2.1.88+)
-    // to treat the message as already completed, crashing with "null is not an object
-    // (evaluating Y8.content)" when it tries to read content on the uninitialized state.
-    // DO NOT replace stop_reason:null or stop_sequence:null.
-
-  return result;
-}
-
 // --- Pre-built error response helpers ---
 
 const ERR_HEADERS = Object.freeze({ "content-type": "application/json" });
@@ -584,13 +451,15 @@ function applyTargetedReplacements(
   provider: ProviderConfig,
   parsed: Record<string, unknown>,
   needsOrphanClean: boolean,
+  needsThinkingStrip = false,
 ): string {
-  // If orphan cleaning is needed, we must do full JSON parse (structural changes to messages)
-  if (needsOrphanClean) {
+  // If orphan cleaning or thinking stripping is needed, fall back to full JSON
+  // (orphan clean requires structural changes; thinking requires nested-brace handling)
+  if (needsOrphanClean || needsThinkingStrip) {
     // shallow clone: cleanOrphanedToolMessages reassigns body.messages
     const mutable = shallowCloneForMutation(parsed);
     if (entry.model) mutable.model = entry.model;
-    cleanOrphanedToolMessages(mutable);
+    if (needsOrphanClean) cleanOrphanedToolMessages(mutable);
     if (provider.modelLimits) {
       const { maxOutputTokens } = provider.modelLimits;
       const requested = typeof mutable.max_tokens === "number" ? mutable.max_tokens : maxOutputTokens;
@@ -598,6 +467,7 @@ function applyTargetedReplacements(
         mutable.max_tokens = Math.min(requested, maxOutputTokens);
       }
     }
+    if (needsThinkingStrip) delete mutable.thinking;
     return JSON.stringify(mutable);
   }
 
@@ -738,12 +608,19 @@ export async function forwardRequest(
         }
       }
 
+      // Check 4: Thinking block stripping?
+      // Strips the `thinking` field from the request so upstream never generates
+      // thinking blocks in the SSE response. This reduces response size by 10-50KB+
+      // per request and speeds up Claude Code rendering.
+      const needsThinkingStrip = !!(provider._serverConfig?.disableThinking && parsed.thinking !== undefined);
+      if (needsThinkingStrip) needsModification = true;
+
       if (needsModification) {
         // On primary attempt (chainIndex === 0) without orphan cleaning, use targeted
         // string replacements to preserve prompt caching. Anthropic's cache breakpoints
         // are position-sensitive -- JSON.stringify changes whitespace/order, breaking hits.
         if (chainIndex === 0 && !needsOrphanClean) {
-          body = applyTargetedReplacements(ctx.rawBody, entry, provider, parsed, false);
+          body = applyTargetedReplacements(ctx.rawBody, entry, provider, parsed, false, needsThinkingStrip);
         } else {
           // Fallback attempts: full JSON parse/mutate/stringify (caching already broken)
           // shallow clone: cleanOrphanedToolMessages reassigns body.messages
@@ -769,6 +646,10 @@ export async function forwardRequest(
             if (mutable.max_tokens === undefined || requestedMaxTokens > maxOutputTokens) {
               mutable.max_tokens = Math.min(requestedMaxTokens, maxOutputTokens);
             }
+          }
+
+          if (needsThinkingStrip) {
+            delete mutable.thinking;
           }
 
           body = JSON.stringify(mutable);
@@ -932,10 +813,10 @@ export async function forwardRequest(
         try { undiciResponse.body.unpipe(passThrough) } catch { /* not piped */ }
         // Mark passThrough as intentional close so safeError delegates to safeClose
         (passThrough as any)._intentionalClose = true;
-        // End passThrough WITHOUT data — the passThrough error event will trigger
-        // safeError in the ReadableStream wrapper, which closes the controller cleanly.
-        // Do NOT write SSE "event: error" — the Anthropic SDK doesn't handle that
-        // event type and crashes with "null is not an object (evaluating Y8.content)".
+        // Write Anthropic-compatible SSE closing events before ending the stream.
+        // Without this, the stream is truncated mid-event and the SDK crashes with
+        // "null is not an object (evaluating Y8.content)".
+        try { writeSSEGracefulTermination(passThrough); } catch { /* passThrough already closed */ }
         passThrough.end();
 
         // Wait for passThrough to finish before destroying upstream body.
@@ -1074,10 +955,10 @@ export async function forwardRequest(
       // Mark passThrough as intentional close so safeError delegates to safeClose
       // instead of propagating the destroy error to the ReadableStream.
       (passThrough! as any)._intentionalClose = true;
-      // End WITHOUT data — the passThrough error event will trigger safeError
-      // in the ReadableStream wrapper, which closes the controller cleanly.
-      // Do NOT write SSE "event: error" — the Anthropic SDK doesn't handle that
-      // event type and crashes with "null is not an object (evaluating Y8.content)".
+      // Write Anthropic-compatible SSE closing events before ending the stream.
+      // Without this, the stream is truncated mid-event and the SDK crashes with
+      // "null is not an object (evaluating Y8.content)".
+      try { writeSSEGracefulTermination(passThrough!); } catch { /* passThrough already closed */ }
       passThrough!.end();
 
       // Wait for passThrough to finish before destroying upstream body.
@@ -1158,6 +1039,25 @@ export async function forwardRequest(
           // This is safe to call multiple times since release() is idempotent.
           if (sessionPool && ctx.sessionId) {
             sessionPool.release(ctx.sessionId, ctx.actualModel ?? ctx.model);
+          }
+          // Transition stream state to "complete" and broadcast for GUI.
+          // Only fire for normal stream completion (state was "streaming"),
+          // NOT for error/stall cases (state already "error" or other).
+          if (ctx._streamState === "streaming" || ctx._streamState === "ttfb") {
+            const latencyMs = Date.now() - ctx.startTime;
+            ctx._streamState = transitionStreamState(ctx, "complete", ctx.requestId);
+            if (ctx._streamState === "complete") {
+              broadcastStreamEvent({
+                requestId: ctx.requestId,
+                model: String(ctx.actualModel ?? entry.model ?? ""),
+                tier: "",
+                state: "complete",
+                status: undiciResponse.statusCode,
+                latencyMs,
+                outputTokens: 0,
+                timestamp: Date.now(),
+              });
+            }
           }
           try { controller.close(); } catch { /* already closed — undici bug */ }
         };

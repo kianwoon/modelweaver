@@ -84,104 +84,11 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
   return { inputTokens: inp, outputTokens: out, cacheReadTokens: cacheRead, cacheCreationTokens: cacheCreation };
 }
 
-/**
- * Sanitize upstream provider responses that return null where Claude Code
- * expects an object. Without this, Claude Code crashes with:
- * "null is not an object (evaluating 'X.content')"
- *
- * Replaces:
- *   "message":null        → message object with essential fields
- *   "content_block":null  → content_block object with essential fields
- *   "delta":null          → delta object with essential fields
- *   "content":null        → empty array (safe for Anthropic content field)
- */
-const NULL_SANITIZE_RE = /"(message|content_block|delta|content|thinking|thinking_bytes|thinking_control|signature|text|partial_json|name|input)"\s*:\s*null(?!["\w])/g;
-// Pre-compiled regex for token fields (used in scanWindow — hoisted to module level to avoid per-chunk recompilation)
-const TOKEN_FIELDS_RE = /"(input_tokens|prompt_tokens|cache_read_input_tokens|cache_creation_input_tokens|output_tokens|completion_tokens)"\s*:\s*(\d+)/g;
-const NULL_REPLACEMENTS: Record<string, string> = {
-  message:        '"message":{"id":"","type":"message","role":"assistant","content":[]}',
-  content_block:  '"content_block":{"type":"text","text":""}',
-  delta:          '"delta":{"type":"text_delta","text":""}',
-  content:        '"content":[]',
-  thinking:       '"thinking":""',
-  thinking_bytes: '"thinking_bytes":""',
-  thinking_control: '"thinking_control":""',
-  signature:      '"signature":""',
-  text:          '"text":""',
-  partial_json: '"partial_json":""',
-  name:          '"name":""',
-  input:          '"input":{}',
-};
-function sanitizeNullObjects(text: string): string {
-  if (!text.includes("null")) return text;
-  // Critical: replace bare "data: null" SSE lines
-  // sometimes send these, and the Anthropic SDK crashes with "null is not an object
-  // (evaluating 'Y8.content')" when it tries to parse and access properties on null.
-  // This is the server.ts defense-in-depth layer — proxy.ts also handles this per-chunk,
-  // but this catches any cases where TCP chunk boundaries split the line.
-  let result = text.replace(/^data:\s*null\s*$/gm, 'data: {}');
-  result = result.replace(NULL_SANITIZE_RE, (_, key: string) => NULL_REPLACEMENTS[key] ?? _);
-  return result;
-}
-
-/**
- * Check if an SSE event text contains only null content fields in its delta.
- * Used to drop spurious spacer deltas that crash the Anthropic SDK (v2.1.88+).
- */
-function isNullOnlyDelta(eventText: string): boolean {
-  if (!eventText.includes("content_block_delta")) return false;
-  if (!/"(thinking|text|partial_json)"\s*:\s*null(?=[\s,}\]])/.test(eventText)) return false;
-  // Has at least one non-null content field? Then it's a real delta, keep it.
-  if (/"(thinking|text|partial_json)"\s*:\s*"[^"]+"/.test(eventText)) return false;
-  return true;
-}
-
-/**
- * Check if an SSE event is a content_block_start for a thinking block.
- * Returns the block index if it is, or -1 if not.
- */
-function getThinkingBlockIndex(eventText: string): number {
-  if (!eventText.includes("content_block_start")) return -1;
-  if (!/"type"\s*:\s*"thinking"/.test(eventText)) return -1;
-  const m = eventText.match(/"index"\s*:\s*(\d+)/);
-  return m ? parseInt(m[1], 10) : -1;
-}
-
-/**
- * Check if an SSE event references a block index in the omitted set.
- */
-function isForOmittedIndex(eventText: string, omittedIndices: Set<number>): boolean {
-  if (!eventText.includes("content_block_delta") && !eventText.includes("content_block_stop")) return false;
-  for (const idx of omittedIndices) {
-    if (eventText.includes(`"index":${idx}`) || eventText.match(new RegExp(`"index"\\s*:\\s*${idx}\\b`))) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Lightweight TransformStream that only sanitizes null objects — used when
- * there is no MetricsStore (i.e. no metrics collection needed).
- * Buffers complete SSE events (delimited by \n\n) before sanitizing to avoid
- * null patterns split across TCP chunk boundaries.
- *
- * Defense layers:
- * 1. Omit thinking blocks entirely — prevents Y8.content crash from null thinking data
- * 2. Drop null-only delta events — catches spacer deltas from any provider
- * 3. message_start pre-flight — ensures SDK state is initialized before content
- */
-function createSanitizeTransform(): TransformStream<Uint8Array, Uint8Array> {
-  // Pure passthrough — forward bytes without modification.
-  // Direct upstream connections work fine, so the proxy must be invisible.
-  // Any stream modification (null sanitization, thinking block filtering,
-  // SSE event rewriting) introduces crash paths in the Anthropic SDK.
-  return new TransformStream({
-    transform(chunk, controller) {
-      controller.enqueue(chunk);
-    },
-  });
-}
+// Dead code removed: NULL_SANITIZE_RE, NULL_REPLACEMENTS, sanitizeNullObjects(),
+// isNullOnlyDelta(), getThinkingBlockIndex(), isForOmittedIndex(), createSanitizeTransform()
+// were all unused after the pure passthrough change (commit 25a2287).
+// The passthrough approach forwards bytes untouched — the Anthropic SDK handles
+// native provider SSE correctly without proxy modifications.
 
 /**
  * Creates a TransformStream that sanitizes null objects AND extracts
@@ -200,6 +107,9 @@ function createMetricsTransform(
 ): TransformStream<Uint8Array, Uint8Array> {
   const td = new TextDecoder();
   const te = new TextEncoder();
+
+  // Token fields regex — used in scanWindow for non-SSE JSON responses
+  const TOKEN_FIELDS_RE = /"(input_tokens|prompt_tokens|cache_read_input_tokens|cache_creation_input_tokens|output_tokens|completion_tokens)"\s*:\s*(\d+)/g;
 
   // --- SSE state ---
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
@@ -739,17 +649,10 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       });
     }
 
-    // Extract tokens via inline TransformStream for successful responses
+    // PURE PASSTHROUGH — zero modification to the upstream stream.
+    // ANY TransformStream corrupts SSE data and crashes Claude Code with Y8.content null.
     let responseBody: ReadableStream<Uint8Array> | null = response.body;
-    if (response.body && response.status >= 200 && response.status < 300 && metricsStore) {
-      const targetProvider = result.actualProvider || (ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider);
-      const transform = createMetricsTransform(ctx, successfulProvider, targetProvider, metricsStore, config, response.status, response.headers.get("content-type") || "");
-      responseBody = response.body.pipeThrough(transform) as typeof responseBody;
-    } else if (response.status >= 200 && response.status < 300 && !metricsStore) {
-      // No metricsStore — sanitize stream and broadcast complete so the GUI progress bar finishes
-      if (response.body) {
-        responseBody = response.body.pipeThrough(createSanitizeTransform()) as typeof responseBody;
-      }
+    if (response.status >= 200 && response.status < 300) {
       const latencyMs = Date.now() - ctx.startTime;
       setImmediate(() => {
         ctx._streamState = transitionStreamState(ctx, "complete", ctx.requestId);
