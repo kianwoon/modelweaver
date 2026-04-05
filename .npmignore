@@ -12,3 +12,9 @@ vitest.config.ts
 .gitignore
 .gitattributes
 gui/
+node-compile-cache/
+.superpowers/
+.playwright-mcp/
+diagnostic-sse.cjs
+*.log
+*.tmp-config-test/
