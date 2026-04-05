@@ -7,9 +7,6 @@ import type { LatencyTracker } from "./hedging.js";
 // Constants
 // ---------------------------------------------------------------------------
 
-/** Minimum TTFB timeout (ms) — safety floor even for very fast providers */
-const TTFB_FLOOR_MS = 2000;
-
 /**
  * Minimum sample count before adaptive tuning kicks in.
  * With fewer samples, the statistics aren't meaningful enough to adjust.
@@ -46,7 +43,10 @@ export function resolveAdaptiveTTFB(provider: ProviderConfig, tracker: LatencyTr
     // cv = stddev / mean, so stddev = cv * mean.
     // p95 ≈ mean * (1 + 2*cv)
     const p95Approx = Math.round(stats.mean * (1 + 2 * stats.cv));
-    return Math.max(TTFB_FLOOR_MS, Math.min(base, p95Approx));
+    // Config is the floor — p95 can only raise the timeout, never lower it.
+    // This respects the user's explicit ttfbTimeout while still adapting upward
+    // when observed latency exceeds the configured value.
+    return Math.max(base, p95Approx);
   }
 
   // Not enough samples — use configured value as-is
