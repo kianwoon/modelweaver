@@ -8,6 +8,8 @@ dist/
 modelweaver.yaml
 gui/target/
 gui/node_modules/
+node-compile-cache/
+.superpowers/
 
 # Internal review files
 REVIEW-FINDINGS.md
