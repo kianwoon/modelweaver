@@ -472,9 +472,9 @@ async function main() {
       hostname: host,
       port,
       serverOptions: {
-        requestTimeout: 300_000,   // 5 min max total request time (covers long SSE streams)
-        headersTimeout: 10_000,    // 10s to receive headers
-        keepAliveTimeout: 30_000,  // 30s keep-alive (matches undici agent)
+        requestTimeout: 600_000,    // 10min — large headroom for long SSE streams + fallback chains
+        headersTimeout: 15_000,     // 15s to receive headers (headroom for TLS on slow networks)
+        keepAliveTimeout: 120_000,  // 2min keep-alive — reuses connections across Claude Code tool turns
       },
     });
     server.on('error', (err: NodeJS.ErrnoException) => {
@@ -558,9 +558,9 @@ async function main() {
     hostname: host,
     port,
     serverOptions: {
-      requestTimeout: 300_000,   // 5 min max total request time (covers long SSE streams)
-      headersTimeout: 10_000,    // 10s to receive headers
-      keepAliveTimeout: 30_000,  // 30s keep-alive (matches undici agent)
+      requestTimeout: 600_000,    // 10min — large headroom for long SSE streams + fallback chains
+      headersTimeout: 15_000,     // 15s to receive headers (headroom for TLS on slow networks)
+      keepAliveTimeout: 120_000,  // 2min keep-alive — reuses connections across Claude Code tool turns
     },
   });
   server.on('error', (err: NodeJS.ErrnoException) => {
