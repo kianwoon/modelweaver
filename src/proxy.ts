@@ -137,13 +137,19 @@ const MAX_TOKENS_REGEX = /"max_tokens"\s*:\s*(\d+)/;
 /** Module-level TextEncoder — avoids per-request allocation */
 const textEncoder = new TextEncoder();
 
-/** Module-level Set of headers to forward from incoming requests */
-const KNOWN_FORWARD_HEADERS = new Set([
-  "anthropic-version",
-  "anthropic-beta",
-  "content-type",
-  "accept",
-  "user-agent",  // GLM-5.1 validates this for coding plan auth
+/** Headers to strip from forwarded requests — auth (rewritten), hop-by-hop, transport (recalculated) */
+const STRIP_HEADERS = new Set([
+  "authorization",
+  "x-api-key",
+  "host",
+  "connection",
+  "content-length",
+  "transfer-encoding",
+  "keep-alive",
+  "upgrade",
+  "proxy-authorization",
+  "proxy-connection",
+  "te",
 ]);
 
 /** Pre-built regex combinations for targeted body replacements */
@@ -348,10 +354,9 @@ export function buildOutboundHeaders(
 ): Headers {
   const headers = new Headers();
 
-  // Forward known headers and all x-* custom headers
+  // Forward everything except stripped headers
   for (const [name, value] of incomingHeaders.entries()) {
-    const lower = name.toLowerCase();
-    if (KNOWN_FORWARD_HEADERS.has(lower) || lower.startsWith("x-")) {
+    if (!STRIP_HEADERS.has(name.toLowerCase())) {
       headers.set(name, value);
     }
   }

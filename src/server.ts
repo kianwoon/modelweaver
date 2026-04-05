@@ -91,8 +91,9 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
 // native provider SSE correctly without proxy modifications.
 
 /**
- * Creates a TransformStream that sanitizes null objects AND extracts
- * token counts for metrics inline (no tee() or separate reader needed).
+ * Creates a TransformStream that extracts token counts from response bytes
+ * and records them in the MetricsStore. Used via tee() — the client stream
+ * passes through untouched; only the metrics branch flows through this transform.
  * For SSE responses, extracts token counts from usage events incrementally.
  * For non-streaming JSON responses, uses a bounded sliding-window regex scan.
  */
@@ -651,10 +652,30 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       });
     }
 
-    // PURE PASSTHROUGH — zero modification to the upstream stream.
-    // ANY TransformStream corrupts SSE data and crashes Claude Code with Y8.content null.
+    // PURE PASSTHROUGH — zero modification to the upstream stream bytes.
+    // The createMetricsTransform is connected via tee() so it never touches
+    // the client-bound bytes, avoiding the SSE corruption that motivated the
+    // pure-passthrough change in commit 25a2287.
     let responseBody: ReadableStream<Uint8Array> | null = response.body;
     if (response.status >= 200 && response.status < 300) {
+      // Tee the stream: branch 1 goes untouched to the client, branch 2 feeds
+      // the metrics extractor (createMetricsTransform) for token/latency tracking.
+      if (responseBody instanceof ReadableStream && metricsStore) {
+        const targetProvider = result.actualProvider || (ctx.providerChain.length > 0 ? ctx.providerChain[0].provider : successfulProvider);
+        const [clientStream, metricsStream] = responseBody.tee();
+        const metricsTransform = createMetricsTransform(
+          ctx, successfulProvider, targetProvider, metricsStore, config,
+          response.status, response.headers.get("content-type") || "",
+        );
+        // Drain the metrics branch into a sink that discards output.
+        // The transform's flush() calls recordMetrics() when the stream ends.
+        metricsStream.pipeThrough(metricsTransform).pipeTo(new WritableStream({
+          write() {},
+          close() {},
+          abort() {},
+        }));
+        responseBody = clientStream;
+      }
       const latencyMs = Date.now() - ctx.startTime;
       setImmediate(() => {
         ctx._streamState = transitionStreamState(ctx, "complete", ctx.requestId);
