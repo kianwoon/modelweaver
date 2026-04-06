@@ -4,7 +4,6 @@ import { readFile, stat, access } from "node:fs/promises";
 import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { Agent } from "undici";
 import { CircuitBreaker } from "./circuit-breaker.js";
 import type { AppConfig, HedgingConfig, ProviderConfig, RoutingEntry, ServerConfig } from "./types.js";
 
@@ -134,6 +133,7 @@ const providerSchema = z.object({
   modelLimits: modelLimitsSchema,
   concurrentLimit: z.number().int().min(1).optional(),
   poolSize: z.number().int().min(1).max(100).optional(),
+  modelPools: z.record(z.string(), z.number().int().min(1).max(50)).optional(),
   connectionRetries: z.number().int().min(0).max(10).optional(),
   circuitBreaker: z.object({
     failureThreshold: z.number().int().min(1).optional(),
@@ -427,7 +427,6 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
 
   // Build typed config — cache parsed URL components per provider (avoids per-request URL parsing)
   const providers = new Map<string, ProviderConfig>();
-  const createdAgents: import("undici").Agent[] = [];
   try {
     for (const [name, p] of Object.entries(validated.providers)) {
     const providerConfig: ProviderConfig = {
@@ -440,6 +439,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       authType: p.authType,
       modelLimits: p.modelLimits ? { maxOutputTokens: p.modelLimits.maxOutputTokens } : undefined,
       concurrentLimit: p.concurrentLimit,
+      modelPools: p.modelPools !== undefined ? { ...p.modelPools } : undefined,
     };
     try {
       const parsedUrl = new URL(p.baseUrl);
@@ -449,17 +449,9 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     } catch {
       // If baseUrl is invalid, skip caching — buildOutboundHeaders will fall back gracefully
     }
-    // Create per-provider connection pool for HTTP keep-alive reuse
-    const poolSize = p.poolSize;
-    providerConfig._agent = new Agent({
-      keepAliveTimeout: 120_000,     // 2min — matches server keepAliveTimeout for Claude Code
-      keepAliveMaxTimeout: 300_000,  // 5min — extended max lifetime, pingInterval detects dead conns
-      connections: poolSize ?? 10,
-      allowH2: true,
-      pingInterval: 10_000, // HTTP/2 PING every 10s — detect dead connections in background
-    });
-    createdAgents.push(providerConfig._agent);
-    providerConfig.poolSize = poolSize ?? 10;
+    // Per-model agent map — agents created lazily on first request per model ID
+    providerConfig._agents = new Map<string, import("undici").Agent>();
+    providerConfig.poolSize = p.poolSize ?? 10;
     providerConfig._connectionRetries = p.connectionRetries;
     // Create per-provider circuit breaker
     const cbConfig = p.circuitBreaker;
@@ -531,7 +523,12 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
 
   return { config, configPath: path };
   } catch (e) {
-    await Promise.allSettled(createdAgents.map(a => a.close()));
+    // Close any agents that were created for providers before the error
+    for (const [, provider] of providers) {
+      if (provider._agents && provider._agents.size > 0) {
+        await Promise.allSettled([...provider._agents.values()].map(a => a.close()));
+      }
+    }
     throw e;
   }
 }

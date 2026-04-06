@@ -19,10 +19,11 @@ export interface ProviderConfig {
   _cachedHost?: string;
   _cachedOrigin?: string;
   _cachedPathname?: string;
-  _agent?: import("undici").Agent;
+  _agents?: Map<string, import("undici").Agent>;
   _circuitBreaker?: CircuitBreaker;
   _serverConfig?: ServerConfig;
   poolSize?: number;
+  modelPools?: Record<string, number>;
   /** Max connection-level retries (TTFB timeout/stall/connection failure) before escalating to fallback. Default: 3 */
   _connectionRetries?: number;
 }
