@@ -31,6 +31,15 @@ const providersEl = document.getElementById('providers');
 const recentEl = document.getElementById('recent');
 const sessionsEl = document.getElementById('sessions');
 
+// Raw accumulator variables — avoid parseFormattedNumber round-trip precision loss
+let _rawInputTokens = 0;
+let _rawOutputTokens = 0;
+let _rawRequests = 0;
+let _rawTpsSum = 0;
+let _rawTpsCount = 0;
+let _rawCacheRead = 0;
+let _rawCacheCreation = 0;
+
 // Activity bar state
 const activityContent = document.getElementById('activity-content');
 const activeRequests = new Map();
@@ -226,10 +235,20 @@ function shortModel(model) {
 
 
 function updateSummary(data) {
+  // Sync raw accumulators from backend (authoritative source of truth)
+  _rawRequests = data.totalRequests || 0;
+  _rawInputTokens = data.totalInputTokens || 0;
+  _rawOutputTokens = data.totalOutputTokens || 0;
+  _rawCacheRead = data.totalCacheReadTokens || 0;
+  _rawCacheCreation = data.totalCacheCreationTokens || 0;
+  _rawTpsSum = (data.avgTokensPerSec || 0) * _rawRequests;
+  _rawTpsCount = _rawRequests;
+
+  // Render from raw accumulators
   statSpeed.textContent = (data.avgTokensPerSec || 0).toFixed(1);
-  statRequests.textContent = data.totalRequests || 0;
-  statInputTokens.textContent = formatNumber(data.totalInputTokens || 0);
-  statOutputTokens.textContent = formatNumber(data.totalOutputTokens || 0);
+  statRequests.textContent = _rawRequests;
+  statInputTokens.textContent = formatNumber(_rawInputTokens);
+  statOutputTokens.textContent = formatNumber(_rawOutputTokens);
   statCache.textContent = data.avgCacheHitRate > 0 ? data.avgCacheHitRate.toFixed(0) + '%' : '\u2014';
   // Uptime
   const uptimeEl = document.getElementById('last-refresh');
@@ -393,7 +412,7 @@ function updateSummary(data) {
       }
       const newProvider = r.targetProvider || r.provider || '';
       if (item._providerEl.textContent !== newProvider) item._providerEl.textContent = newProvider;
-      const newTokens = formatNumber((r.inputTokens || 0) + (r.outputTokens || 0)) + ' ' + latency;
+      const newTokens = formatNumber((r.inputTokens || 0) + (r.cacheReadTokens || 0) + (r.cacheCreationTokens || 0) + (r.outputTokens || 0)) + ' ' + latency;
       if (item._tokensEl.textContent !== newTokens) item._tokensEl.textContent = newTokens;
     }
   }
@@ -423,23 +442,29 @@ function parseFormattedNumber(str) {
 }
 
 function appendRequestMetric(r) {
-  // Increment request count
-  const currentRequests = parseInt(statRequests.textContent, 10) || 0;
-  statRequests.textContent = currentRequests + 1;
+  // Update raw accumulators (no precision loss from DOM round-trips)
+  _rawRequests++;
+  const allInput = (r.inputTokens || 0) + (r.cacheReadTokens || 0) + (r.cacheCreationTokens || 0);
+  _rawInputTokens += allInput;
+  _rawOutputTokens += (r.outputTokens || 0);
+  _rawCacheRead += (r.cacheReadTokens || 0);
+  _rawCacheCreation += (r.cacheCreationTokens || 0);
 
-  // Accumulate input tokens
-  const currentInput = parseFormattedNumber(statInputTokens.textContent);
-  statInputTokens.textContent = formatNumber(currentInput + (r.inputTokens || 0));
+  // Render from raw accumulators
+  statRequests.textContent = _rawRequests;
+  statInputTokens.textContent = formatNumber(_rawInputTokens);
+  statOutputTokens.textContent = formatNumber(_rawOutputTokens);
 
-  // Accumulate output tokens
-  const currentOutput = parseFormattedNumber(statOutputTokens.textContent);
-  statOutputTokens.textContent = formatNumber(currentOutput + (r.outputTokens || 0));
+  // Running average speed (only count non-zero TPS entries)
+  if (r.tokensPerSec != null && r.tokensPerSec > 0) {
+    _rawTpsSum += r.tokensPerSec;
+    _rawTpsCount++;
+    statSpeed.textContent = (_rawTpsSum / _rawTpsCount).toFixed(1);
+  }
 
-  // Running average speed
-  const oldAvg = parseFloat(statSpeed.textContent) || 0;
-  const newTotal = currentRequests + 1;
-  if (r.tokensPerSec != null) {
-    statSpeed.textContent = (oldAvg + (r.tokensPerSec - oldAvg) / newTotal).toFixed(1);
+  // Cache hit rate
+  if (_rawInputTokens > 0 && _rawCacheRead > 0) {
+    statCache.textContent = (Math.round((_rawCacheRead / _rawInputTokens) * 1000) / 10).toFixed(0) + '%';
   }
 
   // Deduplicate — skip DOM creation if this requestId was already rendered
@@ -472,7 +497,7 @@ function appendRequestMetric(r) {
 
   const tokens = document.createElement('span');
   tokens.className = 'recent-tokens';
-  tokens.textContent = formatNumber((r.inputTokens || 0) + (r.outputTokens || 0)) + ' ' + latency;
+  tokens.textContent = formatNumber((r.inputTokens || 0) + (r.cacheReadTokens || 0) + (r.cacheCreationTokens || 0) + (r.outputTokens || 0)) + ' ' + latency;
 
   item.appendChild(model);
   item.appendChild(provider);
@@ -847,11 +872,11 @@ function renderSessions(summary) {
       row._metaEl = meta;
       sessionRows.set(s.sessionId, row);
     }
-    // Truncated session ID (first 8 chars)
-    const shortId = s.sessionId.length > 12
-      ? s.sessionId.slice(0, 8) + '\u2026'
-      : s.sessionId;
-    if (row._idEl.textContent !== shortId) row._idEl.textContent = shortId;
+    // Show model names (e.g. "glm-5.1, MiniMax-M2.7") as primary identifier
+    const modelNames = s.models && s.models.length > 0
+      ? s.models.join(', ')
+      : (s.sessionId.length > 12 ? s.sessionId.slice(0, 8) + '\u2026' : s.sessionId);
+    if (row._idEl.textContent !== modelNames) row._idEl.textContent = modelNames;
     // Connection count badge (show modelCount from pool, or "—" if unavailable)
     const connCount = s.modelCount ?? 0;
     const badgeText = connCount > 0 ? connCount + ' conn' + (connCount !== 1 ? 's' : '') : '\u2014';
@@ -980,6 +1005,7 @@ function connectWebSocket(port) {
     clearTimeout(connectTimer);
     console.log('[WebSocket] connected');
     // Stop HTTP polling — WS is now the primary data source
+    if (pageReloadTimer) { clearInterval(pageReloadTimer); pageReloadTimer = null; }
     if (pollTimer) {
       clearInterval(pollTimer);
       pollTimer = null;
@@ -1051,6 +1077,8 @@ function connectWebSocket(port) {
     wsBackoff = Math.min(wsBackoff * 2, WS_MAX_BACKOFF);
     // Show reconnecting state while backoff timer is pending
     setStatus('reconnecting');
+    // WKWebView cannot reconnect WS after server restart — reload page once daemon is back
+    schedulePageReload();
   });
 
   ws.addEventListener('error', (err) => {
@@ -1071,6 +1099,24 @@ async function fetchSummary() {
     console.error('[fetchSummary] failed:', err);
     setStatus(false);
   }
+}
+
+// After WS close, once HTTP polling confirms daemon is back,
+// reload the page to get a fresh WebSocket. WKWebView cannot
+// reliably reconnect WebSocket to a restarted server.
+let pageReloadTimer = null;
+function schedulePageReload() {
+  if (pageReloadTimer) return; // already scheduled
+  pageReloadTimer = setInterval(async () => {
+    try {
+      await invoke('fetch_metrics', { port: DEFAULT_PORT });
+      clearInterval(pageReloadTimer);
+      pageReloadTimer = null;
+      window.location.reload();
+    } catch {
+      // daemon still down
+    }
+  }, 2000);
 }
 
 async function fetchDaemonVersion() {

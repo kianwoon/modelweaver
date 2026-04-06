@@ -421,7 +421,12 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
   const logger = createLogger(logLevel);
   const app = new Hono();
   const sessionIdleTtlMs = initConfig.server?.sessionIdleTtlMs ?? 600_000;
-  const sessionPool = new SessionAgentPool(sessionIdleTtlMs);
+  // Collect the minimum stale threshold across all providers (pool is shared)
+  const providerStaleMs = [...(initConfig.providers?.values() ?? [])]
+    .map(p => p._staleAgentThresholdMs)
+    .filter((v): v is number => v != null);
+  const staleThresholdMs = providerStaleMs.length > 0 ? Math.min(...providerStaleMs) : undefined;
+  const sessionPool = new SessionAgentPool(sessionIdleTtlMs, staleThresholdMs);
 
   // Share MetricsStore with proxy.ts for connection error tracking (GUI counters)
   if (metricsStore) setProxyMetricsStore(metricsStore);

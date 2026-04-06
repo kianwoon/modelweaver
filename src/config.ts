@@ -135,6 +135,7 @@ const providerSchema = z.object({
   poolSize: z.number().int().min(1).max(100).optional(),
   modelPools: z.record(z.string(), z.number().int().min(1).max(50)).optional(),
   connectionRetries: z.number().int().min(0).max(10).optional(),
+  staleAgentThresholdMs: z.number().int().positive().optional(),
   circuitBreaker: z.object({
     failureThreshold: z.number().int().min(1).optional(),
     threshold: z.number().int().min(1).optional(),
@@ -453,6 +454,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     providerConfig._agents = new Map<string, import("undici").Agent>();
     providerConfig.poolSize = p.poolSize ?? 10;
     providerConfig._connectionRetries = p.connectionRetries;
+    providerConfig._staleAgentThresholdMs = p.staleAgentThresholdMs;
     // Create per-provider circuit breaker
     const cbConfig = p.circuitBreaker;
     providerConfig._circuitBreaker = new CircuitBreaker(cbConfig ? {
