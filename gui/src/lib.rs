@@ -8,6 +8,7 @@ fn shared_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
+            .pool_max_idle_per_host(0)
             .build()
             .expect("Failed to create HTTP client")
     })
@@ -40,12 +41,19 @@ struct VersionResult {
 #[command]
 async fn fetch_metrics(port: u16) -> Result<MetricsResult, String> {
     let url = format!("http://localhost:{}/api/metrics/summary", port);
+    eprintln!("[fetch_metrics] Requesting {}", url);
 
     let resp = shared_client()
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("HTTP request failed: {}", e))?;
+        .map_err(|e| {
+            let err_str = format!("HTTP request failed: {}", e);
+            eprintln!("[fetch_metrics] ERROR: {}", err_str);
+            err_str
+        })?;
+
+    eprintln!("[fetch_metrics] Got status: {}", resp.status());
 
     if !resp.status().is_success() {
         return Err(format!("HTTP error: {}", resp.status()));
@@ -54,7 +62,13 @@ async fn fetch_metrics(port: u16) -> Result<MetricsResult, String> {
     let data: serde_json::Value = resp
         .json()
         .await
-        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+        .map_err(|e| {
+            let err_str = format!("Failed to parse JSON: {}", e);
+            eprintln!("[fetch_metrics] JSON ERROR: {}", err_str);
+            err_str
+        })?;
+
+    eprintln!("[fetch_metrics] SUCCESS - got {} fields", data.as_object().map(|o| o.len()).unwrap_or(0));
 
     Ok(MetricsResult {
         uptime_seconds: data["uptimeSeconds"].as_u64(),
@@ -108,9 +122,10 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![fetch_metrics, check_daemon, fetch_version])
         .setup(move |app| {
-            let window = app.get_webview_window("main").unwrap();
-            window.set_title(&format!("ModelWeaver v{}", version)).unwrap();
-            window.emit("version-update", version).unwrap();
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.set_title(&format!("ModelWeaver v{}", version));
+                let _ = window.emit("version-update", version);
+            }
             Ok(())
         })
         .run(tauri::generate_context!())
