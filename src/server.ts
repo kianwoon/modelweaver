@@ -12,7 +12,7 @@ import { promisify } from "node:util";
 
 import type { MetricsStore } from "./metrics.js";
 import { latencyTracker, inFlightCounter, getHedgeStats, clearHedgeStats } from "./hedging.js";
-import { getPoolStats } from "./pool.js";
+import { getPoolStats, closeAllAgents } from "./pool.js";
 import { getAllHealthScores } from "./health-score.js";
 import { broadcastStreamEvent, broadcastProviderHealth, buildProviderHealth } from "./ws.js";
 import { ActiveProbeManager } from "./health-probe.js";
@@ -414,12 +414,6 @@ export interface AppHandle {
   getSessionPoolStats: () => import("./session-pool.js").SessionStats[];
   closeAgents: () => Promise<void>;
   getInFlightCount: () => number;
-}
-
-function agentKey(provider: ProviderConfig): string {
-  const origin = provider._cachedOrigin;
-  const size = provider.poolSize ?? 10;
-  return `${origin ?? "unknown"}:${size}`;
 }
 
 export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStore?: MetricsStore, version?: string): AppHandle {
@@ -867,38 +861,14 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     getConfig: () => config,
     getInFlightCount: () => inFlightCount,
     setConfig: async (newConfig: AppConfig) => {
-      // Build key → agent map from old config for reuse lookup
-      const oldAgents = new Map<string, import("undici").Agent>();
-      for (const provider of config.providers.values()) {
-        if (provider._agent) {
-          oldAgents.set(agentKey(provider), provider._agent);
-        }
-      }
-
-      // For each new provider, check if we can reuse an existing agent
-      const reusedKeys = new Set<string>();
-      for (const provider of newConfig.providers.values()) {
-        const key = agentKey(provider);
-        const existingAgent = oldAgents.get(key);
-        if (existingAgent) {
-          // Reuse: the origin and poolSize haven't changed
-          provider._agent = existingAgent;
-          reusedKeys.add(key);
-        }
-        // else: loadConfig() already created a fresh agent for this provider
-      }
-
-      // Close agents that are no longer needed (removed or changed origin/poolSize)
+      // Close all old per-model agents
       const closePromises: Promise<void>[] = [];
-      for (const [key, agent] of oldAgents) {
-        if (!reusedKeys.has(key)) {
-          closePromises.push(agent.close().catch((e) => {
-          console.warn(`[server] Failed to close agent: ${e.message}`);
-        }));
-        }
+      for (const provider of config.providers.values()) {
+        closePromises.push(closeAllAgents(provider));
       }
-
       await Promise.all(closePromises);
+
+      // New providers start with empty _agents Maps — agents are lazy-created
       config = newConfig;
       activeProbeManager.updateProviders(newConfig.providers);
       clearRoutingCache();
@@ -911,9 +881,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     closeAgents: async () => {
       const closePromises: Promise<void>[] = [];
       for (const provider of config.providers.values()) {
-        if (provider._agent) {
-          closePromises.push(provider._agent.close().catch(() => {}));
-        }
+        closePromises.push(closeAllAgents(provider));
       }
       await Promise.all(closePromises);
     },

@@ -4,6 +4,7 @@ import { transitionStreamState } from "./types.js";
 import { request as undiciRequest } from "undici";
 import { PassThrough } from "node:stream";
 import { TextEncoder } from "node:util";
+import { getOrCreateAgent } from "./pool.js";
 
 /**
  * Generate Anthropic-compatible SSE closing events as Uint8Array[].
@@ -776,7 +777,7 @@ export async function forwardRequest(
 
   try {
     // Use session-scoped agent when available (per-session, per-model connection isolation),
-    const dispatcher = sessionPool?.get(ctx.sessionId, poolModel) ?? provider._agent;
+    const dispatcher = sessionPool?.get(ctx.sessionId, poolModel) ?? getOrCreateAgent(provider, poolModel);
     const undiciResponse = await Promise.race([
       undiciRequest(url, {
         method: "POST",
