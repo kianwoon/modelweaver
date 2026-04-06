@@ -133,9 +133,16 @@ export async function warmupProvider(provider: ProviderConfig): Promise<boolean>
       clearTimeout(timer);
       await response.body.dump();
     } catch (err) {
-      allOk = false;
       const message = err instanceof Error ? err.message : String(err);
-      console.warn(`[pool] Warmup failed for "${provider.name}"/${modelId}: ${message}`);
+      // GOAWAY code 0 = graceful drain — server is healthy, just closing this connection.
+      // The connection reached the server; don't mark the pool as "failed".
+      const isGracefulGoaway = /GOAWAY.*code\s*0/i.test(message);
+      if (isGracefulGoaway) {
+        console.log(`[pool] Warmup got GOAWAY(0) for "${provider.name}"/${modelId} — graceful drain, connection OK`);
+      } else {
+        allOk = false;
+        console.warn(`[pool] Warmup failed for "${provider.name}"/${modelId}: ${message}`);
+      }
     }
   }
 

@@ -15,13 +15,12 @@ const SESSION_KEEPALIVE_MAX_MS = 60_000;
 const DEFAULT_SESSION_IDLE_TTL_MS = 600_000; // 10 minutes idle → close
 const SWEEP_INTERVAL_MS = 60_000; // sweep every 60s
 /**
- * Staleness threshold: if an agent has been idle for this long, its underlying
- * HTTP/2 connection is almost certainly half-closed by the upstream server
- * (e.g. GLM closes after ~15-20s of inactivity). Closing and recreating the
- * agent proactively avoids 20s stall timeouts on the next request.
- * 10s is conservative — well below GLM's server-side idle timeout.
+ * Default staleness threshold. Previously 10s, which was shorter than the
+ * keepAliveTimeout (30s) and pingInterval (10s), causing agents to be evicted
+ * before the HTTP/2 PING could keep them alive. Raised to 30s to match
+ * keepAliveTimeout — the PING frame (every 10s) keeps the connection alive.
  */
-const STALE_AGENT_THRESHOLD_MS = 10_000;
+const DEFAULT_STALE_AGENT_THRESHOLD_MS = 30_000;
 
 /**
  * Manages per-session per-model undici Agents.
@@ -40,9 +39,11 @@ export class SessionAgentPool {
   private inFlight = new Map<string, Map<string, number>>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private readonly idleTtlMs: number;
+  private readonly staleThresholdMs: number;
 
-  constructor(idleTtlMs: number = DEFAULT_SESSION_IDLE_TTL_MS) {
+  constructor(idleTtlMs: number = DEFAULT_SESSION_IDLE_TTL_MS, staleThresholdMs?: number) {
     this.idleTtlMs = idleTtlMs;
+    this.staleThresholdMs = staleThresholdMs ?? DEFAULT_STALE_AGENT_THRESHOLD_MS;
     this.sweepTimer = setInterval(() => this.sweep(), SWEEP_INTERVAL_MS);
     // Don't prevent process exit
     if (this.sweepTimer.unref) this.sweepTimer.unref();
@@ -71,9 +72,9 @@ export class SessionAgentPool {
     if (agent) {
       const lastActive = this.lastActivity.get(sessionId)?.get(modelName);
       const active = this.inFlight.get(sessionId)?.get(modelName) ?? 0;
-      if (lastActive && Date.now() - lastActive > STALE_AGENT_THRESHOLD_MS && active === 0) {
+      if (lastActive && Date.now() - lastActive > this.staleThresholdMs && active === 0) {
         const idleS = Math.round((Date.now() - lastActive) / 1000);
-        console.log(`[session-pool] refreshing stale agent ${sessionId.slice(0, 8)}…/${modelName} (idle ${idleS}s > ${STALE_AGENT_THRESHOLD_MS / 1000}s threshold, no in-flight streams)`);
+        console.log(`[session-pool] refreshing stale agent ${sessionId.slice(0, 8)}…/${modelName} (idle ${idleS}s > ${this.staleThresholdMs / 1000}s threshold, no in-flight streams)`);
         agent.close().catch(() => {});
         modelMap.delete(modelName);
         agent = undefined;

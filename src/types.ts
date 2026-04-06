@@ -26,6 +26,8 @@ export interface ProviderConfig {
   modelPools?: Record<string, number>;
   /** Max connection-level retries (TTFB timeout/stall/connection failure) before escalating to fallback. Default: 3 */
   _connectionRetries?: number;
+  /** Staleness threshold (ms) for session-scoped agents. Idle agents beyond this are proactively refreshed. Default: 30000 */
+  _staleAgentThresholdMs?: number;
 }
 
 export interface RoutingEntry {

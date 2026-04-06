@@ -1300,12 +1300,22 @@ export async function forwardRequest(
 const CONNECTION_RETRY_MAX = 3;
 /** Base delay (ms) between connection retry attempts. */
 const CONNECTION_RETRY_BASE_MS = 500;
+/**
+ * TTFB timeouts get fewer retries than other connection errors.
+ * If a provider hasn't responded in ttfbTimeout ms, it's genuinely slow/overloaded —
+ * retrying many times wastes time. Socket errors (ECONNRESET etc.) get the full
+ * connectionRetries budget because those are transient/stale-connection issues.
+ */
+const TTFB_RETRY_CAP = 2;
 
 /**
  * Forward a request to a single provider with automatic retry on timeout/connection error.
  * On the first attempt, uses the provider's pooled connection agent.
  * If the request times out or hits a connection error, retries up to CONNECTION_RETRY_MAX
  * times with a fresh connection pool and exponential backoff.
+ *
+ * TTFB timeouts are capped at TTFB_RETRY_CAP retries — if the provider is slow, fewer
+ * retries before escalating to the fallback chain.
  *
  * Connection errors (stale pool, timeout, stall) are local artifacts — the client
  * should never see a 502 from them. Only actual upstream 5xx responses escape
@@ -1324,6 +1334,7 @@ async function forwardWithRetry(
   let lastResult: Response | undefined;
 
   const maxRetries = provider._connectionRetries ?? CONNECTION_RETRY_MAX;
+  let ttfbFailures = 0;
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const result = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index, probeId, sessionPool);
 
@@ -1348,6 +1359,17 @@ async function forwardWithRetry(
       status: 502,
       headers: { "content-type": "application/json", [CONN_ERROR_HEADER]: CONN_ERROR_VALUE },
     });
+
+    // TTFB-specific retry cap: if the provider is slow (not just a stale connection),
+    // don't waste time retrying — escalate to fallback sooner.
+    const isTtfbTimeout = body.includes("timed out");
+    if (isTtfbTimeout) {
+      ttfbFailures++;
+      if (ttfbFailures > TTFB_RETRY_CAP) {
+        console.warn(`[proxy] TTFB cap reached (${ttfbFailures}) for "${provider.name}" — escalating to fallback`);
+        break; // Exit retry loop, let fallback chain try next provider
+      }
+    }
 
     if (attempt < maxRetries) {
       // Only evict the session-scoped agent — do NOT close/destroy the provider's
