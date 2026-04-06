@@ -190,6 +190,14 @@ export async function startMonitor(args: {
       stableTimer = null;
     }
     if (child) {
+      // Defensive: ensure exit handler exists for cleanup (guards against
+      // theoretical race where SIGTERM arrives before on("exit") is registered)
+      if (!child.listenerCount("exit")) {
+        child.on("exit", async () => {
+          await removePidFile();
+          process.exit(0);
+        });
+      }
       try {
         child.kill("SIGTERM");
       } catch {
@@ -219,6 +227,13 @@ export async function startMonitor(args: {
       stableTimer = null;
     }
     if (child) {
+      // Defensive: ensure exit handler exists for cleanup
+      if (!child.listenerCount("exit")) {
+        child.on("exit", async () => {
+          await removePidFile();
+          process.exit(0);
+        });
+      }
       try {
         child.kill("SIGTERM");
       } catch {
