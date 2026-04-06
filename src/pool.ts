@@ -1,7 +1,9 @@
 // src/pool.ts — Connection pool lifecycle: warmup, keep-alive refresh, stats
 
 import type { ProviderConfig } from "./types.js";
-import { request as undiciRequest } from "undici";
+import { Agent, request as undiciRequest } from "undici";
+
+const DEFAULT_MODEL_POOL_SIZE = 2;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -58,6 +60,39 @@ export function pruneWarmupStates(activeProviders: string[]): void {
 }
 
 // ---------------------------------------------------------------------------
+// Per-model agent helpers
+// ---------------------------------------------------------------------------
+
+/** Get or lazily create a per-model undici Agent for the given provider. */
+export function getOrCreateAgent(provider: ProviderConfig, modelId: string): Agent {
+  if (!provider._agents) provider._agents = new Map();
+  let agent = provider._agents.get(modelId);
+  if (!agent) {
+    const poolSize = provider.modelPools?.[modelId] ?? DEFAULT_MODEL_POOL_SIZE;
+    agent = new Agent({
+      connections: poolSize,
+      keepAliveTimeout: 120_000,
+      keepAliveMaxTimeout: 300_000,
+      allowH2: true,
+      pingInterval: 10_000,
+    });
+    provider._agents.set(modelId, agent);
+  }
+  return agent;
+}
+
+/** Close all per-model agents for a provider (used during config reload). */
+export async function closeAllAgents(provider: ProviderConfig): Promise<void> {
+  if (!provider._agents) return;
+  const promises: Promise<void>[] = [];
+  for (const agent of provider._agents.values()) {
+    promises.push(agent.close().catch(() => {}));
+  }
+  provider._agents.clear();
+  await Promise.all(promises);
+}
+
+// ---------------------------------------------------------------------------
 // Warmup — establish TLS connections via lightweight HEAD request
 // ---------------------------------------------------------------------------
 
@@ -75,40 +110,41 @@ export async function warmupProvider(provider: ProviderConfig): Promise<boolean>
   state.status = "warming";
   state.lastAttempt = Date.now();
 
-  if (!provider._agent) {
-    state.status = "failed";
-    console.warn(`[pool] Provider "${provider.name}" has no agent — skipping warmup`);
-    return false;
+  // Ensure at least one agent exists for warmup
+  if (!provider._agents || provider._agents.size === 0) {
+    getOrCreateAgent(provider, "__warmup__");
   }
 
   const url = provider._cachedOrigin ?? provider.baseUrl;
   const host = provider._cachedHost ?? new URL(provider.baseUrl).host;
 
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), WARMUP_TIMEOUT_MS);
+  let allOk = true;
+  for (const [modelId, agent] of provider._agents!) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), WARMUP_TIMEOUT_MS);
+      const response = await undiciRequest(url, {
+        method: "HEAD",
+        dispatcher: agent,
+        headers: { host },
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+      await response.body.dump();
+    } catch (err) {
+      allOk = false;
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(`[pool] Warmup failed for "${provider.name}"/${modelId}: ${message}`);
+    }
+  }
 
-    const response = await undiciRequest(url, {
-      method: "HEAD",
-      dispatcher: provider._agent,
-      headers: { "host": host },
-      signal: controller.signal,
-    });
-
-    clearTimeout(timer);
-
-    // Consume body to release connection back to the pool
-    await response.body.dump();
-
+  if (allOk) {
     state.status = "warm";
     state.lastSuccess = Date.now();
-    return true;
-  } catch (err) {
+  } else {
     state.status = "failed";
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(`[pool] Warmup failed for "${provider.name}": ${message}`);
-    return false;
   }
+  return allOk;
 }
 
 /**
