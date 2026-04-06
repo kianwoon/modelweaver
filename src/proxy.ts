@@ -758,7 +758,8 @@ export async function forwardRequest(
     externalSignal.addEventListener("abort", onExternalAbort, { once: true });
     removeAbortListener = () => {
       externalSignal.removeEventListener("abort", onExternalAbort);
-      (externalSignal as any).setMaxListeners?.((externalSignal as any).getMaxListeners?.() - 1);
+      const current = (externalSignal as any).getMaxListeners?.() ?? 10;
+      (externalSignal as any).setMaxListeners?.(Math.max(0, current - 1));
     };
   }
 
