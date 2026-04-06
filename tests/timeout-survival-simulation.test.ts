@@ -498,8 +498,18 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
     // not as HTTP status codes — the status line is already sent.
     expect(result.response.status).toBe(200);
 
+    // Consume the body to trigger the pipe flow — the stall timer only fires
+    // after data stops flowing through passThrough. Without a reader, the pipe
+    // never starts and the stall timer never fires.
+    const reader = result.response.body?.getReader();
+    if (reader) {
+      // Read a few chunks then release — enough for stall timer to fire
+      try { await reader.read(); } catch { /* stream ended by stall */ }
+      reader.releaseLock();
+    }
+
     // Wait for the stall timer (500ms) to fire and record the connection error
-    await new Promise((r) => setTimeout(r, 1_000));
+    await new Promise((r) => setTimeout(r, 1_500));
 
     // Connection error was tracked
     const connErr = metricsStore.getConnectionErrors();
