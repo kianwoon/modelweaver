@@ -1068,6 +1068,12 @@ function connectWebSocket(port) {
     for (const [reqId] of activeRequests) {
       removeActivityBar(reqId);
     }
+    // Clear any pending reconnect timer before scheduling a new one — prevents
+    // multiple reconnect attempts stacking up if close events fire rapidly
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    }
     // Restart HTTP polling as fallback
     if (!pollTimer) {
       pollTimer = setInterval(fetchSummary, POLL_INTERVAL);
