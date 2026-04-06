@@ -880,7 +880,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       clearHedgeStats();
     },
     closeSessionPool: async () => {
-      await sessionPool.closeAll();
+      await sessionPool.destroy();
     },
     getSessionPoolStats: () => sessionPool.getStats(),
     closeAgents: async () => {

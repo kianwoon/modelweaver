@@ -30,8 +30,8 @@ function setupGlobalExceptionHandlers(log: {
   });
 }
 
-function parseArgs(argv: string[]): { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean; gui: boolean } {
-  const args: { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean; gui: boolean } = { verbose: false, help: false, daemon: false, monitor: false, gui: false };
+function parseArgs(argv: string[]): { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean } {
+  const args: { port?: number; config?: string; verbose: boolean; help: boolean; daemon: boolean; monitor: boolean } = { verbose: false, help: false, daemon: false, monitor: false };
   for (let i = 2; i < argv.length; i++) {
     switch (argv[i]) {
       case "-p":
