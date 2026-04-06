@@ -19,6 +19,7 @@ export interface ProviderPoolStats {
   lastWarmupAttempt: number | null;
   lastWarmupSuccess: number | null;
   circuitBreakerState: string;
+  models?: Record<string, { poolSize: number }>;
 }
 
 export type PoolStats = Record<string, ProviderPoolStats>;
@@ -248,6 +249,16 @@ export function getPoolStats(
     const inFlight = inFlightCounter.get(name);
     const state = getOrCreateState(name);
 
+    // Build per-model breakdown from lazily-created agents
+    const models: Record<string, { poolSize: number }> = {};
+    if (provider._agents) {
+      for (const [modelId] of provider._agents) {
+        models[modelId] = {
+          poolSize: provider.modelPools?.[modelId] ?? DEFAULT_MODEL_POOL_SIZE,
+        };
+      }
+    }
+
     stats[name] = {
       poolSize,
       inFlight,
@@ -256,6 +267,7 @@ export function getPoolStats(
       lastWarmupAttempt: state.lastAttempt,
       lastWarmupSuccess: state.lastSuccess,
       circuitBreakerState: provider._circuitBreaker?.getState() ?? "closed",
+      models: Object.keys(models).length > 0 ? models : undefined,
     };
   }
 

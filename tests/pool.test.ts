@@ -1,10 +1,9 @@
 // tests/pool.test.ts
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { loadConfig } from "../src/config.js";
-import { warmupProvider, warmupAll, startRefreshLoop, getPoolStats, type PoolStats } from "../src/pool.js";
+import { warmupProvider, warmupAll, startRefreshLoop, getPoolStats, getOrCreateAgent, type PoolStats } from "../src/pool.js";
 import { createMockProvider } from "./helpers/mock-provider.js";
 import type { ProviderConfig } from "../src/types.js";
-import { Agent } from "undici";
 import { join } from "node:path";
 import { writeFileSync, mkdirSync, rmSync } from "node:fs";
 
@@ -19,7 +18,7 @@ function makeProvider(name: string, baseUrl: string, poolSize = 10): ProviderCon
     apiKey: "test-key",
     timeout: 5000,
     poolSize,
-    _agent: new Agent({ keepAliveTimeout: 30000, keepAliveMaxTimeout: 60000, connections: poolSize }),
+    _agents: new Map(),
     _cachedOrigin: baseUrl.replace(/\/$/, ""),
     _cachedHost: new URL(baseUrl).host,
   };
@@ -45,7 +44,7 @@ describe("connection pool warmup", () => {
 
   afterAll(async () => {
     await mock.close();
-    await provider._agent?.close();
+    for (const a of provider._agents?.values() ?? []) await a.close().catch(() => {});
   });
 
   it("warmupProvider returns true for reachable provider", async () => {
@@ -57,10 +56,10 @@ describe("connection pool warmup", () => {
     const dead = makeProvider("dead", "http://127.0.0.1:1");
     const ok = await warmupProvider(dead);
     expect(ok).toBe(false);
-    await dead._agent?.close();
+    for (const a of dead._agents?.values() ?? []) await a.close().catch(() => {});
   });
 
-  it("warmupProvider returns false when agent is missing", async () => {
+  it("warmupProvider lazily creates agent and returns false for unreachable host", async () => {
     const noAgent: ProviderConfig = {
       name: "no-agent",
       baseUrl: "http://localhost:9999",
@@ -68,7 +67,11 @@ describe("connection pool warmup", () => {
       timeout: 5000,
     };
     const ok = await warmupProvider(noAgent);
+    // warmupProvider now lazily creates a __warmup__ agent; returns false because host is unreachable
     expect(ok).toBe(false);
+    expect(noAgent._agents).toBeDefined();
+    expect(noAgent._agents!.has("__warmup__")).toBe(true);
+    for (const a of noAgent._agents?.values() ?? []) await a.close().catch(() => {});
   });
 
   it("warmupAll warms all providers in parallel", async () => {
@@ -81,8 +84,9 @@ describe("connection pool warmup", () => {
     expect(results.get("test")).toBe(true);
     expect(results.get("dead")).toBe(false);
 
-    // Clean up dead provider's agent
-    await providers.get("dead")!._agent?.close();
+    // Clean up dead provider's agents
+    const deadProvider = providers.get("dead")!;
+    for (const a of deadProvider._agents?.values() ?? []) await a.close().catch(() => {});
   });
 });
 
@@ -97,7 +101,7 @@ describe("refresh loop", () => {
 
   afterAll(async () => {
     await mock.close();
-    await provider._agent?.close();
+    for (const a of provider._agents?.values() ?? []) await a.close().catch(() => {});
   });
 
   it("fires warmup on each interval tick", async () => {
@@ -142,8 +146,8 @@ describe("getPoolStats", () => {
     expect(stats.openai.estimatedFree).toBe(4);
 
     // Cleanup
-    provider1._agent?.close();
-    provider2._agent?.close();
+    for (const a of provider1._agents?.values() ?? []) a.close().catch(() => {});
+    for (const a of provider2._agents?.values() ?? []) a.close().catch(() => {});
   });
 
   it("estimatedFree never goes below 0", () => {
@@ -154,7 +158,7 @@ describe("getPoolStats", () => {
     const stats = getPoolStats(providers, counter);
     expect(stats.test.estimatedFree).toBe(0);
 
-    provider._agent?.close();
+    for (const a of provider._agents?.values() ?? []) a.close().catch(() => {});
   });
 });
 
@@ -222,10 +226,11 @@ providers:
     rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("creates an Agent with configured pool size", async () => {
+  it("creates _agents Map with configured pool size", async () => {
     const { config } = await loadConfig(configPath);
     const provider = config.providers.get("test-provider");
-    expect(provider?._agent).toBeDefined();
+    expect(provider?._agents).toBeDefined();
+    expect(provider?._agents).toBeInstanceOf(Map);
     expect(provider?.poolSize).toBe(5);
   });
 
@@ -243,5 +248,36 @@ providers:
     const { config } = await loadConfig(configPath);
     const provider = config.providers.get("default-pool");
     expect(provider?.poolSize).toBe(10);
+  });
+});
+
+describe("per-model pool stats", () => {
+  it("includes per-model breakdown when agents exist", () => {
+    const provider = makeProvider("anthropic", "http://api.anthropic.com", 10);
+    provider.modelPools = { "claude-sonnet-4-6": 4 };
+    getOrCreateAgent(provider, "claude-sonnet-4-6");
+    getOrCreateAgent(provider, "claude-opus-4");
+
+    const stats = getPoolStats(
+      new Map([["anthropic", provider]]),
+      makeInFlightCounter(),
+    );
+
+    expect(stats.anthropic.models).toBeDefined();
+    expect(stats.anthropic.models!["claude-sonnet-4-6"].poolSize).toBe(4);
+    expect(stats.anthropic.models!["claude-opus-4"].poolSize).toBe(2); // DEFAULT_MODEL_POOL_SIZE
+
+    // Cleanup
+    for (const a of provider._agents?.values() ?? []) a.close().catch(() => {});
+  });
+
+  it("omits models when no agents exist", () => {
+    const provider = makeProvider("empty", "http://api.empty.com", 5);
+    const stats = getPoolStats(
+      new Map([["empty", provider]]),
+      makeInFlightCounter(),
+    );
+
+    expect(stats.empty.models).toBeUndefined();
   });
 });
