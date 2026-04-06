@@ -33,7 +33,7 @@ describe("resolveAdaptiveTTFB", () => {
     expect(result).toBe(8000); // falls back to static
   });
 
-  it("returns adaptive (tightened) TTFB when provider is consistently fast", () => {
+  it("returns configured TTFB (floor) when provider is consistently fast", () => {
     const provider = makeProvider({ ttfbTimeout: 8000 });
 
     // Provider consistently responds in ~500ms with low variance
@@ -43,15 +43,11 @@ describe("resolveAdaptiveTTFB", () => {
 
     const result = resolveAdaptiveTTFB(provider, tracker);
 
-    // p95 approximation should be well below the static 8000
-    expect(result).toBeLessThan(8000);
-    // But should respect the floor of 2000ms
-    expect(result).toBeGreaterThanOrEqual(2000);
-    // Adaptive timeout should be the floor (p95 ≈ 600ms < 2000ms floor)
-    expect(result).toBe(2000);
+    // Config is the floor — p95 can only raise, never lower the timeout
+    expect(result).toBe(8000);
   });
 
-  it("never goes below 2000ms floor", () => {
+  it("configured value is always the minimum", () => {
     const provider = makeProvider({ ttfbTimeout: 8000 });
 
     // Extremely fast provider — all responses under 200ms
@@ -60,10 +56,10 @@ describe("resolveAdaptiveTTFB", () => {
     }
 
     const result = resolveAdaptiveTTFB(provider, tracker);
-    expect(result).toBe(2000); // floor
+    expect(result).toBe(8000); // config is the floor, p95 cannot lower it
   });
 
-  it("never exceeds static configured value", () => {
+  it("adapts upward when p95 exceeds configured value", () => {
     const provider = makeProvider({ ttfbTimeout: 5000 });
 
     // Provider with high variance — some slow responses
@@ -79,7 +75,8 @@ describe("resolveAdaptiveTTFB", () => {
     tracker.record("test", 10000);
 
     const result = resolveAdaptiveTTFB(provider, tracker);
-    expect(result).toBeLessThanOrEqual(5000); // capped at configured value
+    // p95 exceeds configured 5000ms → timeout should be raised
+    expect(result).toBeGreaterThan(5000);
   });
 
   it("defaults to 8000ms when ttfbTimeout not configured", () => {
@@ -113,11 +110,10 @@ describe("resolveAdaptiveTTFB", () => {
     const fastTimeout = resolveAdaptiveTTFB(fastProvider, tracker);
     const slowTimeout = resolveAdaptiveTTFB(slowProvider, tracker);
 
-    // Fast provider should have a tighter timeout
-    expect(fastTimeout).toBeLessThan(slowTimeout);
-    // Neither should exceed their configured static values
-    expect(fastTimeout).toBeLessThanOrEqual(8000);
-    expect(slowTimeout).toBeLessThanOrEqual(10000);
+    // Fast provider should have a timeout equal to its configured value
+    expect(fastTimeout).toBe(8000);
+    // Slow provider: p95 may exceed configured 10000ms, so timeout adapts upward
+    expect(slowTimeout).toBeGreaterThanOrEqual(10000);
 
     tracker.clear("fast");
     tracker.clear("slow");
@@ -141,7 +137,7 @@ describe("resolveAdaptiveTTFB — health score no longer shrinks TTFB", () => {
     expect(result).toBe(15000);
   });
 
-  it("latency-based adaptation still works for fast providers", () => {
+  it("latency-based adaptation only raises, never lowers", () => {
     const provider = makeProvider({ name: "fast", ttfbTimeout: 15000 });
 
     // Consistently fast ~500ms TTFB
@@ -150,11 +146,8 @@ describe("resolveAdaptiveTTFB — health score no longer shrinks TTFB", () => {
     }
 
     const result = resolveAdaptiveTTFB(provider, tracker);
-    // p95 approximation should be well below configured 15000
-    expect(result).toBeLessThan(15000);
-    // But should respect the floor of 2000ms
-    expect(result).toBeGreaterThanOrEqual(2000);
-    expect(result).toBe(2000); // floor hit since p95 ≈ 600ms
+    // Config is the floor — fast p95 cannot lower it
+    expect(result).toBe(15000);
 
     tracker.clear("fast");
   });

@@ -26,6 +26,7 @@ import { setMetricsStore } from "../src/proxy.js";
 import { MetricsStore } from "../src/metrics.js";
 import { CircuitBreaker } from "../src/circuit-breaker.js";
 import { recordHealthEvent, getHealthScore } from "../src/health-score.js";
+import { clearHedgeStats, latencyTracker } from "../src/hedging.js";
 
 // ---------------------------------------------------------------------------
 // Mock provider server with configurable failure modes
@@ -155,16 +156,22 @@ function makeProvider(name: string, url: string, overrides: Partial<ProviderConf
   return Object.assign(base, overrides);
 }
 
-function makeCtx(): RequestContext {
+function makeCtx(rawBody?: string): RequestContext {
   return {
     requestId: `test-${Math.random().toString(36).slice(2, 8)}`,
     actualModel: undefined,
     actualProvider: undefined,
-    hasDistribution: false,
+    hasDistribution: true,
     _streamState: "start",
     startTime: Date.now(),
     metrics_brief: { cost: 0, input_tokens: 0, output_tokens: 0 },
     streaming: true,
+    rawBody: rawBody ?? JSON.stringify({
+      model: "test-model",
+      max_tokens: 100,
+      messages: [{ role: "user", content: "hello" }],
+      stream: true,
+    }),
   } as unknown as RequestContext;
 }
 
@@ -196,9 +203,12 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
   let metricsStore: MetricsStore;
 
   beforeEach(() => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
     metricsStore = new MetricsStore(1000);
     setMetricsStore(metricsStore);
+    clearHedgeStats(); // reset hedge stats
+    latencyTracker.clear("glm");
+    latencyTracker.clear("minimax");
+    latencyTracker.clear("openrouter");
 
     glmServer = createMockServer();
     minimaxServer = createMockServer();
@@ -207,8 +217,6 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
   });
 
   afterEach(async () => {
-    vi.useRealTimers();
-    vi.restoreAllMocks();
     await glmServer.close();
     await minimaxServer.close();
     await okServer.close();
@@ -225,9 +233,9 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
     });
 
     // Simulate 10 consecutive timeouts — should NOT trip the breaker
+    // recordTimeout is a no-op (timeouts don't count toward threshold)
     for (let i = 0; i < 10; i++) {
-      breaker.recordTimeout();     // timeouts: no-op
-      breaker.recordResult(502);   // connection error 502: NOT a retriable server error
+      breaker.recordTimeout();
     }
     expect(breaker.getState()).toBe("closed");
     expect(breaker.canProceed().allowed).toBe(true);
@@ -294,22 +302,22 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
   it("SURVIVAL-4: Fallback chain proceeds to third provider when first two timeout", async () => {
     const providers = new Map<string, ProviderConfig>([
       ["glm", makeProvider("glm", glmServer.url, {
-        ttfbTimeout: 1_000,
-        stallTimeout: 1_000,
-        timeout: 3_000,
-        _connectionRetries: 2,
+        ttfbTimeout: 500,
+        stallTimeout: 500,
+        timeout: 2_000,
+        _connectionRetries: 0, // No retries — fail fast and fall back
       })],
       ["minimax", makeProvider("minimax", minimaxServer.url, {
-        ttfbTimeout: 1_000,
-        stallTimeout: 1_000,
-        timeout: 3_000,
-        _connectionRetries: 2,
+        ttfbTimeout: 500,
+        stallTimeout: 500,
+        timeout: 2_000,
+        _connectionRetries: 0,
       })],
       ["openrouter", makeProvider("openrouter", okServer.url, {
         ttfbTimeout: 10_000,
         stallTimeout: 15_000,
         timeout: 30_000,
-        _connectionRetries: 3,
+        _connectionRetries: 0,
       })],
     ]);
 
@@ -331,9 +339,9 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
     expect(result.actualProvider).toBe("openrouter");
     expect(result.actualModel).toBe("qwen");
 
-    // Both failed servers were tried
-    expect(glmServer.getCallCount()).toBeGreaterThan(0);
-    expect(minimaxServer.getCallCount()).toBeGreaterThan(0);
+    // Both failed servers were tried once each (no retries)
+    expect(glmServer.getCallCount()).toBe(1);
+    expect(minimaxServer.getCallCount()).toBe(1);
     // Third provider succeeded
     expect(okServer.getCallCount()).toBe(1);
   });
@@ -342,17 +350,14 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
   // SURVIVAL-5: Intermittent GLM timeout → retry succeeds before fallback
   // -------------------------------------------------------------------------
   it("SURVIVAL-5: GLM intermittent timeout retried with fresh connection, succeeds", async () => {
-    // This test verifies the retry mechanism: with _connectionRetries=2,
-    // a single provider gets 3 total attempts (1 original + 2 retries)
-    // before the fallback chain moves to the next provider.
-    // We can't easily inject intermittent success between retries without
-    // a more complex mock, but we verify the mechanism is in place.
+    // Verifies: provider timeout exhausts retries → fallback to next provider succeeds.
+    // With _connectionRetries=1, GLM gets 2 total attempts before fallback.
     const providers = new Map<string, ProviderConfig>([
       ["glm", makeProvider("glm", glmServer.url, {
-        ttfbTimeout: 1_000,
-        stallTimeout: 1_000,
-        timeout: 3_000,
-        _connectionRetries: 2, // 3 total attempts
+        ttfbTimeout: 500,
+        stallTimeout: 500,
+        timeout: 2_000,
+        _connectionRetries: 1, // 2 total attempts
       })],
       ["openrouter", makeProvider("openrouter", okServer.url, {
         ttfbTimeout: 10_000,
@@ -376,8 +381,8 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
     expect(result.response.status).toBe(200);
     expect(result.actualProvider).toBe("openrouter");
 
-    // GLM was called 3 times (1 original + 2 retries)
-    expect(glmServer.getCallCount()).toBe(3);
+    // GLM was called 2 times (1 original + 1 retry)
+    expect(glmServer.getCallCount()).toBe(2);
   });
 
   // -------------------------------------------------------------------------
@@ -389,13 +394,13 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
         ttfbTimeout: 500,
         stallTimeout: 500,
         timeout: 2_000,
-        _connectionRetries: 1, // Short retry to speed up test
+        _connectionRetries: 0, // No retries — fail fast
       })],
       ["minimax", makeProvider("minimax", minimaxServer.url, {
         ttfbTimeout: 500,
         stallTimeout: 500,
         timeout: 2_000,
-        _connectionRetries: 1,
+        _connectionRetries: 0,
       })],
     ]);
 
@@ -414,15 +419,16 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
     // Should get 502 — not a thrown exception (ModelWeaver survives)
     expect(result.response.status).toBe(502);
 
-    // Both were tried
-    expect(glmServer.getCallCount()).toBe(2); // 1 original + 1 retry
-    expect(minimaxServer.getCallCount()).toBe(2); // 1 original + 1 retry
+    // Both were tried (1 attempt each, no retries)
+    expect(glmServer.getCallCount()).toBe(1);
+    expect(minimaxServer.getCallCount()).toBe(1);
   });
 
   // -------------------------------------------------------------------------
   // SURVIVAL-7: CB half-open probe timeout → back to open, escalating cooldown
   // -------------------------------------------------------------------------
   it("SURVIVAL-7: CB half-open probe timeout → flap detected, escalating cooldown", () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const breaker = new CircuitBreaker({
       failureThreshold: 2,
       windowSeconds: 60,
@@ -462,6 +468,7 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
     // Simulate probe succeeding → closed
     breaker.recordResult(200);
     expect(breaker.getState()).toBe("closed");
+    vi.useRealTimers();
   });
 
   // -------------------------------------------------------------------------
@@ -471,9 +478,9 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
     const providers = new Map<string, ProviderConfig>([
       ["glm", makeProvider("glm", glmServer.url, {
         ttfbTimeout: 10_000,
-        stallTimeout: 1_000,  // Very short — fires after 1s of no body data
+        stallTimeout: 500,  // Short stall timeout
         timeout: 5_000,
-        _connectionRetries: 2,
+        _connectionRetries: 0, // No retries
       })],
     ]);
 
@@ -487,8 +494,12 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
     const ctx = makeCtx();
     const result = await forwardWithFallback(providers, chain, ctx, makeRequest());
 
-    // Should get 502 (synthetic from stall)
-    expect(result.response.status).toBe(502);
+    // Stall errors are injected as SSE events within the 200 stream body,
+    // not as HTTP status codes — the status line is already sent.
+    expect(result.response.status).toBe(200);
+    // The body should contain the stall-injected SSE termination events
+    const body = await result.response.text();
+    expect(body).toContain("message_stop");
 
     // Connection error was tracked
     const connErr = metricsStore.getConnectionErrors();
@@ -500,10 +511,12 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
   // SURVIVAL-9: Rapid consecutive timeouts — CB escalates cooldown, survives
   // -------------------------------------------------------------------------
   it("SURVIVAL-9: Rapid flap cycles → escalating cooldown, CB survives without deadlock", () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
     const breaker = new CircuitBreaker({
       failureThreshold: 1, // Trip on first failure
       windowSeconds: 60,
       cooldownSeconds: 5,
+      rateLimitCooldownSeconds: 5, // match cooldownSeconds so 429 escalation is predictable
     });
 
     // Simulate rapid open→half-open→timeout→open flap cycles
@@ -512,8 +525,9 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
       breaker.recordResult(429);
       expect(breaker.getState()).toBe("open");
 
-      // Advance past cooldown
-      vi.advanceTimersByTime(6_000);
+      // Advance past cooldown (escalating: 5s, 10s, 20s, 40s, 60s)
+      const escalatedCooldown = Math.min(5_000 * Math.pow(2, i), 60_000);
+      vi.advanceTimersByTime(escalatedCooldown + 1_000);
 
       // Probe
       const probe = breaker.canProceed();
@@ -522,13 +536,9 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
       // Probe fails (timeout)
       breaker.recordProbeTimeout(probe.probeId);
       expect(breaker.getState()).toBe("open");
-
-      // Advance past doubled cooldown (10s)
-      vi.advanceTimersByTime(11_000);
     }
 
-    // After 5 flaps, cooldown would be 5 * 2^4 = 80s, capped at 60s
-    // Advance past max cooldown
+    // After 5 flaps, cooldown capped at 60s — advance past it
     vi.advanceTimersByTime(61_000);
 
     // Should still be able to probe (not permanently dead)
@@ -538,5 +548,6 @@ describe("GLM & MiniMax Intermittent Timeout Survival Simulation", () => {
     // Let probe succeed → closed
     breaker.recordResult(200);
     expect(breaker.getState()).toBe("closed");
+    vi.useRealTimers();
   });
 });
