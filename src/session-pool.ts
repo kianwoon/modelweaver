@@ -20,7 +20,7 @@ const SWEEP_INTERVAL_MS = 60_000; // sweep every 60s
  * before the HTTP/2 PING could keep them alive. Raised to 30s to match
  * keepAliveTimeout — the PING frame (every 10s) keeps the connection alive.
  */
-const DEFAULT_STALE_AGENT_THRESHOLD_MS = 30_000;
+export const DEFAULT_STALE_AGENT_THRESHOLD_MS = 30_000;
 
 /**
  * Manages per-session per-model undici Agents.
@@ -38,8 +38,8 @@ export class SessionAgentPool {
   /** sessionId → modelName → in-flight request count (prevents stale close on active streams) */
   private inFlight = new Map<string, Map<string, number>>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
-  private readonly idleTtlMs: number;
-  private readonly staleThresholdMs: number;
+  private idleTtlMs: number;
+  private staleThresholdMs: number;
 
   constructor(idleTtlMs: number = DEFAULT_SESSION_IDLE_TTL_MS, staleThresholdMs?: number) {
     this.idleTtlMs = idleTtlMs;
@@ -210,6 +210,12 @@ export class SessionAgentPool {
   /** Number of active sessions */
   get sessionCount(): number {
     return this.agents.size;
+  }
+
+  /** Update pool parameters on config hot-reload (no restart needed) */
+  updateConfig(idleTtlMs: number, staleThresholdMs: number): void {
+    this.idleTtlMs = idleTtlMs;
+    this.staleThresholdMs = staleThresholdMs;
   }
 
   /** Destroy the pool (stop sweep timer + close all) */

@@ -2,7 +2,7 @@
 import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
 import { forwardWithFallback, setMetricsStore as setProxyMetricsStore, type FallbackResult, recordProviderLatency } from "./proxy.js";
-import { SessionAgentPool } from "./session-pool.js";
+import { SessionAgentPool, DEFAULT_STALE_AGENT_THRESHOLD_MS } from "./session-pool.js";
 import { createLogger, type LogLevel } from "./logger.js";
 import type { AppConfig, ProviderConfig, RequestContext, StreamState } from "./types.js";
 import { transitionStreamState } from "./types.js";
@@ -878,6 +878,14 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       activeProbeManager.updateProviders(newConfig.providers);
       clearRoutingCache();
       clearHedgeStats();
+
+      // Update session pool thresholds from new config
+      const newIdleTtl = newConfig.server?.sessionIdleTtlMs ?? 600_000;
+      const newProviderStaleMs = [...(newConfig.providers?.values() ?? [])]
+        .map(p => p._staleAgentThresholdMs)
+        .filter((v): v is number => v != null);
+      const newStaleMs = newProviderStaleMs.length > 0 ? Math.min(...newProviderStaleMs) : DEFAULT_STALE_AGENT_THRESHOLD_MS;
+      sessionPool.updateConfig(newIdleTtl, newStaleMs);
     },
     closeSessionPool: async () => {
       await sessionPool.destroy();
