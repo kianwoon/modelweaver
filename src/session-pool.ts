@@ -183,6 +183,10 @@ export class SessionAgentPool {
         promises.push(agent.close().catch(() => {}));
       }
     }
+    if (this.sweepTimer) {
+      clearInterval(this.sweepTimer);
+      this.sweepTimer = null;
+    }
     this.agents.clear();
     this.lastActivity.clear();
     this.inFlight.clear();
