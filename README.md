@@ -6,6 +6,24 @@
 
 Multi-provider LLM proxy for Claude Code. Route different agent roles to different model providers with automatic fallback, racing, circuit breakers, and a native desktop GUI.
 
+## 30-Second Setup
+
+```bash
+npx @kianwoon/modelweaver init    # pick your provider, paste your API key
+npx @kianwoon/modelweaver         # start the proxy
+
+# In another terminal — point Claude Code at ModelWeaver:
+export ANTHROPIC_BASE_URL=http://localhost:3456
+export ANTHROPIC_API_KEY=unused-but-required
+claude
+```
+
+No config file editing. No provider SDK installs. The wizard tests your API key and generates the config automatically.
+
+[Full setup guide](#quick-start) · [All CLI commands](#cli-commands) · [Configuration reference](#configuration)
+
+---
+
 [![CI](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml) [![CodeQL](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml) [![Release](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![npm](https://img.shields.io/npm/v/@kianwoon/modelweaver)](https://www.npmjs.com/package/@kianwoon/modelweaver) [![GitHub stars](https://img.shields.io/github/stars/kianwoon/modelweaver?style=social)](https://github.com/kianwoon/modelweaver/stargazers)
 
 <img width="376" height="986" alt="Screenshot 2026-04-06 at 7 31 49 PM" src="https://github.com/user-attachments/assets/7aafc2e2-a358-4fec-bc08-478f68dc24fd" />
@@ -495,6 +513,39 @@ npm test             # Run tests (307 tests)
 npm run build        # Build for production (tsup)
 npm run dev          # Run in dev mode (tsx)
 ```
+
+## FAQ
+
+**Why do I need `ANTHROPIC_API_KEY=unused-but-required`?**
+
+Claude Code validates that `ANTHROPIC_API_KEY` is set before connecting. ModelWeaver handles real auth to upstream providers — the env var just satisfies Claude Code's startup check.
+
+**Port 3456 is already in use.**
+
+Something else is running on that port. Either stop it, or set a different port in your config:
+
+```yaml
+server:
+  port: 8080
+```
+
+Then update `ANTHROPIC_BASE_URL` to match.
+
+**How do I know ModelWeaver is running?**
+
+```bash
+curl http://localhost:3456/api/status
+```
+
+Returns JSON with uptime and circuit breaker state. Or check the GUI:
+
+```bash
+npx @kianwoon/modelweaver gui
+```
+
+**How do I switch providers?**
+
+Run `npx @kianwoon/modelweaver init` again — it opens your existing config for editing. Or edit `~/.modelweaver/config.yaml` directly (hot-reloaded automatically in daemon mode).
 
 ## License
 
