@@ -36,6 +36,24 @@ export interface RoutingEntry {
   weight?: number;
 }
 
+export interface ClassificationRule {
+  /** Regex pattern string (compiled at config load time into _compiled) */
+  pattern: string;
+  /** Score awarded when this pattern matches the user message */
+  score: number;
+  /** Pre-compiled RegExp — populated by config loader, not from YAML */
+  _compiled?: RegExp;
+}
+
+export interface SmartRoutingConfig {
+  /** Master switch — when false, smart routing is skipped entirely */
+  enabled: boolean;
+  /** Minimum cumulative score for a tier to be selected */
+  escalationThreshold: number;
+  /** Tier definitions: key is tier number (1, 2), value is array of classification rules */
+  patterns: Record<number, ClassificationRule[]>;
+}
+
 export interface HedgingConfig {
   /** Delay (ms) before starting backup providers in staggered race */
   speculativeDelay: number;
@@ -72,6 +90,7 @@ export interface AppConfig {
   tierPatterns: Map<string, string[]>;
   modelRouting: Map<string, RoutingEntry[]>;
   hedging?: HedgingConfig;
+  smartRouting?: SmartRoutingConfig;
 }
 
 export interface RequestContext {
@@ -146,6 +165,7 @@ export interface MetricsSummary {
   modelStats: ModelPerformanceStats[];
   sessionStats: { sessionId: string; requestCount: number; lastSeen: number; modelCount?: number; models?: string[] }[];
   providerErrors: { [provider: string]: { total: number; errors: { [status: number]: number }; lastErrorCode: number | null; lastErrorTime: number | null } };
+  smartTierCounts?: { tier1: number; tier2: number; passthrough: number };
 }
 
 export interface ConnectionErrorEntry {
