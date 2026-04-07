@@ -1,0 +1,84 @@
+# ModelWeaver Configuration
+# Docs: https://github.com/kianwoon/modelweaver#configuration
+
+# ─── Server ────────────────────────────────────────────────────────────
+server:
+  port: 3456
+  host: localhost
+
+# ─── Providers ────────────────────────────────────────────────────────
+# At least one provider with a valid API key is required.
+# Set the API key via environment variable, or replace ${...} with your key.
+#
+# To add a provider, copy a block and change the name/URL/key.
+# Supported providers: Anthropic, OpenRouter, Together AI, GLM (Z.ai), Minimax, Fireworks
+# Any OpenAI/Anthropic-compatible API works — just set baseUrl and authType.
+
+providers:
+  anthropic:
+    baseUrl: https://api.anthropic.com
+    apiKey: ${ANTHROPIC_API_KEY}       # Set this env var, or paste your key here
+    timeout: 600000
+    ttfbTimeout: 15000
+    circuitBreaker:
+      threshold: 4
+      windowSeconds: 120
+      cooldown: 15
+
+# ─── Routing ──────────────────────────────────────────────────────────
+# Tier-based routing: Claude Code sends model names like "claude-sonnet-4-..."
+# ModelWeaver matches the model name against tierPatterns, then uses the
+# matching tier's provider chain. First provider is primary, rest are fallbacks.
+
+routing:
+  sonnet:                              # Claude Sonnet requests
+    - provider: anthropic
+      model: claude-sonnet-4-20250514
+  opus:                                # Claude Opus requests
+    - provider: anthropic
+      model: claude-opus-4-20250514
+  haiku:                               # Claude Haiku requests (Explore agents)
+    - provider: anthropic
+      model: claude-haiku-4-5-20251001
+
+tierPatterns:
+  sonnet: ["sonnet", "3-5-sonnet", "3.5-sonnet"]
+  opus: ["opus", "3-opus", "3.5-opus"]
+  haiku: ["haiku", "3-haiku", "3.5-haiku"]
+
+# ─── Hedging ──────────────────────────────────────────────────────────
+# Sends multiple copies when a provider shows high latency variance.
+# Disable by setting maxHedge: 0.
+hedging:
+  speculativeDelay: 1000               # ms before starting backup providers
+  cvThreshold: 0.5                      # latency variance threshold
+  maxHedge: 4                           # max concurrent copies per request
+
+# ─── Advanced (uncomment to enable) ───────────────────────────────────
+
+# Exact model name routing (checked FIRST, before tier patterns):
+# modelRouting:
+#   "custom-model":
+#     - provider: anthropic
+#     - provider: openrouter             # fallback
+#       model: anthropic/custom-model
+
+# Weighted distribution across providers:
+# modelRouting:
+#   "claude-sonnet-4":
+#     - provider: anthropic
+#       weight: 70
+#     - provider: openrouter
+#       weight: 30
+
+# Smart routing — classify message content and override tier:
+# smartRouting:
+#   enabled: true
+#   escalationThreshold: 2
+#   patterns:
+#     "1":                              # Tier 1 — best models
+#       - pattern: "architect|design system|from scratch"
+#         score: 3
+#     "2":                              # Tier 2 — good models
+#       - pattern: "explain|summarize|compare"
+#         score: 2

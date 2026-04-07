@@ -1,11 +1,14 @@
 // src/config.ts
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, cpSync } from "node:fs";
 import { readFile, stat, access } from "node:fs/promises";
-import { join } from "node:path";
+import { join, dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { CircuitBreaker } from "./circuit-breaker.js";
 import type { AppConfig, ClassificationRule, HedgingConfig, ProviderConfig, RoutingEntry, ServerConfig, SmartRoutingConfig } from "./types.js";
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
 
 // --- Structured config validation error ---
 
@@ -405,9 +408,25 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     path = findConfigFile(cwd);
   }
   if (!path) {
-    throw new Error(
-      "No config file found. Create modelweaver.yaml in your project root or ~/.modelweaver/config.yaml"
+    // No config found — copy defaults to ~/.modelweaver/config.yaml
+    const defaultsPath = resolve(__dirname, "config.defaults.yaml");
+    const configDir = join(
+      process.env.HOME || process.env.USERPROFILE || "",
+      ".modelweaver",
     );
+    const targetPath = join(configDir, "config.yaml");
+
+    if (existsSync(defaultsPath)) {
+      mkdirSync(configDir, { recursive: true });
+      cpSync(defaultsPath, targetPath);
+      console.log(`\n  No config found. Created default config at ${targetPath}`);
+      console.log(`  Edit the file to add your API key, or set it as an environment variable.\n`);
+      path = targetPath;
+    } else {
+      throw new Error(
+        "No config file found. Run 'npx @kianwoon/modelweaver init' to create one."
+      );
+    }
   }
 
   const raw = await readFile(path, "utf-8");
