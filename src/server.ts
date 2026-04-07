@@ -1,6 +1,7 @@
 // src/server.ts
 import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
+import { classifyTier, extractLastUserMessage } from "./classifier.js";
 import { forwardWithFallback, setMetricsStore as setProxyMetricsStore, type FallbackResult, recordProviderLatency } from "./proxy.js";
 import { SessionAgentPool, DEFAULT_STALE_AGENT_THRESHOLD_MS } from "./session-pool.js";
 import { createLogger, type LogLevel } from "./logger.js";
@@ -486,7 +487,31 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       return anthropicError("invalid_request_error", "Missing 'model' field in request body", requestId);
     }
 
-    const ctx = resolveRequest(model, requestId, config, rawBody);
+    // Smart routing: classify request by content, override tier if patterns match
+    let overrideTier: number | undefined;
+    if (config.smartRouting?.enabled) {
+      const lastMessage = extractLastUserMessage(body as Record<string, unknown>);
+      if (lastMessage) {
+        const classified = classifyTier(lastMessage, config.smartRouting);
+        if (classified !== null) {
+          overrideTier = classified;
+          logger.info("Smart routing classified", {
+            requestId,
+            model,
+            classifiedTier: classified,
+            messageLength: lastMessage.length,
+          });
+        }
+      }
+      // Record classification metrics
+      if (metricsStore) {
+        if (overrideTier === 1) metricsStore.recordSmartTier("tier1");
+        else if (overrideTier === 2) metricsStore.recordSmartTier("tier2");
+        else metricsStore.recordSmartTier("passthrough");
+      }
+    }
+
+    const ctx = resolveRequest(model, requestId, config, rawBody, overrideTier);
     if (ctx) {
       (ctx as RequestContext & { parsedBody?: Record<string, unknown> }).parsedBody = body as Record<string, unknown>;
     }

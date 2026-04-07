@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { CircuitBreaker } from "./circuit-breaker.js";
-import type { AppConfig, HedgingConfig, ProviderConfig, RoutingEntry, ServerConfig } from "./types.js";
+import type { AppConfig, ClassificationRule, HedgingConfig, ProviderConfig, RoutingEntry, ServerConfig, SmartRoutingConfig } from "./types.js";
 
 // --- Structured config validation error ---
 
@@ -164,6 +164,19 @@ const hedgingSchema = z.object({
   maxHedge: z.number().int().min(1).max(10).default(4),
 });
 
+const classificationRuleSchema = z.object({
+  /** Regex pattern to match against the last user message */
+  pattern: z.string().min(1, "Pattern cannot be empty"),
+  /** Score awarded when this pattern matches */
+  score: z.number().positive().default(1),
+});
+
+const smartRoutingSchema = z.object({
+  enabled: z.boolean().default(false),
+  escalationThreshold: z.number().positive().default(2),
+  patterns: z.record(z.string(), z.array(classificationRuleSchema)),
+});
+
 const rawConfigSchema = z.object({
   server: z
     .object({
@@ -183,6 +196,7 @@ const rawConfigSchema = z.object({
   tierPatterns: z.record(z.string(), z.array(z.string())).default({}),
   modelRouting: z.record(z.string(), z.array(routingEntrySchema)).default({}),
   hedging: hedgingSchema.optional(),
+  smartRouting: smartRoutingSchema.optional(),
 });
 
 // --- Env var resolution ---
@@ -330,6 +344,43 @@ function loadProjectRoutingOverlay(cwd: string): Map<string, RoutingEntry[]> | n
   } catch {
     return null;
   }
+}
+
+// --- Smart routing regex compilation ---
+
+type RawSmartRouting = z.infer<typeof smartRoutingSchema>;
+
+/**
+ * Compile smart routing regex patterns at config load time.
+ * Validates pattern syntax and converts string tier keys to numbers.
+ */
+function compileSmartRouting(raw: RawSmartRouting | undefined): SmartRoutingConfig | undefined {
+  if (!raw || !raw.enabled) return undefined;
+
+  const compiledPatterns: Record<number, ClassificationRule[]> = {};
+  for (const [tierKey, rules] of Object.entries(raw.patterns)) {
+    const tierNum = Number(tierKey);
+    if (isNaN(tierNum)) {
+      throw new Error(`smartRouting: tier key "${tierKey}" is not a valid number`);
+    }
+    compiledPatterns[tierNum] = rules.map((rule) => {
+      let compiled: RegExp;
+      try {
+        compiled = new RegExp(rule.pattern, "i"); // case-insensitive
+      } catch (e) {
+        throw new Error(
+          `smartRouting: invalid regex pattern "${rule.pattern}" in tier ${tierKey}: ${(e as Error).message}`,
+        );
+      }
+      return { pattern: rule.pattern, score: rule.score, _compiled: compiled };
+    });
+  }
+
+  return {
+    enabled: true,
+    escalationThreshold: raw.escalationThreshold,
+    patterns: compiledPatterns,
+  };
 }
 
 // --- Load & validate ---
@@ -508,7 +559,20 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       cvThreshold: validated.hedging.cvThreshold,
       maxHedge: validated.hedging.maxHedge,
     } : undefined,
+    smartRouting: compileSmartRouting(validated.smartRouting),
   };
+
+  // Cross-validate smart routing tier references against routing entries
+  if (config.smartRouting) {
+    for (const tierNum of Object.keys(config.smartRouting.patterns).map(Number)) {
+      const routingKey = `tier${tierNum}`;
+      if (!config.routing.has(routingKey)) {
+        console.warn(
+          `[config] smartRouting tier ${tierNum} has no routing entry for "${routingKey}". Classification to this tier will fall through to next tier.`,
+        );
+      }
+    }
+  }
 
   // Apply project-level routing overlay when loading global config
   if (path && !path.endsWith("modelweaver.yaml")) {

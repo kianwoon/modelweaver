@@ -8,6 +8,39 @@ hedging:
   cvThreshold: 0.5         # latency variance threshold for multi-copy hedging
   maxHedge: 4              # max concurrent copies per request
 
+# Smart routing: classify request complexity and route to appropriate tier
+# Disabled by default. When enabled, analyzes the last user message to determine
+# if a more capable (or simpler) model tier should handle the request.
+# Requires routing entries named "tier1", "tier2" (and optionally "tier3").
+# smartRouting:
+#   enabled: true
+#   escalationThreshold: 2  # minimum cumulative score to trigger tier override
+#   patterns:
+#     "1":                   # Tier 1 — best models for complex tasks
+#       - pattern: "architect|design system|from scratch"
+#         score: 3
+#       - pattern: "debug|troubleshoot|investigate|root cause"
+#         score: 2
+#       - pattern: "analyze.*reason|explain why|step.by.step"
+#         score: 2
+#     "2":                   # Tier 2 — good models for moderate tasks
+#       - pattern: "explain|summarize|compare"
+#         score: 2
+#       - pattern: "write.*test|refactor|review"
+#         score: 2
+#
+# When smartRouting is enabled, add these routing entries (coexist with named tiers):
+# routing:
+#   tier1:                    # Smart routing tier 1 — routed for complex requests
+#     - provider: anthropic
+#       model: claude-opus-4-20250514
+#   tier2:                    # Smart routing tier 2 — routed for moderate requests
+#     - provider: anthropic
+#       model: claude-sonnet-4-20250514
+#   tier3:                    # Smart routing tier 3 — default / passthrough
+#     - provider: anthropic
+#       model: claude-haiku-4-5-20251001
+
 server:
   port: 3456
   host: localhost

@@ -188,24 +188,29 @@ export function selectByWeight(
 
 /**
  * Build a RequestContext from an incoming model name and raw body.
+ * Priority 0: smart routing tier override (from message content classification).
  * Priority 1: exact model name match in modelRouting.
  * Priority 2: substring match via tierPatterns.
  * Uses an LRU cache to skip repeated resolution for the same model.
- * Distribution models bypass the cache (need fresh random selection).
+ * Distribution models and smart-routed requests bypass the cache.
  * Returns null if no route matches.
  */
 export function resolveRequest(
   model: string,
   requestId: string,
   config: AppConfig,
-  rawBody: string
+  rawBody: string,
+  overrideTier?: number
 ): RequestContext | null {
   // Check if this model uses distribution — skip cache for distribution models
   const modelChain = config.modelRouting.get(model);
   const isDistributed = modelChain?.some(e => e.weight !== undefined) ?? false;
 
-  // Check LRU cache first (skip for distribution models — need fresh random selection)
-  if (!isDistributed) {
+  // Smart routing and distribution models skip cache (same model could classify differently)
+  const skipCache = isDistributed || overrideTier !== undefined;
+
+  // Check LRU cache first (skip for distribution/smart-routed models)
+  if (!skipCache) {
     const cached = routingCache.get(model);
     if (cached) {
       // Move to most-recently-used position (delete + re-insert)
@@ -225,8 +230,36 @@ export function resolveRequest(
   let tier: string;
   let providerChain: RoutingEntry[];
 
-  // Priority 1: exact model name match in modelRouting
-  if (modelChain && modelChain.length > 0) {
+  // Priority 0: Smart routing tier override (from message content classification)
+  let smartChain: RoutingEntry[] | undefined;
+  if (overrideTier !== undefined) {
+    const routingKey = "tier" + overrideTier;
+    let chain = buildRoutingChain(routingKey, config.routing);
+
+    // Graceful degradation: if classified tier has no providers, try next tiers
+    if (chain.length === 0) {
+      for (let next = overrideTier + 1; next <= overrideTier + 2; next++) {
+        const nextChain = buildRoutingChain("tier" + next, config.routing);
+        if (nextChain.length > 0) {
+          chain = nextChain;
+          console.warn(
+            `[router] Smart routing tier ${overrideTier} has no providers, degrading to tier ${next}`,
+          );
+          break;
+        }
+      }
+    }
+
+    if (chain.length > 0) {
+      smartChain = chain;
+    }
+  }
+
+  if (smartChain) {
+    tier = "tier" + overrideTier;
+    providerChain = smartChain;
+  } else if (modelChain && modelChain.length > 0) {
+    // Priority 1: exact model name match in modelRouting
     tier = "(modelRouting)";
     providerChain = modelChain;
   } else {

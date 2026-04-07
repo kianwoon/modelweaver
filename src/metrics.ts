@@ -40,6 +40,9 @@ export class MetricsStore {
   // Tracked separately from HTTP status errors — do NOT affect health scores or circuit breakers.
   private _connectionErrors = new Map<string, ConnectionErrorEntry>();
 
+  // Smart routing tier classification counters
+  private _smartTierCounts = { tier1: 0, tier2: 0, passthrough: 0 };
+
   // Lazy cache for getModelStats() — invalidated on every recordRequest()
   private _modelStatsDirty = true;
   private _cachedModelStats: ModelPerformanceStats[] = [];
@@ -292,6 +295,7 @@ export class MetricsStore {
         return live.sort((a, b) => b.lastSeen - a.lastSeen).slice(0, 50);
       })(),
       providerErrors: Object.fromEntries(this._providerErrors),
+      smartTierCounts: { ...this._smartTierCounts },
     };
   }
 
@@ -430,6 +434,11 @@ export class MetricsStore {
   /** Returns connection-level error counters for all providers. */
   getConnectionErrors(): { [provider: string]: ConnectionErrorEntry } {
     return Object.fromEntries(this._connectionErrors);
+  }
+
+  /** Record a smart routing tier classification result. */
+  recordSmartTier(tier: "tier1" | "tier2" | "passthrough"): void {
+    this._smartTierCounts[tier]++;
   }
 
   private getRecentRequests(): RequestMetrics[] {
