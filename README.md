@@ -11,6 +11,19 @@ Multi-provider LLM proxy for Claude Code. Route different agent roles to differe
 <img width="371" height="814" alt="Screenshot 2026-04-02 at 2 33 26 AM" src="https://github.com/user-attachments/assets/f8e0a706-252e-4f55-9d56-e829131a3f5e" />
 
 
+## What's New — v0.3.67
+
+- **Session pool timer leak fix** — `closeAll()` now clears the `sweepTimer` interval (#199)
+- **Tauri GUI crash protection** — defensive `if let` replaces unsafe `.unwrap()` in setup (#200)
+- **WS reconnect timer cleanup** — prevent dual polling on reconnect (#198)
+- **Monitor signal handler** — defensive exit handler prevents double-signal crashes (#197)
+- **Per-model connection pools** — each model gets its own HTTP/2 connection for TCP isolation (#186)
+- **GOAWAY-aware retry** — graceful HTTP/2 drain no longer marks pool as "failed" (#188)
+
+[View all releases](https://github.com/kianwoon/modelweaver/releases) · [Full changelog](CHANGELOG.md)
+
+---
+
 ## How It Works
 
 ModelWeaver sits between Claude Code and upstream model providers as a local HTTP proxy. It inspects the `model` field in each Anthropic Messages API request and routes it to the best-fit provider.
