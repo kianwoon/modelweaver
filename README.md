@@ -8,7 +8,8 @@ Multi-provider LLM proxy for Claude Code. Route different agent roles to differe
 
 [![CI](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/ci.yml) [![CodeQL](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/codeql.yml) [![Release](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml/badge.svg)](https://github.com/kianwoon/modelweaver/actions/workflows/release.yml) [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0) [![npm](https://img.shields.io/npm/v/@kianwoon/modelweaver)](https://www.npmjs.com/package/@kianwoon/modelweaver) [![GitHub stars](https://img.shields.io/github/stars/kianwoon/modelweaver?style=social)](https://github.com/kianwoon/modelweaver/stargazers)
 
-<img width="371" height="814" alt="Screenshot 2026-04-02 at 2 33 26 AM" src="https://github.com/user-attachments/assets/f8e0a706-252e-4f55-9d56-e829131a3f5e" />
+<img width="376" height="986" alt="Screenshot 2026-04-06 at 7 31 49 PM" src="https://github.com/user-attachments/assets/7aafc2e2-a358-4fec-bc08-478f68dc24fd" />
+
 
 
 ## What's New — v0.3.67
