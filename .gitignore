@@ -14,6 +14,8 @@ docs/superpowers/
 .playwright-mcp/
 *.cjs.bak
 diagnostic-sse.cjs
+*.debug-backup
+REVIEW-FINDINGS.md
 
 # Internal review files
 CLAUDE.md

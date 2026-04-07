@@ -12,7 +12,7 @@ Multi-provider LLM proxy for Claude Code. Route different agent roles to differe
 
 
 
-## What's New — v0.3.67
+## What's New — v0.3.69
 
 - **Smart request routing** — classify message content by complexity and route to the appropriate model tier automatically (#97)
 - **Session pool timer leak fix** — `closeAll()` now clears the `sweepTimer` interval (#199)
@@ -45,7 +45,6 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 
 - **Smart request routing** — classify request complexity by message content (regex keyword scoring) and override the model tier automatically
 - **Tier-based routing** — route by model family (sonnet/opus/haiku) using substring pattern matching
-- **Smart request routing** — analyze message content to classify request complexity and override model tier (e.g., route debugging tasks to best model, summaries to default)
 - **Exact model routing** — route specific model names to dedicated providers (checked first)
 - **Automatic fallback** — transparent failover on rate limits (429) and server errors (5xx)
 - **Adaptive racing** — on 429, automatically races remaining providers simultaneously
@@ -370,9 +369,6 @@ tierPatterns:
 #         score: 2
 # Requires matching routing entries: routing.tier1, routing.tier2 (tier3 optional)
 # Graceful degradation: if classified tier has no providers, tries next tier down
-  sonnet: ["sonnet", "3-5-sonnet", "3.5-sonnet"]
-  opus: ["opus", "3-opus", "3.5-opus"]
-  haiku: ["haiku", "3-haiku", "3.5-haiku"]
 ```
 
 ### Routing priority
