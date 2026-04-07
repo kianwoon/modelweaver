@@ -14,6 +14,7 @@ Multi-provider LLM proxy for Claude Code. Route different agent roles to differe
 
 ## What's New — v0.3.67
 
+- **Smart request routing** — classify message content by complexity and route to the appropriate model tier automatically (#97)
 - **Session pool timer leak fix** — `closeAll()` now clears the `sweepTimer` interval (#199)
 - **Tauri GUI crash protection** — defensive `if let` replaces unsafe `.unwrap()` in setup (#200)
 - **WS reconnect timer cleanup** — prevent dual polling on reconnect (#198)
@@ -33,6 +34,7 @@ ModelWeaver sits between Claude Code and upstream model providers as a local HTT
 Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
                    (localhost)   ──→  OpenRouter (fallback)
                    │
+              0. Classify message content → tier override? (smartRouting)
               1. Match exact model name (modelRouting)
               2. Match tier via substring (tierPatterns)
               3. Fallback on 429 / 5xx errors
@@ -41,7 +43,9 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 
 ## Features
 
+- **Smart request routing** — classify request complexity by message content (regex keyword scoring) and override the model tier automatically
 - **Tier-based routing** — route by model family (sonnet/opus/haiku) using substring pattern matching
+- **Smart request routing** — analyze message content to classify request complexity and override model tier (e.g., route debugging tasks to best model, summaries to default)
 - **Exact model routing** — route specific model names to dedicated providers (checked first)
 - **Automatic fallback** — transparent failover on rate limits (429) and server errors (5xx)
 - **Adaptive racing** — on 429, automatically races remaining providers simultaneously
@@ -345,14 +349,39 @@ tierPatterns:
   sonnet: ["sonnet", "3-5-sonnet", "3.5-sonnet"]
   opus: ["opus", "3-opus", "3.5-opus"]
   haiku: ["haiku", "3-haiku", "3.5-haiku"]
+
+# Smart request routing — classify message content and override model tier
+# When enabled, analyzes the last user message against regex patterns.
+# If cumulative score >= escalationThreshold, routes to the classified tier
+# instead of the model requested. Disabled by default.
+# smartRouting:
+#   enabled: true
+#   escalationThreshold: 2    # minimum score to trigger tier override
+#   patterns:
+#     "1":                     # Tier 1 — best model (e.g., opus-tier)
+#       - pattern: "architect|design system|from scratch"
+#         score: 3
+#       - pattern: "debug|troubleshoot|investigate|root cause"
+#         score: 2
+#     "2":                     # Tier 2 — good model (e.g., sonnet-tier)
+#       - pattern: "explain|summarize|compare"
+#         score: 2
+#       - pattern: "write.*test|refactor|review"
+#         score: 2
+# Requires matching routing entries: routing.tier1, routing.tier2 (tier3 optional)
+# Graceful degradation: if classified tier has no providers, tries next tier down
+  sonnet: ["sonnet", "3-5-sonnet", "3.5-sonnet"]
+  opus: ["opus", "3-opus", "3.5-opus"]
+  haiku: ["haiku", "3-haiku", "3.5-haiku"]
 ```
 
 ### Routing priority
 
-1. **Exact model name** (`modelRouting`) — if the request model matches exactly, use that route
-2. **Weighted distribution** — if the model has `weight` entries, requests are distributed across providers proportionally
-3. **Tier pattern** (`tierPatterns` + `routing`) — substring match the model name against patterns, then use the tier's provider chain
-4. **No match** — returns 502 with a descriptive error listing configured tiers and model routes
+1. **Smart content routing** (`smartRouting`) — if enabled and message content matches classification patterns, override to the classified tier (bypasses all other routing)
+2. **Exact model name** (`modelRouting`) — if the request model matches exactly, use that route
+3. **Weighted distribution** — if the model has `weight` entries, requests are distributed across providers proportionally
+4. **Tier pattern** (`tierPatterns` + `routing`) — substring match the model name against patterns, then use the tier's provider chain
+5. **No match** — returns 502 with a descriptive error listing configured tiers and model routes
 
 ### Provider chain behavior
 
@@ -466,7 +495,7 @@ ModelWeaver uses the model name to determine which agent tier is calling, then r
 
 ```bash
 npm install          # Install dependencies
-npm test             # Run tests (299 tests)
+npm test             # Run tests (307 tests)
 npm run build        # Build for production (tsup)
 npm run dev          # Run in dev mode (tsx)
 ```
