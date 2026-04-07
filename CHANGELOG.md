@@ -2,7 +2,26 @@
 
 All notable changes to ModelWeaver.
 
-## [v0.3.67] — 2025-04-07
+## [v0.3.69] — 2026-04-07
+
+### Features
+
+- **Smart request-to-model-tier classification** — keyword-scoring classifier routes requests to appropriate model tiers based on message content complexity. Configurable via `smartRouting` config with regex patterns and score thresholds (#97)
+- **Configurable connection retries** — new `connectionRetries` provider option (default: 5) with separate TTFB retry cap (#188)
+- **Configurable stale agent threshold** — new `staleAgentThresholdMs` provider option (default: 30000ms) for session pool agent freshness (#188)
+
+### Fixes
+
+- **GUI build cache invalidation** — added `cargo:rerun-if-changed` directives to `gui/build.rs` to prevent stale frontend blobs without requiring `cargo clean` (#208)
+
+## [v0.3.68] — 2026-04-07
+
+### Docs
+
+- **README polish** — added "Why ModelWeaver" section with developer advantage analysis (#205)
+- **"What's New" section** — added changelog highlights to README header (#204)
+
+## [v0.3.67] — 2026-04-07
 
 ### Fixes
 
@@ -15,7 +34,7 @@ All notable changes to ModelWeaver.
 - **Daemon shutdown** — call `destroy()` on shutdown and remove dead `gui` field from `parseArgs` (#189)
 - **GUI stats bar** — fix missing cache tokens and precision loss in stats display (#187)
 
-## [v0.3.66] — 2025-04-06
+## [v0.3.66] — 2026-04-06
 
 ### Fixes
 
@@ -23,25 +42,25 @@ All notable changes to ModelWeaver.
 - **Configurable stale agent threshold** — raised default from 10s to 30s, matching keepAliveTimeout to stop the evict-cold-start-slow-TTFB churn loop (#188)
 - **TTFB retry cap** — TTFB timeouts capped at 2 retries (vs 5 for socket errors), reducing worst-case from 360s to 180s per provider (#188)
 
-## [v0.3.65] — 2025-04-06
+## [v0.3.65] — 2026-04-06
 
 ### Features
 
 - **Per-model connection pool isolation** — each model gets its own `undici.Agent`, preventing TCP contention between concurrent streams. New `modelPools` config schema with per-model breakdown in pool stats (#186)
 
-## [v0.3.64] — 2025-04-05
+## [v0.3.64] — 2026-04-05
 
 ### Fixes
 
 - **TTFB timeout floor** — respect configured `ttfbTimeout` as minimum, not ceiling. Adaptive TTFB was clamping user-configured timeouts down to observed p95
 
-## [v0.3.63] — 2025-04-05
+## [v0.3.63] — 2026-04-05
 
 ### Features
 
 - **Upstream keep-alive sync** — sync upstream keep-alive timeouts with server-side settings for consistent connection management
 
-## [v0.3.62] — 2025-04-04
+## [v0.3.62] — 2026-04-04
 
 ### Features
 
@@ -52,7 +71,7 @@ All notable changes to ModelWeaver.
 - **Header forwarding revert** — restore allowlist header forwarding; denylist caused ZlibError in some providers
 - **User-agent forwarding** — forward user-agent header to upstream providers
 
-## [v0.3.61] — 2025-04-03
+## [v0.3.61] — 2026-04-03
 
 ### Features
 
@@ -64,33 +83,33 @@ All notable changes to ModelWeaver.
 - **Pure passthrough** — strip all stream modification from both proxy and server
 - **Thinking block rewrite** — rewrite thinking blocks instead of dropping, preserving SDK index continuity
 
-## [v0.3.60] — 2025-04-02
+## [v0.3.60] — 2026-04-02
 
 ### Features
 
 - **Activity progress bar UX** — improved GUI progress bar experience
 
-## [v0.3.59] — 2025-04-01
+## [v0.3.59] — 2026-04-01
 
 ### Fixes
 
 - **Y8.content crash prevention** — event-level thinking block filter and null object sanitization in SSE stream
 - **HTTP/2 streaming reliability** — null object sanitization for robust streaming
 
-## [v0.3.58] — 2025-03-31
+## [v0.3.58] — 2026-03-31
 
 ### Features
 
 - **Per-model session connections** — dedicated HTTP/2 connections per model for session isolation (#180)
 
-## [v0.3.57] — 2025-03-30
+## [v0.3.57] — 2026-03-30
 
 ### Fixes
 
 - **Hedge cancellation** — suppress "socket closed unexpectedly" on hedge cancellation
 - **Circuit breaker** — fix false positives and health probe bugs (#179)
 
-## [v0.3.56] — 2025-03-29
+## [v0.3.56] — 2026-03-29
 
 ### Fixes
 
@@ -98,7 +117,7 @@ All notable changes to ModelWeaver.
 - **Stream state isolation** — isolate stream state per hedge copy to prevent shared mutable race (#174)
 - **Duplicate event elimination** — remove duplicate SSE events from proxy pipeline
 
-## [v0.3.55] — 2025-03-28
+## [v0.3.55] — 2026-03-28
 
 ### Fixes
 
@@ -107,7 +126,7 @@ All notable changes to ModelWeaver.
 
 ---
 
-## [v0.3.38] — 2025-03-15
+## [v0.3.38] — 2026-03-15
 
 ### New Features
 

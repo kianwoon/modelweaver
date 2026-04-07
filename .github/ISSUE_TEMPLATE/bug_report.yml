@@ -1,0 +1,79 @@
+name: Bug Report
+description: Report a bug or unexpected behavior in ModelWeaver
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug! Please fill out the sections below.
+        Make sure to check existing issues first to avoid duplicates.
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: A clear description of the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: How can we reproduce this behavior?
+      placeholder: |
+        1. Run `npx @kianwoon/modelweaver ...`
+        2. Send a request to ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Paste any relevant log output (redact API keys and sensitive data).
+      render: shell
+
+  - type: input
+    id: version
+    attributes:
+      label: ModelWeaver Version
+      description: What version are you running?
+      placeholder: e.g., 0.3.69
+    validations:
+      required: true
+
+  - type: dropdown
+    id: runtime
+    attributes:
+      label: Runtime
+      description: How are you running ModelWeaver?
+      options:
+        - Foreground (npx @kianwoon/modelweaver)
+        - Daemon mode (start)
+        - Desktop GUI
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Relevant Config
+      description: Paste the relevant parts of your `config.yaml` (redact API keys).
+      render: yaml
+
+  - type: input
+    id: node_version
+    attributes:
+      label: Node.js Version
+      placeholder: e.g., 22.0.0
