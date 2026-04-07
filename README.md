@@ -89,59 +89,68 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 
 ## Why ModelWeaver
 
-### Uninterrupted Coding Sessions
+### Single-Provider Is a Hobby Setup
 
-Claude Code sessions die when the API returns 429 or 5xx — you lose context, wait, and retry manually. With multiple subagents (Explore, Plan, code review) firing simultaneously, one rate limit can cascade into multiple failed agents.
+Relying on one LLM provider is fine for experiments. For serious development, it's a liability. When your provider degrades — rate limits, slow tokens, stalled streams, outright outages — your entire coding session freezes. A 1-hour task becomes a 3-hour wait-and-retry loop.
 
-- **429 → instant race**: Instead of waiting for retry-after, all remaining providers are raced simultaneously. Recovery in <2s vs 30-60s wait.
-- **Circuit breaker (3 failures in 60s → open)**: A degraded provider stops receiving traffic within seconds, not minutes. Auto-recovers via half-open probing.
-- **Connection retry (exponential backoff, up to 5 retries)**: Stale HTTP/2 connections, TTFB timeouts, and GOAWAY frames are retried transparently before escalating to fallback.
-- **Global backoff**: If ALL providers are unhealthy, returns 503 immediately instead of wasting 30+ seconds trying each one sequentially.
+ModelWeaver gives you **high availability for AI coding** — multiple providers, automatic failover, and intelligent traffic management. When one provider goes down, you don't even notice.
+
+**What happens without ModelWeaver:**
+```
+10:00  Coding session starts — everything's fast
+10:30  Token generation slows from 80 tok/s to 3 tok/s
+10:35  Stream stalls mid-response — you wait
+10:40  Retry — 429 rate limit — you wait more
+10:50  Another retry — 502 error — you give up
+11:30  Start over, lost context
+Result: 1-hour job took 4 hours
+```
+
+**What happens with ModelWeaver:**
+```
+10:00  Coding session starts — ModelWeaver routes to Provider A
+10:30  Provider A slows down — hedging detects high latency variance
+       → sends 2 copies simultaneously, returns the fastest
+10:35  Provider A stalls — stall detection aborts in seconds
+       → transparent fallback to Provider B, stream continues
+10:40  Provider A rate limits (429) — remaining providers race simultaneously
+       → recovery in <2s, no context lost
+Result: 1-hour job took 1 hour
+```
+
+### How It Works
+
+| Problem | What ModelWeaver Does | Recovery Time |
+|---|---|---|
+| Provider slows down | Hedging sends 2-4 copies, returns fastest | Instant |
+| Stream stalls mid-response | Stall detection aborts, falls back to next provider | Seconds |
+| 429 rate limit | Races all remaining providers simultaneously | <2s |
+| Provider goes down | Circuit breaker opens, traffic rerouted automatically | Seconds |
+| All providers unhealthy | Global backoff returns 503 immediately | Immediate |
+| Stale HTTP/2 connection | Transparent retry with exponential backoff | Transparent |
+| Provider returns errors | Health-score reordering deprioritizes bad providers | Rolling 5-min window |
 
 ### Cost Optimization Without Quality Loss
 
-Running everything through Anthropic API at Tier 1/2 rates gets expensive. A full Claude Code session with multiple subagents can generate 50-100+ API calls.
+Running everything through one provider at premium rates gets expensive. A full Claude Code session with multiple subagents generates 50-100+ API calls.
 
-- **Weighted routing with health blending**: `finalWeight = (1-0.3) * staticWeight + 0.3 * healthScore`. Traffic distribution automatically shifts toward healthier providers when a provider degrades.
-- **Tier-based routing**: Haiku-tier Explore agents (cheap, fast) never accidentally hit Opus-tier pricing. Sonnet coding agents don't burn expensive Opus tokens.
-- **Model rewriting per provider**: The same `claude-sonnet-4-6` model name can route to different models on different providers — zero config changes in Claude Code.
-
-### Fast Responses Even With Unstable Providers
-
-Some providers have extreme latency variance (CV 1.5-4.0). A request that normally takes 3 seconds might take 30 seconds, freezing your coding session.
-
-- **Request hedging (CV > 0.5 triggers)**: Sends 2-4 copies of the same request simultaneously and returns the fastest response. Production data shows providers with CV 1.5-4.0 benefit significantly from hedging.
-- **Adaptive TTFB**: Dynamically adjusts the "time to first byte" timeout based on each provider's observed latency history. No false positives on slow-but-healthy providers, fast failure on stuck ones.
-- **Stall detection (default 15s)**: If a streaming response stops sending data mid-stream, it aborts and falls back immediately.
-- **Health-score reordering**: Providers with health scores below 0.5 are deprioritized to the end of fallback chains automatically. Score = `0.7 * successRate + 0.3 * latencyScore` (5-minute rolling window).
-- **Session agent pooling**: Reuses HTTP/2 connections across requests within the same session. Eliminates TCP+TLS handshake overhead per request — critical when subagents fire 10+ requests in rapid succession.
+- **Weighted routing with health blending**: Traffic automatically shifts toward healthier and cheaper providers when one degrades
+- **Tier-based routing**: Haiku-tier Explore agents (cheap, fast) never accidentally hit Opus-tier pricing. Sonnet coding agents don't burn expensive Opus tokens
+- **Model rewriting per provider**: The same `claude-sonnet-4-6` model name can route to different models on different providers — zero config changes in Claude Code
 
 ### Operational Visibility
 
 When coding through a proxy, you're normally blind to why responses are slow or failing.
 
-- **Desktop GUI**: Real-time progress bars showing which provider handled each request, response time, and whether hedging fired.
-- **Health scores API**: `curl /api/health-scores` shows per-provider scores (0-1). A score of 0.3 means the provider is failing ~50% of requests.
-- **Error breakdown**: Per-provider error counts with status code breakdown. Spot patterns (e.g., a provider returning 502s consistently).
-- **Circuit breaker state**: See which providers are open/closed/half-open in real-time.
+- **Desktop GUI**: Real-time progress bars showing which provider handled each request, response time, and whether hedging fired
+- **Health scores API**: `curl /api/health-scores` shows per-provider scores (0-1). A score of 0.3 means the provider is failing ~50% of requests
+- **Error breakdown**: Per-provider error counts with status code breakdown — spot patterns like a provider returning 502s consistently
+- **Circuit breaker state**: See which providers are open/closed/half-open in real-time
 
 ### Zero-Downtime Configuration
 
-- **Hot-reload (300ms debounce)**: Edit `config.yaml` and the daemon picks up changes automatically. No restart, no killed in-flight requests.
-- **SIGHUP reload**: After rebuilding from source, `modelweaver reload` restarts the worker without killing the monitor.
-
-### Summary
-
-| Pain Point | Feature | Advantage |
-|---|---|---|
-| 429 rate limits kill sessions | Adaptive racing on 429 | <2s recovery vs 30-60s wait |
-| Provider downtime | Fallback chains + circuit breaker | Automatic failover, no manual intervention |
-| High latency variance | Hedging (CV > 0.5) + adaptive TTFB | 3-5s responses even with 30s tail latency |
-| Expensive API bills | Weighted distribution + tier routing | Traffic to cheapest acceptable provider |
-| Blind to failures | GUI + health scores + error tracking | Know exactly what's failing and why |
-| Stale connections | Connection retry + GOAWAY handling | Transparent recovery, no visible errors |
-| Config changes need restart | Hot-reload (300ms debounce) | Change weights mid-session, zero downtime |
-| Connection overhead per request | Session agent pooling (HTTP/2 reuse) | Faster sequential requests from subagents |
+- **Hot-reload (300ms debounce)**: Edit `config.yaml` and the daemon picks up changes automatically. No restart, no killed in-flight requests
+- **SIGHUP reload**: After rebuilding from source, `modelweaver reload` restarts the worker without killing the monitor
 
 ## Prerequisites
 
