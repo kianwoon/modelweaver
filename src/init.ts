@@ -258,10 +258,24 @@ async function handleValidation(state: WizardState): Promise<boolean> {
 function showSuccess(): void {
   console.log(`
 ${BOLD}${CYAN}\u2554\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2557\u2500
-\u2551  Configuration saved!                    \u2551
-\u2551                                                \u2551
-\u2551  Run 'npx modelweaver start' to start the daemon.  \u2551
+\u2551  Configuration saved!                         \u2551
 \u255A\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u2550\u255D${RESET}
+
+  Next steps:
+
+    ${GREEN}1.${RESET} Start ModelWeaver:
+       ${CYAN}npx @kianwoon/modelweaver${RESET}
+
+    ${GREEN}2.${RESET} Point Claude Code at ModelWeaver (in another terminal):
+       ${CYAN}export ANTHROPIC_BASE_URL=http://localhost:3456${RESET}
+       ${CYAN}export ANTHROPIC_API_KEY=unused-but-required${RESET}
+
+    ${GREEN}3.${RESET} Launch Claude Code:
+       ${CYAN}claude${RESET}
+
+  ${GREEN}All set!${RESET} ModelWeaver will route Claude Code requests through your configured providers.
+  Run ${CYAN}npx @kianwoon/modelweaver gui${RESET} for a desktop monitor.
+
 `);
 }
 

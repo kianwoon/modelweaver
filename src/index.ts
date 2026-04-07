@@ -552,6 +552,12 @@ async function main() {
     console.log();
   }
 
+  // Show connection hint for first-time users
+  console.log("  To connect Claude Code:");
+  console.log(`    export ANTHROPIC_BASE_URL=http://${host}:${port}`);
+  console.log("    export ANTHROPIC_API_KEY=unused-but-required");
+  console.log(`    claude\n`);
+
   // Start server — register error handler BEFORE listen() so EADDRINUSE is caught
   const server = createAdaptorServer({
     fetch: handle.app.fetch,
