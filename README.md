@@ -66,6 +66,62 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 - **Daemon mode** — background process with auto-restart, launchd integration, and reload support
 - **Desktop GUI** — native Tauri app with real-time progress bars, provider health, error breakdown, and recent request history
 
+## Why ModelWeaver
+
+### Uninterrupted Coding Sessions
+
+Claude Code sessions die when the API returns 429 or 5xx — you lose context, wait, and retry manually. With multiple subagents (Explore, Plan, code review) firing simultaneously, one rate limit can cascade into multiple failed agents.
+
+- **429 → instant race**: Instead of waiting for retry-after, all remaining providers are raced simultaneously. Recovery in <2s vs 30-60s wait.
+- **Circuit breaker (3 failures in 60s → open)**: A degraded provider stops receiving traffic within seconds, not minutes. Auto-recovers via half-open probing.
+- **Connection retry (exponential backoff, up to 5 retries)**: Stale HTTP/2 connections, TTFB timeouts, and GOAWAY frames are retried transparently before escalating to fallback.
+- **Global backoff**: If ALL providers are unhealthy, returns 503 immediately instead of wasting 30+ seconds trying each one sequentially.
+
+### Cost Optimization Without Quality Loss
+
+Running everything through Anthropic API at Tier 1/2 rates gets expensive. A full Claude Code session with multiple subagents can generate 50-100+ API calls.
+
+- **Weighted routing with health blending**: `finalWeight = (1-0.3) * staticWeight + 0.3 * healthScore`. Traffic distribution automatically shifts toward healthier providers when a provider degrades.
+- **Tier-based routing**: Haiku-tier Explore agents (cheap, fast) never accidentally hit Opus-tier pricing. Sonnet coding agents don't burn expensive Opus tokens.
+- **Model rewriting per provider**: The same `claude-sonnet-4-6` model name can route to different models on different providers — zero config changes in Claude Code.
+
+### Fast Responses Even With Unstable Providers
+
+Some providers have extreme latency variance (CV 1.5-4.0). A request that normally takes 3 seconds might take 30 seconds, freezing your coding session.
+
+- **Request hedging (CV > 0.5 triggers)**: Sends 2-4 copies of the same request simultaneously and returns the fastest response. Production data shows providers with CV 1.5-4.0 benefit significantly from hedging.
+- **Adaptive TTFB**: Dynamically adjusts the "time to first byte" timeout based on each provider's observed latency history. No false positives on slow-but-healthy providers, fast failure on stuck ones.
+- **Stall detection (default 15s)**: If a streaming response stops sending data mid-stream, it aborts and falls back immediately.
+- **Health-score reordering**: Providers with health scores below 0.5 are deprioritized to the end of fallback chains automatically. Score = `0.7 * successRate + 0.3 * latencyScore` (5-minute rolling window).
+- **Session agent pooling**: Reuses HTTP/2 connections across requests within the same session. Eliminates TCP+TLS handshake overhead per request — critical when subagents fire 10+ requests in rapid succession.
+
+### Operational Visibility
+
+When coding through a proxy, you're normally blind to why responses are slow or failing.
+
+- **Desktop GUI**: Real-time progress bars showing which provider handled each request, response time, and whether hedging fired.
+- **Health scores API**: `curl /api/health-scores` shows per-provider scores (0-1). A score of 0.3 means the provider is failing ~50% of requests.
+- **Error breakdown**: Per-provider error counts with status code breakdown. Spot patterns (e.g., a provider returning 502s consistently).
+- **Circuit breaker state**: See which providers are open/closed/half-open in real-time.
+
+### Zero-Downtime Configuration
+
+- **Hot-reload (300ms debounce)**: Edit `config.yaml` and the daemon picks up changes automatically. No restart, no killed in-flight requests.
+- **SIGHUP reload**: After rebuilding from source, `modelweaver reload` restarts the worker without killing the monitor.
+
+### Summary
+
+| Pain Point | Feature | Advantage |
+|---|---|---|
+| 429 rate limits kill sessions | Adaptive racing on 429 | <2s recovery vs 30-60s wait |
+| Provider downtime | Fallback chains + circuit breaker | Automatic failover, no manual intervention |
+| High latency variance | Hedging (CV > 0.5) + adaptive TTFB | 3-5s responses even with 30s tail latency |
+| Expensive API bills | Weighted distribution + tier routing | Traffic to cheapest acceptable provider |
+| Blind to failures | GUI + health scores + error tracking | Know exactly what's failing and why |
+| Stale connections | Connection retry + GOAWAY handling | Transparent recovery, no visible errors |
+| Config changes need restart | Hot-reload (300ms debounce) | Change weights mid-session, zero downtime |
+| Connection overhead per request | Session agent pooling (HTTP/2 reuse) | Faster sequential requests from subagents |
+
 ## Prerequisites
 
 - **Node.js** 20 or later — [Install Node.js](https://nodejs.org)
