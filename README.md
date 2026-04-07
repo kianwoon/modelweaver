@@ -51,6 +51,13 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 - **TTFB timeout** — fails slow providers before full timeout elapses (configurable per provider)
 - **Stall detection** — detects stalled streams and aborts them, triggering fallback
 - **Connection pooling** — per-provider undici Agent dispatcher with configurable pool size
+- **Per-model connection pools** — isolate HTTP/2 connections per model via `modelPools` config for TCP-level isolation
+- **Connection retry** — automatic retry with exponential backoff for stale connections, TTFB timeouts, and GOAWAY drains
+- **Session agent pooling** — reuses HTTP/2 agents across requests within the same session for connection affinity
+- **Adaptive TTFB** — dynamically adjusts TTFB timeout based on observed latency history
+- **GOAWAY-aware retry** — graceful HTTP/2 GOAWAY drain no longer marks pool as "failed"
+- **Stream buffering** — optional time-based and size-based SSE buffering (`streamBufferMs`, `streamBufferBytes`)
+- **Health scores** — per-provider health scoring based on latency and error rates
 - **Provider error tracking** — per-provider error counts with status code breakdown, displayed in GUI in real-time
 - **Concurrent limits** — cap concurrent requests per provider
 - **Interactive setup wizard** — guided configuration with API key validation, hedging config, and provider editing
@@ -71,7 +78,7 @@ ModelWeaver requires no permanent install — `npx` downloads and runs it on the
 npm install -g @kianwoon/modelweaver
 ```
 
-After that, replace `npx @kianwoon/modelweaver` with `modelweaver` in all commands below.
+After that, replace `npx @kianwoon/modelweaver` with `modelweaver` (or the shorter `mw`) in all commands below.
 
 ## Quick Start
 
@@ -153,7 +160,7 @@ npx @kianwoon/modelweaver install           # Install launchd service
 npx @kianwoon/modelweaver uninstall         # Uninstall launchd service
 ```
 
-**How it works**: `start` forks a lightweight monitor process that owns the PID file. The monitor spawns the actual daemon worker. If the worker crashes, the monitor auto-restarts it after a 2-second delay (up to 5 restarts per 60-second window to prevent crash loops).
+**How it works**: `start` forks a lightweight monitor process that owns the PID file. The monitor spawns the actual daemon worker. If the worker crashes, the monitor auto-restarts it with exponential backoff starting at 500ms (up to 10 attempts). After 60 seconds of stable running, the restart counter resets.
 
 ```
 modelweaver.pid        → Monitor process (handles signals, watches child)
@@ -167,7 +174,7 @@ modelweaver.pid        → Monitor process (handles signals, watches child)
 
 ## Desktop GUI
 
-ModelWeaver ships a native desktop GUI built with Tauri (v1.0.0). No Rust toolchain needed — the binary is auto-downloaded from GitHub Releases.
+ModelWeaver ships a native desktop GUI built with Tauri. No Rust toolchain needed — the binary is auto-downloaded from GitHub Releases.
 
 ```bash
 npx @kianwoon/modelweaver gui
@@ -207,6 +214,13 @@ Checked in order (first found wins):
 server:
   port: 3456                  # Server port          (default: 3456)
   host: localhost             # Bind address         (default: localhost)
+  streamBufferMs: 0           # Time-based stream flush threshold  (default: disabled)
+  streamBufferBytes: 0        # Size-based stream flush threshold  (default: disabled)
+  globalBackoffEnabled: true  # Global backoff on repeated failures (default: true)
+  unhealthyThreshold: 0.5     # Health score below which provider is unhealthy (default: 0.5, 0–1)
+  maxBodySizeMB: 10           # Max request body size in MB        (default: 10, 1–100)
+  sessionIdleTtlMs: 600000    # Session agent pool idle TTL in ms  (default: 600000 / 10min, min: 60000)
+  disableThinking: false      # Strip thinking blocks from requests (default: false)
 
 # Adaptive request hedging
 hedging:
@@ -218,16 +232,23 @@ providers:
   anthropic:
     baseUrl: https://api.anthropic.com
     apiKey: ${ANTHROPIC_API_KEY}  # Env var substitution
-    timeout: 30000                # Request timeout in ms  (default: 30000)
-    ttfbTimeout: 15000            # TTFB timeout in ms     (default: 15000)
+    timeout: 20000                # Request timeout in ms  (default: 20000)
+    ttfbTimeout: 8000             # TTFB timeout in ms     (default: 8000)
     stallTimeout: 15000           # Stall detection timeout (default: 15000)
-    poolSize: 10                  # Connection pool size   (default: varies by provider)
+    poolSize: 10                  # Connection pool size   (default: 10)
     concurrentLimit: 10           # Max concurrent requests (default: unlimited)
+    connectionRetries: 3          # Retries for stale connections (default: 3, max: 10)
+    staleAgentThresholdMs: 30000  # Mark pooled agent stale after idle ms (optional)
+    modelPools:                   # Per-model pool size overrides (optional)
+      "claude-sonnet-4-20250514": 20
+    modelLimits:                  # Per-provider token limits (optional)
+      maxOutputTokens: 16384
     authType: anthropic           # "anthropic" | "bearer"  (default: anthropic)
-    circuitBreaker:               # Per-provider circuit breaker
-      threshold: 5                # Failures before opening circuit (default: 5)
-      windowSeconds: 60           # Time window for failure count (default: 60)
-      cooldown: 30000             # Cooldown before half-open (default: 30000ms)
+    circuitBreaker:               # Per-provider circuit breaker (optional)
+      failureThreshold: 3         # Failures before opening circuit (alias: threshold, default: 3)
+      windowSeconds: 60           # Time window for failure count  (default: 60)
+      cooldownSeconds: 30         # Cooldown in seconds (alias: cooldown, also in seconds, default: 30)
+      rateLimitCooldownSeconds: 10  # Shorter cooldown for 429 rate limits (optional)
   openrouter:
     baseUrl: https://openrouter.ai/api
     apiKey: ${OPENROUTER_API_KEY}
@@ -324,6 +345,38 @@ curl http://localhost:3456/api/status
 
 Returns circuit breaker state for all providers and server uptime.
 
+### Version
+
+```bash
+curl http://localhost:3456/api/version
+```
+
+Returns the running ModelWeaver version.
+
+### Connection pool status
+
+```bash
+curl http://localhost:3456/api/pool
+```
+
+Returns active connection pool state for all providers.
+
+### Health scores
+
+```bash
+curl http://localhost:3456/api/health-scores
+```
+
+Returns per-provider health scores based on latency and error rates.
+
+### Session pool status
+
+```bash
+curl http://localhost:3456/api/sessions
+```
+
+Returns session agent pool statistics.
+
 ## Observability
 
 ```bash
@@ -356,7 +409,7 @@ ModelWeaver uses the model name to determine which agent tier is calling, then r
 
 ```bash
 npm install          # Install dependencies
-npm test             # Run tests (213 tests)
+npm test             # Run tests (299 tests)
 npm run build        # Build for production (tsup)
 npm run dev          # Run in dev mode (tsx)
 ```
