@@ -644,13 +644,22 @@ body {
 }
 
 .session-id {
-  color: var(--text);
+  color: #7ec8e3;
   font-family: monospace;
-  font-size: 12px;
+  font-size: 10px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 70%;
+}
+
+.session-models {
+  color: var(--text-dim);
+  font-size: 9px;
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .session-conn-badge {

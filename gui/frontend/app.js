@@ -863,20 +863,25 @@ function renderSessions(summary) {
       header.appendChild(idEl);
       header.appendChild(connBadge);
       row.appendChild(header);
+      const modelsEl = document.createElement('div');
+      modelsEl.className = 'session-models';
+      row.appendChild(modelsEl);
       const meta = document.createElement('div');
       meta.className = 'session-meta';
       row.appendChild(meta);
       sessionsEl.appendChild(row);
       row._idEl = idEl;
+      row._modelsEl = modelsEl;
       row._connEl = connBadge;
       row._metaEl = meta;
       sessionRows.set(s.sessionId, row);
     }
-    // Show model names (e.g. "glm-5.1, MiniMax-M2.7") as primary identifier
-    const modelNames = s.models && s.models.length > 0
-      ? s.models.join(', ')
-      : (s.sessionId.length > 12 ? s.sessionId.slice(0, 8) + '\u2026' : s.sessionId);
-    if (row._idEl.textContent !== modelNames) row._idEl.textContent = modelNames;
+    // Session name (light blue) — show name or fallback to truncated session ID
+    const nameText = s.name || (s.sessionId.length > 12 ? s.sessionId.slice(0, 8) + '\u2026' : s.sessionId);
+    if (row._idEl.textContent !== nameText) row._idEl.textContent = nameText;
+    // Model names on a separate line
+    const modelNames = s.models && s.models.length > 0 ? s.models.join(', ') : '';
+    if (row._modelsEl.textContent !== modelNames) row._modelsEl.textContent = modelNames;
     // Connection count badge (show modelCount from pool, or "—" if unavailable)
     const connCount = s.modelCount ?? 0;
     const badgeText = connCount > 0 ? connCount + ' conn' + (connCount !== 1 ? 's' : '') : '\u2014';

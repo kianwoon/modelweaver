@@ -1,8 +1,12 @@
 // src/session-pool.ts
 import { Agent, type Dispatcher } from "undici";
+import { readdir, readFile } from "fs/promises";
+import { join } from "path";
+import { homedir } from "os";
 
 export interface SessionStats {
   id: string;
+  name?: string; // Human-readable session name (slug from Claude Code JSONL or x-session-name header)
   modelCount: number;
   lastActivity: string; // ISO 8601
   idleMs: number;
@@ -37,6 +41,10 @@ export class SessionAgentPool {
   private lastActivity = new Map<string, Map<string, number>>();
   /** sessionId → modelName → in-flight request count (prevents stale close on active streams) */
   private inFlight = new Map<string, Map<string, number>>();
+  /** sessionId → human-readable name (from x-session-name header or Claude Code JSONL slug) */
+  private sessionNames = new Map<string, string>();
+  /** sessionId → promise (prevents concurrent slug lookups for same session) */
+  private slugResolving = new Map<string, Promise<string | undefined>>();
   private sweepTimer: ReturnType<typeof setInterval> | null = null;
   private idleTtlMs: number;
   private staleThresholdMs: number;
@@ -55,6 +63,11 @@ export class SessionAgentPool {
    */
   get(sessionId: string | undefined, modelName: string): Dispatcher | null {
     if (!sessionId) return null;
+
+    // Lazily resolve Claude Code session slug on first encounter
+    if (!this.agents.has(sessionId)) {
+      this.resolveSlug(sessionId);
+    }
 
     let modelMap = this.agents.get(sessionId);
     if (!modelMap) {
@@ -110,6 +123,63 @@ export class SessionAgentPool {
     return agent;
   }
 
+  /** Store a human-readable name for a session (from x-session-name header). */
+  setName(sessionId: string, name: string): void {
+    this.sessionNames.set(sessionId, name);
+  }
+
+  /**
+   * Lazily resolve a Claude Code session name from ~/.claude/projects/ JSONL files.
+   * Claude Code stores two name fields:
+   *   - `customTitle`: set via /rename or --name (user's explicit choice)
+   *   - `slug`: auto-generated like "clever-waddling-allen"
+   * Prefers customTitle over slug. Scans project directories once per session and caches.
+   */
+  private resolveSlug(sessionId: string): void {
+    // Already known (from header or previous lookup)
+    if (this.sessionNames.has(sessionId)) return;
+    // Already resolving
+    if (this.slugResolving.has(sessionId)) return;
+
+    const promise = (async (): Promise<string | undefined> => {
+      try {
+        const projectsDir = join(homedir(), ".claude", "projects");
+        const dirs = await readdir(projectsDir);
+        for (const dir of dirs) {
+          const sessionFile = join(projectsDir, dir, `${sessionId}.jsonl`);
+          try {
+            const content = await readFile(sessionFile, "utf-8");
+            // Scan the entire file — customTitle (from /rename) can appear anywhere,
+            // and session files are typically <5MB (one-time cost, cached after)
+            // Use matchAll to get the LAST customTitle (user may rename multiple times)
+            const titles = [...content.matchAll(/"customTitle"\s*:\s*"([^"]+)"/g)];
+            if (titles.length > 0) {
+              const name = titles[titles.length - 1][1];
+              this.sessionNames.set(sessionId, name);
+              return name;
+            }
+            // Fall back to slug (auto-generated name) — also take last occurrence
+            const slugs = [...content.matchAll(/"slug"\s*:\s*"([^"]+)"/g)];
+            if (slugs.length > 0) {
+              const name = slugs[slugs.length - 1][1];
+              this.sessionNames.set(sessionId, name);
+              return name;
+            }
+          } catch {
+            // File not found or unreadable — skip this directory
+          }
+        }
+      } catch {
+        // ~/.claude/projects/ not readable — skip silently
+      } finally {
+        this.slugResolving.delete(sessionId);
+      }
+      return undefined;
+    })();
+
+    this.slugResolving.set(sessionId, promise);
+  }
+
   /** Decrement in-flight count for a session+model (call when request completes) */
   release(sessionId: string, modelName: string): void {
     const flightMap = this.inFlight.get(sessionId);
@@ -154,6 +224,7 @@ export class SessionAgentPool {
       if (!providerMap || providerMap.size === 0) {
         this.agents.delete(sessionId);
         this.lastActivity.delete(sessionId);
+        this.sessionNames.delete(sessionId);
       }
     }
   }
@@ -172,6 +243,7 @@ export class SessionAgentPool {
       this.agents.delete(sessionId);
       this.lastActivity.delete(sessionId);
       this.inFlight.delete(sessionId);
+      this.sessionNames.delete(sessionId);
     }
   }
 
@@ -190,6 +262,7 @@ export class SessionAgentPool {
     this.agents.clear();
     this.lastActivity.clear();
     this.inFlight.clear();
+    this.sessionNames.clear();
     await Promise.all(promises);
   }
 
@@ -202,6 +275,7 @@ export class SessionAgentPool {
       if (entries.length === 0) continue; // skip stale entries (sweep may have emptied the map)
       result.push({
         id: sessionId,
+        name: this.sessionNames.get(sessionId),
         modelCount: entries.length,
         lastActivity: new Date(Math.max(...entries.map(([, ts]) => ts))).toISOString(),
         idleMs: now - Math.max(...entries.map(([, ts]) => ts)),

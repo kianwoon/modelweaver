@@ -163,7 +163,7 @@ export interface MetricsSummary {
   providerDistribution: { provider: string; count: number }[];
   recentRequests: RequestMetrics[];
   modelStats: ModelPerformanceStats[];
-  sessionStats: { sessionId: string; requestCount: number; lastSeen: number; modelCount?: number; models?: string[] }[];
+  sessionStats: { sessionId: string; requestCount: number; lastSeen: number; modelCount?: number; models?: string[]; name?: string }[];
   providerErrors: { [provider: string]: { total: number; errors: { [status: number]: number }; lastErrorCode: number | null; lastErrorTime: number | null } };
   smartTierCounts?: { tier1: number; tier2: number; passthrough: number };
 }
