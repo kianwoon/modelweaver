@@ -194,6 +194,10 @@ export class TimeoutBoostManager {
    */
   private applyBoost(provider: ProviderConfig, type: TimeoutErrorType, state: BoostState): void {
     const boosted = Math.round((state.original ?? getTimeoutValue(provider, type)) * BOOST_MULTIPLIER);
+    console.log(
+      `[adaptive-timeout] BOOST: ${provider.name}/${type} timeout ${state.original ?? getTimeoutValue(provider, type)}ms → ${boosted}ms ` +
+      `(${state.errors.length} errors in window)`
+    );
     setTimeoutValue(provider, type, boosted);
     state.boosted = true;
   }
@@ -233,6 +237,10 @@ export class TimeoutBoostManager {
     key: string,
     state: BoostState,
   ): void {
+    console.log(
+      `[adaptive-timeout] RESET: ${provider.name}/${type} timeout → ${state.original ?? "??"}ms ` +
+      `(clean for ${COOLDOWN_MS / 1000}s)`
+    );
     setTimeoutValue(provider, type, state.original ?? getTimeoutValue(provider, type));
     this.state.delete(key);
   }
