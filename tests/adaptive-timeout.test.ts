@@ -1,7 +1,6 @@
 // tests/adaptive-timeout.test.ts
 import { describe, it, expect, afterEach } from "vitest";
 import { resolveAdaptiveTTFB, TimeoutBoostManager } from "../src/adaptive-timeout.js";
-import type { TimeoutErrorType } from "../src/adaptive-timeout.js";
 import { LatencyTracker } from "../src/hedging.js";
 import type { ProviderConfig } from "../src/types.js";
 
@@ -173,7 +172,7 @@ describe("TimeoutBoostManager", () => {
     ...overrides,
   });
 
-  test("does not boost below threshold (4 errors)", () => {
+  it("does not boost below threshold (4 errors)", () => {
     const mgr = new TimeoutBoostManager();
     const provider = makeProvider();
     for (let i = 0; i < 4; i++) {
@@ -182,7 +181,7 @@ describe("TimeoutBoostManager", () => {
     expect(provider.ttfbTimeout).toBe(10000);
   });
 
-  test("boosts ttfbTimeout by 50% after 5 errors within 10 min", () => {
+  it("boosts ttfbTimeout by 50% after 5 errors within 10 min", () => {
     const mgr = new TimeoutBoostManager();
     const provider = makeProvider();
     for (let i = 0; i < 5; i++) {
@@ -193,7 +192,7 @@ describe("TimeoutBoostManager", () => {
     expect(provider.stallTimeout).toBe(15000);
   });
 
-  test("boosts stallTimeout by 50% after 5 stall errors", () => {
+  it("boosts stallTimeout by 50% after 5 stall errors", () => {
     const mgr = new TimeoutBoostManager();
     const provider = makeProvider();
     for (let i = 0; i < 5; i++) {
@@ -204,7 +203,7 @@ describe("TimeoutBoostManager", () => {
     expect(provider.timeout).toBe(30000);
   });
 
-  test("boosts total timeout by 50% after 5 timeout errors", () => {
+  it("boosts total timeout by 50% after 5 timeout errors", () => {
     const mgr = new TimeoutBoostManager();
     const provider = makeProvider();
     for (let i = 0; i < 5; i++) {
@@ -213,7 +212,7 @@ describe("TimeoutBoostManager", () => {
     expect(provider.timeout).toBe(45000);
   });
 
-  test("caps boost at 50% even with more errors", () => {
+  it("caps boost at 50% even with more errors", () => {
     const mgr = new TimeoutBoostManager();
     const provider = makeProvider();
     for (let i = 0; i < 15; i++) {
@@ -222,7 +221,7 @@ describe("TimeoutBoostManager", () => {
     expect(provider.ttfbTimeout).toBe(15000);
   });
 
-  test("hard resets after 10 min of no errors", () => {
+  it("hard resets after 10 min of no errors", () => {
     const mgr = new TimeoutBoostManager({ now: () => 0 });
     const provider = makeProvider();
     for (let i = 0; i < 5; i++) {
@@ -234,7 +233,7 @@ describe("TimeoutBoostManager", () => {
     expect(provider.ttfbTimeout).toBe(10000);
   });
 
-  test("does not reset while errors still arriving within window", () => {
+  it("does not reset while errors still arriving within window", () => {
     const mgr = new TimeoutBoostManager({ now: () => 0 });
     const provider = makeProvider();
     for (let i = 0; i < 5; i++) {
@@ -248,7 +247,7 @@ describe("TimeoutBoostManager", () => {
     expect(provider.ttfbTimeout).toBe(15000);
   });
 
-  test("resets when last error is older than cooldown", () => {
+  it("resets when last error is older than cooldown", () => {
     const mgr = new TimeoutBoostManager({ now: () => 0 });
     const provider = makeProvider();
     for (let i = 0; i < 5; i++) {
@@ -259,7 +258,7 @@ describe("TimeoutBoostManager", () => {
     expect(provider.ttfbTimeout).toBe(10000);
   });
 
-  test("per-provider independence", () => {
+  it("per-provider independence", () => {
     const mgr = new TimeoutBoostManager();
     const p1 = makeProvider({ name: "p1", ttfbTimeout: 10000 });
     const p2 = makeProvider({ name: "p2", ttfbTimeout: 20000 });
@@ -270,7 +269,7 @@ describe("TimeoutBoostManager", () => {
     expect(p2.ttfbTimeout).toBe(20000);
   });
 
-  test("each timeout type tracked independently", () => {
+  it("each timeout type tracked independently", () => {
     const mgr = new TimeoutBoostManager();
     const provider = makeProvider({ timeout: 30000, ttfbTimeout: 10000, stallTimeout: 15000 });
     for (let i = 0; i < 5; i++) mgr.recordTimeoutError(provider, "ttfb");
@@ -280,7 +279,7 @@ describe("TimeoutBoostManager", () => {
     expect(provider.timeout).toBe(30000);
   });
 
-  test("expired errors pruned from window", () => {
+  it("expired errors pruned from window", () => {
     const mgr = new TimeoutBoostManager({ now: () => 0 });
     const provider = makeProvider({ ttfbTimeout: 10000 });
     for (let i = 0; i < 5; i++) {

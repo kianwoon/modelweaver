@@ -111,8 +111,8 @@ function setTimeoutValue(provider: ProviderConfig, type: TimeoutErrorType, value
 
 /** Per-provider, per-type boost state. */
 interface BoostState {
-  /** Original (unboosted) timeout value. */
-  original: number;
+  /** Original (unboosted) timeout value. `undefined` until first error recorded. */
+  original: number | undefined;
   /** Timestamps of errors within the sliding window. */
   errors: number[];
   /** Whether the boost is currently active. */
@@ -147,15 +147,15 @@ export class TimeoutBoostManager {
     const k = this.key(providerName, type);
     let state = this.state.get(k);
     if (!state) {
-      state = { original: 0, errors: [], boosted: false };
+      state = { original: undefined, errors: [], boosted: false };
       this.state.set(k, state);
     }
     return state;
   }
 
-  /** Remove timestamps older than WINDOW_MS from the start of the array. */
-  private pruneWindow(state: BoostState): void {
-    const cutoff = this.now() - WINDOW_MS;
+  /** Remove timestamps older than the given duration from the start of the array. */
+  private pruneWindow(state: BoostState, windowMs: number = WINDOW_MS): void {
+    const cutoff = this.now() - windowMs;
     while (state.errors.length > 0 && state.errors[0] < cutoff) {
       state.errors.shift();
     }
@@ -178,7 +178,7 @@ export class TimeoutBoostManager {
     state.errors.push(this.now());
 
     // Store original value on first encounter (before any boost)
-    if (state.original === 0) {
+    if (state.original === undefined) {
       state.original = getTimeoutValue(provider, type);
     }
 
@@ -193,7 +193,7 @@ export class TimeoutBoostManager {
    * Stores the original value so it can be restored later.
    */
   private applyBoost(provider: ProviderConfig, type: TimeoutErrorType, state: BoostState): void {
-    const boosted = Math.round(state.original * BOOST_MULTIPLIER);
+    const boosted = Math.round((state.original ?? getTimeoutValue(provider, type)) * BOOST_MULTIPLIER);
     setTimeoutValue(provider, type, boosted);
     state.boosted = true;
   }
@@ -212,7 +212,9 @@ export class TimeoutBoostManager {
       const state = this.state.get(k);
       if (!state || !state.boosted) continue;
 
-      this.pruneWindow(state);
+      // Prune with cooldown window (not burst window) — errors older than COOLDOWN_MS
+      // are considered "stale enough" that the boost can safely be reset.
+      this.pruneWindow(state, COOLDOWN_MS);
 
       // If there are still recent errors, keep the boost
       if (state.errors.length > 0) continue;
@@ -231,7 +233,7 @@ export class TimeoutBoostManager {
     key: string,
     state: BoostState,
   ): void {
-    setTimeoutValue(provider, type, state.original);
+    setTimeoutValue(provider, type, state.original ?? getTimeoutValue(provider, type));
     this.state.delete(key);
   }
 
@@ -244,7 +246,7 @@ export class TimeoutBoostManager {
     for (const type of types) {
       const state = this.state.get(this.key(providerName, type));
       result[type] = state
-        ? { boosted: state.boosted, errorCount: state.errors.length, original: state.original || undefined }
+        ? { boosted: state.boosted, errorCount: state.errors.length, original: state.original }
         : { boosted: false, errorCount: 0 };
     }
     return result;
