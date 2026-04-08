@@ -5,6 +5,7 @@ import { request as undiciRequest } from "undici";
 import { PassThrough } from "node:stream";
 import { TextEncoder } from "node:util";
 import { getOrCreateAgent } from "./pool.js";
+import { boostManager } from "./adaptive-timeout.js";
 
 /**
  * Generate Anthropic-compatible SSE closing events as Uint8Array[].
@@ -1010,6 +1011,7 @@ export async function forwardRequest(
         provider._circuitBreaker?.recordTimeout();
       }
       _metricsStore?.recordConnectionError(provider.name, "stalls");
+      boostManager.recordTimeoutError(provider, "stall");
       console.warn(`[stall] Provider "${provider.name}" stalled: no data after ${stallTimeout}ms`);
 
       // Mark upstream as intentionally closed to prevent undici from
@@ -1218,6 +1220,7 @@ export async function forwardRequest(
     });
 
     clearTimeout(timeout);
+    boostManager.checkReset(provider);
     return response;
   } catch (error) {
     clearTimeout(timeout);
@@ -1260,6 +1263,9 @@ export async function forwardRequest(
       : isAbort
         ? `Provider "${provider.name}" timed out after ${provider.timeout}ms`
         : `Provider "${provider.name}" connection failed: ${errMsg}`;
+
+    if (isTTFB) boostManager.recordTimeoutError(provider, "ttfb");
+    else if (isAbort) boostManager.recordTimeoutError(provider, "timeout");
 
     console.warn(`[proxy] ${message}`);
 

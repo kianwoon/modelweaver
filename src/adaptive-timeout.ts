@@ -252,3 +252,6 @@ export class TimeoutBoostManager {
     return result;
   }
 }
+
+/** Global singleton — shared across all requests. */
+export const boostManager = new TimeoutBoostManager();
