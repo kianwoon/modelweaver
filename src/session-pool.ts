@@ -130,10 +130,11 @@ export class SessionAgentPool {
 
   /**
    * Lazily resolve a Claude Code session name from ~/.claude/projects/ JSONL files.
-   * Claude Code stores two name fields:
-   *   - `customTitle`: set via /rename or --name (user's explicit choice)
-   *   - `slug`: auto-generated like "clever-waddling-allen"
-   * Prefers customTitle over slug. Scans project directories once per session and caches.
+   * Priority:
+   *   1. `customTitle` — set via /rename or --name (user's explicit choice)
+   *   2. Project directory name — derived from ~/.claude/projects/<encoded-path>
+   *   3. `slug` — auto-generated like "clever-waddling-allen"
+   * Scans project directories once per session and caches.
    */
   private resolveSlug(sessionId: string): void {
     // Already known (from header or previous lookup)
@@ -149,22 +150,17 @@ export class SessionAgentPool {
           const sessionFile = join(projectsDir, dir, `${sessionId}.jsonl`);
           try {
             const content = await readFile(sessionFile, "utf-8");
-            // Scan the entire file — customTitle (from /rename) can appear anywhere,
-            // and session files are typically <5MB (one-time cost, cached after)
-            // Use matchAll to get the LAST customTitle (user may rename multiple times)
+            // 1. Prefer customTitle (user's explicit name via /rename or --name)
             const titles = [...content.matchAll(/"customTitle"\s*:\s*"([^"]+)"/g)];
             if (titles.length > 0) {
               const name = titles[titles.length - 1][1];
               this.sessionNames.set(sessionId, name);
               return name;
             }
-            // Fall back to slug (auto-generated name) — also take last occurrence
-            const slugs = [...content.matchAll(/"slug"\s*:\s*"([^"]+)"/g)];
-            if (slugs.length > 0) {
-              const name = slugs[slugs.length - 1][1];
-              this.sessionNames.set(sessionId, name);
-              return name;
-            }
+            // 2. Use project directory name (e.g. "-Users-foo-bar" → "bar")
+            const projectName = dir.split("-").pop() || dir;
+            this.sessionNames.set(sessionId, projectName);
+            return projectName;
           } catch {
             // File not found or unreadable — skip this directory
           }
