@@ -1,6 +1,7 @@
 // tests/adaptive-timeout.test.ts
 import { describe, it, expect, afterEach } from "vitest";
-import { resolveAdaptiveTTFB } from "../src/adaptive-timeout.js";
+import { resolveAdaptiveTTFB, TimeoutBoostManager } from "../src/adaptive-timeout.js";
+import type { TimeoutErrorType } from "../src/adaptive-timeout.js";
 import { LatencyTracker } from "../src/hedging.js";
 import type { ProviderConfig } from "../src/types.js";
 
@@ -158,5 +159,140 @@ describe("resolveAdaptiveTTFB — health score no longer shrinks TTFB", () => {
     // No samples at all — returns configured value
     const result = resolveAdaptiveTTFB(provider, tracker);
     expect(result).toBe(15000);
+  });
+});
+
+describe("TimeoutBoostManager", () => {
+  const makeProvider = (overrides: Partial<ProviderConfig> = {}): ProviderConfig => ({
+    name: "test-provider",
+    baseUrl: "https://api.test.com",
+    apiKey: "test-key",
+    timeout: 30000,
+    ttfbTimeout: 10000,
+    stallTimeout: 15000,
+    ...overrides,
+  });
+
+  test("does not boost below threshold (4 errors)", () => {
+    const mgr = new TimeoutBoostManager();
+    const provider = makeProvider();
+    for (let i = 0; i < 4; i++) {
+      mgr.recordTimeoutError(provider, "ttfb");
+    }
+    expect(provider.ttfbTimeout).toBe(10000);
+  });
+
+  test("boosts ttfbTimeout by 50% after 5 errors within 10 min", () => {
+    const mgr = new TimeoutBoostManager();
+    const provider = makeProvider();
+    for (let i = 0; i < 5; i++) {
+      mgr.recordTimeoutError(provider, "ttfb");
+    }
+    expect(provider.ttfbTimeout).toBe(15000);
+    expect(provider.timeout).toBe(30000);
+    expect(provider.stallTimeout).toBe(15000);
+  });
+
+  test("boosts stallTimeout by 50% after 5 stall errors", () => {
+    const mgr = new TimeoutBoostManager();
+    const provider = makeProvider();
+    for (let i = 0; i < 5; i++) {
+      mgr.recordTimeoutError(provider, "stall");
+    }
+    expect(provider.stallTimeout).toBe(22500);
+    expect(provider.ttfbTimeout).toBe(10000);
+    expect(provider.timeout).toBe(30000);
+  });
+
+  test("boosts total timeout by 50% after 5 timeout errors", () => {
+    const mgr = new TimeoutBoostManager();
+    const provider = makeProvider();
+    for (let i = 0; i < 5; i++) {
+      mgr.recordTimeoutError(provider, "timeout");
+    }
+    expect(provider.timeout).toBe(45000);
+  });
+
+  test("caps boost at 50% even with more errors", () => {
+    const mgr = new TimeoutBoostManager();
+    const provider = makeProvider();
+    for (let i = 0; i < 15; i++) {
+      mgr.recordTimeoutError(provider, "ttfb");
+    }
+    expect(provider.ttfbTimeout).toBe(15000);
+  });
+
+  test("hard resets after 10 min of no errors", () => {
+    const mgr = new TimeoutBoostManager({ now: () => 0 });
+    const provider = makeProvider();
+    for (let i = 0; i < 5; i++) {
+      mgr.recordTimeoutError(provider, "ttfb");
+    }
+    expect(provider.ttfbTimeout).toBe(15000);
+    mgr["now"] = () => 601_000;
+    mgr.checkReset(provider);
+    expect(provider.ttfbTimeout).toBe(10000);
+  });
+
+  test("does not reset while errors still arriving within window", () => {
+    const mgr = new TimeoutBoostManager({ now: () => 0 });
+    const provider = makeProvider();
+    for (let i = 0; i < 5; i++) {
+      mgr.recordTimeoutError(provider, "ttfb");
+    }
+    expect(provider.ttfbTimeout).toBe(15000);
+    mgr["now"] = () => 300_000;
+    mgr.recordTimeoutError(provider, "ttfb");
+    mgr["now"] = () => 601_000;
+    mgr.checkReset(provider);
+    expect(provider.ttfbTimeout).toBe(15000);
+  });
+
+  test("resets when last error is older than cooldown", () => {
+    const mgr = new TimeoutBoostManager({ now: () => 0 });
+    const provider = makeProvider();
+    for (let i = 0; i < 5; i++) {
+      mgr.recordTimeoutError(provider, "ttfb");
+    }
+    mgr["now"] = () => 660_000;
+    mgr.checkReset(provider);
+    expect(provider.ttfbTimeout).toBe(10000);
+  });
+
+  test("per-provider independence", () => {
+    const mgr = new TimeoutBoostManager();
+    const p1 = makeProvider({ name: "p1", ttfbTimeout: 10000 });
+    const p2 = makeProvider({ name: "p2", ttfbTimeout: 20000 });
+    for (let i = 0; i < 5; i++) {
+      mgr.recordTimeoutError(p1, "ttfb");
+    }
+    expect(p1.ttfbTimeout).toBe(15000);
+    expect(p2.ttfbTimeout).toBe(20000);
+  });
+
+  test("each timeout type tracked independently", () => {
+    const mgr = new TimeoutBoostManager();
+    const provider = makeProvider({ timeout: 30000, ttfbTimeout: 10000, stallTimeout: 15000 });
+    for (let i = 0; i < 5; i++) mgr.recordTimeoutError(provider, "ttfb");
+    for (let i = 0; i < 3; i++) mgr.recordTimeoutError(provider, "stall");
+    expect(provider.ttfbTimeout).toBe(15000);
+    expect(provider.stallTimeout).toBe(15000);
+    expect(provider.timeout).toBe(30000);
+  });
+
+  test("expired errors pruned from window", () => {
+    const mgr = new TimeoutBoostManager({ now: () => 0 });
+    const provider = makeProvider({ ttfbTimeout: 10000 });
+    for (let i = 0; i < 5; i++) {
+      mgr.recordTimeoutError(provider, "ttfb");
+    }
+    expect(provider.ttfbTimeout).toBe(15000);
+    mgr["now"] = () => 660_000;
+    mgr.checkReset(provider);
+    expect(provider.ttfbTimeout).toBe(10000);
+    for (let i = 0; i < 3; i++) {
+      mgr.recordTimeoutError(provider, "ttfb");
+    }
+    expect(provider.ttfbTimeout).toBe(10000);
   });
 });
