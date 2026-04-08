@@ -148,7 +148,7 @@ function enrichWithPoolStats(summary: MetricsSummary, getPoolStats?: () => Sessi
   summary.sessionStats = summary.sessionStats.map(entry => {
     const poolEntry = poolMap.get(entry.sessionId);
     if (poolEntry) {
-      return { ...entry, modelCount: poolEntry.modelCount, models: poolEntry.models };
+      return { ...entry, modelCount: poolEntry.modelCount, models: poolEntry.models, name: poolEntry.name };
     }
     return entry;
   });

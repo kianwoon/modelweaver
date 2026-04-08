@@ -531,6 +531,10 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     const sessionId = c.req.header("x-session-id") || c.req.header("x-claude-code-session-id");
     if (sessionId) ctx.sessionId = sessionId;
 
+    // Extract session name (human-readable label from ANTHROPIC_CUSTOM_HEADERS)
+    const sessionName = c.req.header("x-session-name");
+    if (sessionId && sessionName) sessionPool.setName(sessionId, sessionName);
+
     // Global backoff: all providers in the chain are unhealthy (health < 0.5).
     // Skip the entire fallback chain and return 503 immediately.
     if (ctx._globalBackoff) {
