@@ -394,7 +394,7 @@ async function reloadLaunchdService(): Promise<void> {
     if (existsSync(plistPath)) {
       const { execFileSync } = await import("node:child_process");
       execFileSync("launchctl", ["load", plistPath], { stdio: "pipe" });
-      console.warn("[daemon] Reloaded launchd service — KeepAlive re-enabled");
+      console.warn("[daemon] Reloaded launchd service — KeepAlive uses PathState (won't restart if entry script is missing)");
     }
   } catch {
     // Not macOS or plist missing — skip
