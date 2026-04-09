@@ -273,6 +273,8 @@ export interface DaemonStartResult {
   pid?: number;
   message: string;
   logPath: string;
+  /** True when the daemon was already running — caller should suppress output */
+  alreadyRunning?: boolean;
 }
 
 export function isPortInUse(port: number): Promise<boolean> {
@@ -305,6 +307,7 @@ export async function startDaemon(
       pid: currentStatus.pid,
       message: `ModelWeaver is already running (PID ${currentStatus.pid})`,
       logPath: getLogPath(),
+      alreadyRunning: true,
     };
   }
 

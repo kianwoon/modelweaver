@@ -240,8 +240,10 @@ async function main() {
   if (process.argv[2] === 'start') {
     const { startDaemon } = await import('./daemon.js');
     const result = await startDaemon(args.config, args.port, args.verbose);
-    console.log(`  ${result.message}`);
-    console.log(`  Log file: ${result.logPath}`);
+    if (!result.alreadyRunning) {
+      console.log(`  ${result.message}`);
+      console.log(`  Log file: ${result.logPath}`);
+    }
     process.exit(result.success ? 0 : 1);
   }
 
