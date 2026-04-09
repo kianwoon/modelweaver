@@ -1,7 +1,8 @@
 // src/session-pool.ts
 import { Agent, type Dispatcher } from "undici";
 import { readdir, readFile } from "fs/promises";
-import { join } from "path";
+import { statSync } from "fs";
+import { join, sep } from "path";
 import { homedir } from "os";
 
 export interface SessionStats {
@@ -157,8 +158,27 @@ export class SessionAgentPool {
               this.sessionNames.set(sessionId, name);
               return name;
             }
-            // 2. Use project directory name (e.g. "-Users-foo-bar" → "bar")
-            const projectName = dir.split("-").pop() || dir;
+            // 2. Extract project name from encoded directory
+            //    e.g. "-Users-kianwoonwong-Downloads-Mousecape-swiftUI" → "Mousecape-swiftUI"
+            //    Can't naively replace all '-' with '/' since '-' can appear in real names.
+            //    Strategy: try all possible split points from right to left,
+            //    checking which candidate path actually exists on the filesystem.
+            //    The part after the last valid path separator is the project name.
+            let projectName = dir; // fallback
+            const parts = dir.split("-");
+            for (let splitAt = parts.length - 1; splitAt >= 1; splitAt--) {
+              const parentPath = sep + parts.slice(0, splitAt).join(sep);
+              try {
+                const parentStat = statSync(parentPath);
+                if (parentStat.isDirectory()) {
+                  // parent exists — remaining segments form the project name
+                  projectName = parts.slice(splitAt).join("-");
+                  break;
+                }
+              } catch {
+                // parent doesn't exist, try earlier split
+              }
+            }
             this.sessionNames.set(sessionId, projectName);
             return projectName;
           } catch {
