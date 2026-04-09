@@ -748,9 +748,13 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       broadcastProviderHealth(buildProviderHealth(config, metricsStore));
     }
 
-    // Add request ID to response (responses from fetch have immutable headers, so create new)
+    // Add request ID and provider to response (responses from fetch have immutable headers, so create new)
     const newHeaders = new Headers(response.headers);
     newHeaders.set("x-request-id", requestId);
+    const resolvedProvider = result.actualProvider || successfulProvider;
+    if (resolvedProvider) {
+      newHeaders.set("x-modelweaver-provider", resolvedProvider);
+    }
     // Force Transfer-Encoding: chunked to bypass @hono/node-server's buffering logic.
     // The buffering phase (which reads up to 2 chunks before deciding to stream) causes
     // "socket closed unexpectedly" when the upstream body is a slow/long SSE stream — if the
@@ -779,6 +783,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       tier: ctx.tier,
       status: finalResponse.status,
       latencyMs: latency,
+      ...(resolvedProvider ? { provider: resolvedProvider } : {}),
     });
 
     return finalResponse;
