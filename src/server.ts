@@ -99,7 +99,7 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
  * For non-streaming JSON responses, uses a bounded sliding-window regex scan.
  */
 function createMetricsTransform(
-  ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race"; sessionId?: string; _streamState?: StreamState },
+  ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race"; sessionId?: string; _streamState?: StreamState; _streamStartTime?: number },
   provider: string,
   targetProvider: string,
   metricsStore: MetricsStore,
@@ -239,8 +239,14 @@ function createMetricsTransform(
   const recordMetrics = (inp: number, out: number, cacheRead: number = 0, cacheCreation: number = 0) => {
     try {
       const latencyMs = Date.now() - ctx.startTime;
-      const latencySec = latencyMs / 1000;
-      const tps = latencySec > 0 ? out / latencySec : 0;
+      // Use streaming-only duration for TPS (exclude TTFB wait time).
+      // Only use streaming duration when it's long enough for reliable measurement
+      // (>= 200ms). Short durations (< 200ms) have huge relative error due to
+      // Date.now() resolution (~1ms), producing inflated numbers like 64K tok/s.
+      const rawStreamDurMs = ctx._streamStartTime ? Date.now() - ctx._streamStartTime : 0;
+      const durMs = rawStreamDurMs >= 200 ? rawStreamDurMs : latencyMs;
+      const tpsSec = durMs / 1000;
+      const tps = tpsSec > 0 ? out / tpsSec : 0;
 
       metricsStore.recordRequest({
         requestId: ctx.requestId,
@@ -334,6 +340,7 @@ function createMetricsTransform(
       const now = Date.now();
       if (firstChunk || now - lastStreamEmit >= STREAM_THROTTLE_MS) {
         lastStreamEmit = now;
+        if (firstChunk) ctx._streamStartTime = now; // capture streaming start (excludes TTFB)
         firstChunk = false;
         const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
         setImmediate(() => {
@@ -369,6 +376,7 @@ function createMetricsTransform(
       const nowJson = Date.now();
       if (firstChunk || nowJson - lastStreamEmit >= STREAM_THROTTLE_MS) {
         lastStreamEmit = nowJson;
+        if (firstChunk) ctx._streamStartTime = nowJson; // capture streaming start (excludes TTFB)
         firstChunk = false;
         const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
         setImmediate(() => {

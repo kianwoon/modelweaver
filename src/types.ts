@@ -106,6 +106,8 @@ export interface RequestContext {
   hasDistribution?: boolean;
   /** Tracks current StreamState for transition validation */
   _streamState?: StreamState;
+  /** Timestamp when the first streaming chunk arrived (after TTFB). Used for streaming-only TPS. */
+  _streamStartTime?: number;
   /** Retry-after value (seconds) from the last provider 429/503 response */
   _retryAfterMs?: number;
   /** Set when all providers in the chain have health < UNHEALTHY_THRESHOLD.
