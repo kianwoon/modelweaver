@@ -139,6 +139,9 @@ const providerSchema = z.object({
   modelPools: z.record(z.string(), z.number().int().min(1).max(50)).optional(),
   connectionRetries: z.number().int().min(0).max(10).optional(),
   staleAgentThresholdMs: z.number().int().positive().optional(),
+  /** Default backoff (ms) before retrying after a 429/503 when no Retry-After header is present.
+   *  Set to 0 to disable automatic rate-limit backoff. Default: 1000 */
+  rateLimitBackoffMs: z.number().int().min(0).default(1000).optional(),
   circuitBreaker: z.object({
     failureThreshold: z.number().int().min(1).optional(),
     threshold: z.number().int().min(1).optional(),
@@ -525,6 +528,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     providerConfig.poolSize = p.poolSize ?? 10;
     providerConfig._connectionRetries = p.connectionRetries;
     providerConfig._staleAgentThresholdMs = p.staleAgentThresholdMs;
+    providerConfig._rateLimitBackoffMs = p.rateLimitBackoffMs;
     // Create per-provider circuit breaker
     const cbConfig = p.circuitBreaker;
     providerConfig._circuitBreaker = new CircuitBreaker(cbConfig ? {

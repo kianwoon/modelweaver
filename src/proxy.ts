@@ -883,6 +883,32 @@ export async function forwardRequest(
       // HTTP framing and cause "socket closed unexpectedly" on the client.
       const errHeaders = new Headers(undiciResponse.headers as unknown as HeadersInit);
       errHeaders.delete("transfer-encoding");
+
+      // Propagate Retry-After from 429/503 responses so the fallback chain
+      // can back off instead of hammering rate-limited providers.
+      // Without this, a burst of 429s compounds into a 6+ minute stall
+      // because the chain retries immediately on every attempt.
+      if (undiciResponse.statusCode === 429 || undiciResponse.statusCode === 503) {
+        const retryAfterRaw = undiciResponse.headers["retry-after"];
+        if (retryAfterRaw) {
+          const retryAfterSec = Number(retryAfterRaw);
+          // Both seconds (numeric) and HTTP-date formats are valid;
+          // numeric is the common case for API rate limits.
+          if (!isNaN(retryAfterSec) && retryAfterSec > 0) {
+            ctx._retryAfterMs = retryAfterSec * 1000;
+          } else {
+            // Default: use provider-level backoff when Retry-After is non-numeric
+            const providerBackoff = provider._rateLimitBackoffMs ?? 1000;
+            ctx._retryAfterMs ??= providerBackoff;
+          }
+          console.warn(`[proxy] Provider "${provider.name}" returned ${undiciResponse.statusCode}, Retry-After: ${retryAfterRaw}s`);
+        } else {
+          // No Retry-After header — use provider-level configured backoff
+          const providerBackoff = provider._rateLimitBackoffMs ?? 1000;
+          ctx._retryAfterMs ??= providerBackoff;
+        }
+      }
+
       return new Response(errBody, {
         status: undiciResponse.statusCode,
         statusText: undiciResponse.statusText,
@@ -1729,13 +1755,30 @@ export async function forwardWithFallback(
           return { response, actualModel: entry.model, actualProvider: entry.provider };
         }
 
-        // Retriable error — continue to next provider
-        logger?.warn("Provider failed with retriable status, falling back", {
-          requestId: ctx.requestId,
-          provider: entry.provider,
-          status: response.status,
-          index: i,
-        });
+        // Retriable error — back off before the next attempt.
+        // If a Retry-After header was present on the 429/503, respect it so we
+        // don't hammer a still-rate-limited provider and extend the outage.
+        const backoffMs = ctx._retryAfterMs ?? 0;
+        if (backoffMs > 0) {
+          logger?.warn("Provider failed with retriable status, backing off before retry", {
+            requestId: ctx.requestId,
+            provider: entry.provider,
+            status: response.status,
+            backoffMs,
+          });
+          await new Promise(resolve => setTimeout(resolve, backoffMs));
+          // Consume the value so it's only applied once per provider attempt.
+          // The _retryAfterMs set by the 429 handler was for that specific
+          // provider; clear it so the next provider in the chain starts fresh.
+          ctx._retryAfterMs = 0;
+        } else {
+          logger?.warn("Provider failed with retriable status, falling back", {
+            requestId: ctx.requestId,
+            provider: entry.provider,
+            status: response.status,
+            index: i,
+          });
+        }
         // continue loop
       } catch {
         // Connection errors/exceptions should NOT tank health score

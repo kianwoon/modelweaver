@@ -10,6 +10,7 @@ export function createMockProvider() {
   const app = new Hono();
 
   let behavior: "success" | "error-429" | "error-500" | "error-401" | "timeout" | "stall" = "success";
+  let retryAfterMs: number | undefined = undefined;
 
   app.post("/v1/messages", async (c) => {
     if (behavior === "timeout") {
@@ -48,9 +49,14 @@ export function createMockProvider() {
     }
 
     if (behavior === "error-429") {
+      const headers: Record<string, string> = {};
+      if (retryAfterMs !== undefined) {
+        headers["retry-after"] = String(Math.ceil(retryAfterMs / 1000));
+      }
       return c.json(
         { type: "error", error: { type: "rate_limit_error", message: "Rate limited" } },
-        429
+        429,
+        headers as any,
       );
     }
 
@@ -109,5 +115,6 @@ export function createMockProvider() {
         setTimeout(() => resolve(), 2000);
       }),
     setBehavior: (b: typeof behavior) => { behavior = b; },
+    setRetryAfter: (ms: number) => { retryAfterMs = ms; },
   };
 }

@@ -28,6 +28,8 @@ export interface ProviderConfig {
   _connectionRetries?: number;
   /** Staleness threshold (ms) for session-scoped agents. Idle agents beyond this are proactively refreshed. Default: 30000 */
   _staleAgentThresholdMs?: number;
+  /** Configured default backoff (ms) for 429/503 rate-limited responses when no Retry-After header is present. Default: 1000 */
+  _rateLimitBackoffMs?: number;
 }
 
 export interface RoutingEntry {
