@@ -24,6 +24,7 @@ providers:
       threshold: 4
       windowSeconds: 120
       cooldown: 15
+    rateLimitBackoffMs: 1000            # delay (ms) before retrying after 429/503 when no Retry-After header
 
 # ─── Routing ──────────────────────────────────────────────────────────
 # Tier-based routing: Claude Code sends model names like "claude-sonnet-4-..."
