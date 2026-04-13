@@ -307,6 +307,62 @@ describe("forwardWithFallback race mode", () => {
     await mock1.close();
     await mock2.close();
   });
+
+  it("waits for Retry-After before falling back on 429", async () => {
+    const mock1 = createMockProvider();
+    const mock2 = createMockProvider();
+    mock1.setBehavior("error-429");
+    mock1.setRetryAfter(2000); // 2 second Retry-After (value in ms)
+
+    const provider1: ProviderConfig = {
+      name: "provider-1",
+      baseUrl: mock1.url,
+      apiKey: "test",
+      timeout: 5000,
+    };
+    const provider2: ProviderConfig = {
+      name: "provider-2",
+      baseUrl: mock2.url,
+      apiKey: "test",
+      timeout: 5000,
+    };
+
+    const providers = new Map<string, ProviderConfig>();
+    providers.set("provider-1", provider1);
+    providers.set("provider-2", provider2);
+
+    const chain: RoutingEntry[] = [
+      { provider: "provider-1" },
+      { provider: "provider-2" },
+    ];
+
+    const ctx: RequestContext = {
+      requestId: "test-429-backoff",
+      model: "test-model",
+      tier: "test",
+      providerChain: chain,
+      startTime: Date.now(),
+      rawBody: JSON.stringify({ model: "test-model", messages: [] }),
+      hasDistribution: true, // Triggers sequential fallback (not race mode)
+    };
+
+    const incoming = new Request("http://localhost/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: ctx.rawBody,
+    });
+
+    const start = Date.now();
+    const result = await forwardWithFallback(providers, chain, ctx, incoming);
+    const elapsed = Date.now() - start;
+
+    expect(result.response.status).toBe(200);
+    // Should have waited ~2s for Retry-After before trying provider-2
+    expect(elapsed).toBeGreaterThanOrEqual(1800);
+
+    await mock1.close();
+    await mock2.close();
+  });
 });
 
 describe("forwardRequest TTFB timeout", () => {

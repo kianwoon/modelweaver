@@ -49,9 +49,11 @@ providers:
   anthropic:
     baseUrl: https://api.anthropic.com
     apiKey: ${ANTHROPIC_API_KEY}
+    rateLimitBackoffMs: 1000  # delay (ms) before retrying after 429/503 when no Retry-After header
   openrouter:
     baseUrl: https://openrouter.ai/api
     apiKey: ${OPENROUTER_API_KEY}
+    rateLimitBackoffMs: 1000  # delay (ms) before retrying after 429/503 when no Retry-After header
 
 # Exact model name routing (checked FIRST, before tier patterns)
 modelRouting:
