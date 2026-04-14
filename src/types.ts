@@ -30,6 +30,9 @@ export interface ProviderConfig {
   _staleAgentThresholdMs?: number;
   /** Configured default backoff (ms) for 429/503 rate-limited responses when no Retry-After header is present. Default: 1000 */
   _rateLimitBackoffMs?: number;
+  /** Custom body patterns (case-insensitive) that indicate transient errors on 400/413 responses.
+   *  Matched responses are treated as retriable and trigger fallback to the next provider. */
+  retryableErrorPatterns?: string[];
 }
 
 export interface RoutingEntry {

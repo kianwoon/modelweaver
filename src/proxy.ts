@@ -254,6 +254,45 @@ export function isRetriable(status: number): boolean {
   return status === 429 || status >= 500;
 }
 
+/**
+ * Default patterns that indicate a transient/server-side error, even when
+ * the HTTP status is 400 or 413 (non-standard but common among some providers).
+ * These trigger fallback to the next provider in the chain.
+ */
+const TRANSIENT_BODY_PATTERNS = [
+  'network error',
+  'internal error',
+  'server error',
+  'overloaded',
+  'service unavailable',
+  'temporarily unavailable',
+  'upstream error',
+  'downstream error',
+  'gateway error',
+  'connect error',
+  'connection error',
+  'connection refused',
+  'timeout',
+  'rate limit',
+  'too many requests',
+  'system error',
+];
+
+/**
+ * Checks if a 4xx response body indicates a transient error that should
+ * trigger fallback to the next provider. Used for providers that return
+ * 400 with non-standard error messages for what are actually server-side
+ * or network issues (e.g. "Network error, error id: xxx").
+ */
+export function isTransientBodyError(status: number, body: string, customPatterns?: string[]): boolean {
+  if (status !== 400 && status !== 413) return false;
+  const lower = body.toLowerCase();
+  const patterns = customPatterns && customPatterns.length > 0
+    ? [...TRANSIENT_BODY_PATTERNS, ...customPatterns.map(p => p.toLowerCase())]
+    : TRANSIENT_BODY_PATTERNS;
+  return patterns.some(p => lower.includes(p));
+}
+
 const CONTEXT_WINDOW_PATTERNS = [
   'context window', 'context_limit', 'token limit',
   'prompt is too long', 'max tokens', 'input too large', 'too many tokens',
@@ -1732,27 +1771,37 @@ export async function forwardWithFallback(
         }
 
         if (!isRetriable(response.status)) {
-          // Non-retriable error — return immediately
+          // Non-retriable error — check for transient body patterns and context window errors
           if ((response.status === 400 || response.status === 413) && response.body) {
             try {
               const errBody = await response.text();
-              const handled = handleContextWindowError(response.status, errBody);
-              if (handled) return { response: handled, actualModel: entry.model, actualProvider: entry.provider };
-              return {
-                response: new Response(errBody, {
-                  status: response.status,
-                  statusText: response.statusText,
-                  // Filter transfer-encoding — body was consumed to static string
-                  headers: stripTransferEncoding(response.headers),
-                }),
-                actualModel: entry.model,
-                actualProvider: entry.provider,
-              };
+
+              // Check: is this actually a transient error disguised as a 400?
+              // Some providers return 400 with "Network error" for what is really a server-side issue.
+              if (isTransientBodyError(response.status, errBody, provider.retryableErrorPatterns)) {
+                console.warn(`[proxy] Transient body error on "${provider.name}" (HTTP ${response.status}): ${errBody.slice(0, 300)} — treating as retriable`);
+                // Fall through to retriable path below — trigger fallback to next provider
+              } else {
+                // Not transient — check for context window error
+                const handled = handleContextWindowError(response.status, errBody);
+                if (handled) return { response: handled, actualModel: entry.model, actualProvider: entry.provider };
+                return {
+                  response: new Response(errBody, {
+                    status: response.status,
+                    statusText: response.statusText,
+                    // Filter transfer-encoding — body was consumed to static string
+                    headers: stripTransferEncoding(response.headers),
+                  }),
+                  actualModel: entry.model,
+                  actualProvider: entry.provider,
+                };
+              }
             } catch {
               return { response, actualModel: entry.model, actualProvider: entry.provider };
             }
+          } else {
+            return { response, actualModel: entry.model, actualProvider: entry.provider };
           }
-          return { response, actualModel: entry.model, actualProvider: entry.provider };
         }
 
         // Retriable error — back off before the next attempt.

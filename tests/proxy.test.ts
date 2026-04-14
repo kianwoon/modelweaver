@@ -1,7 +1,7 @@
 // tests/proxy.test.ts
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { createMockProvider } from "./helpers/mock-provider.js";
-import { forwardRequest, forwardWithFallback, isRetriable, buildOutboundUrl, buildOutboundHeaders } from "../src/proxy.js";
+import { forwardRequest, forwardWithFallback, isRetriable, isTransientBodyError, buildOutboundUrl, buildOutboundHeaders } from "../src/proxy.js";
 import type { RoutingEntry, ProviderConfig, RequestContext } from "../src/types.js";
 
 describe("isRetriable", () => {
@@ -12,6 +12,72 @@ describe("isRetriable", () => {
   it("400 is not retriable", () => expect(isRetriable(400)).toBe(false));
   it("401 is not retriable", () => expect(isRetriable(401)).toBe(false));
   it("403 is not retriable", () => expect(isRetriable(403)).toBe(false));
+});
+
+describe("isTransientBodyError", () => {
+  // Should only trigger on 400/413
+  it("returns false for 429 (already retriable via status)", () => {
+    expect(isTransientBodyError(429, '{"message":"Network error"}')).toBe(false);
+  });
+  it("returns false for 500 (already retriable via status)", () => {
+    expect(isTransientBodyError(500, '{"message":"Network error"}')).toBe(false);
+  });
+  it("returns false for 401", () => {
+    expect(isTransientBodyError(401, '{"message":"Network error"}')).toBe(false);
+  });
+
+  // Default transient patterns
+  it("detects 'network error' in body", () => {
+    const body = JSON.stringify({ error: { message: "Network error, error id: 123", code: "1234" } });
+    expect(isTransientBodyError(400, body)).toBe(true);
+  });
+  it("detects 'overloaded' in body", () => {
+    expect(isTransientBodyError(400, '{"error":{"message":"Server overloaded"}}')).toBe(true);
+  });
+  it("detects 'timeout' in body", () => {
+    expect(isTransientBodyError(413, '{"error":{"message":"Request timeout"}}')).toBe(true);
+  });
+  it("detects 'connection refused' in body", () => {
+    expect(isTransientBodyError(400, '{"error":{"message":"connection refused"}}')).toBe(true);
+  });
+  it("detects 'rate limit' in body", () => {
+    expect(isTransientBodyError(400, '{"error":{"message":"rate limit exceeded"}}')).toBe(true);
+  });
+  it("detects 'system error' in body", () => {
+    expect(isTransientBodyError(400, '{"error":{"message":"system error"}}')).toBe(true);
+  });
+
+  // Non-transient 400 errors should NOT match
+  it("returns false for context window errors", () => {
+    expect(isTransientBodyError(400, '{"error":{"message":"prompt is too long: 200000 tokens"}}')).toBe(false);
+  });
+  it("returns false for generic 400 validation errors", () => {
+    expect(isTransientBodyError(400, '{"error":{"message":"invalid request: missing field"}}')).toBe(false);
+  });
+  it("returns false for empty body", () => {
+    expect(isTransientBodyError(400, "")).toBe(false);
+  });
+
+  // Custom patterns
+  it("matches custom provider-specific patterns", () => {
+    const body = JSON.stringify({ error: { message: "API Error: something broke" } });
+    expect(isTransientBodyError(400, body, ["API Error"])).toBe(true);
+  });
+  it("custom patterns work alongside defaults", () => {
+    // "network error" is a default, "please contact" is custom
+    const body = '{"error":{"message":"please contact customer service"}}';
+    expect(isTransientBodyError(400, body, ["please contact"])).toBe(true);
+  });
+  it("empty custom patterns array falls back to defaults only", () => {
+    expect(isTransientBodyError(400, '{"error":{"message":"network error"}}', [])).toBe(true);
+    expect(isTransientBodyError(400, '{"error":{"message":"please contact"}}', [])).toBe(false);
+  });
+
+  // Case insensitive
+  it("is case-insensitive", () => {
+    expect(isTransientBodyError(400, '{"error":{"message":"NETWORK ERROR"}}')).toBe(true);
+    expect(isTransientBodyError(400, '{"error":{"message":"Network Error"}}')).toBe(true);
+  });
 });
 
 describe("buildOutboundUrl", () => {
