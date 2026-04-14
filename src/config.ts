@@ -142,6 +142,10 @@ const providerSchema = z.object({
   /** Default backoff (ms) before retrying after a 429/503 when no Retry-After header is present.
    *  Set to 0 to disable automatic rate-limit backoff. Default: 1000 */
   rateLimitBackoffMs: z.number().int().min(0).default(1000).optional(),
+  /** Custom patterns (case-insensitive substrings) that make a 400/413 response body
+   *  trigger fallback to the next provider. Useful for providers that return non-standard
+   *  error messages for transient/server-side issues. */
+  retryableErrorPatterns: z.array(z.string()).optional(),
   circuitBreaker: z.object({
     failureThreshold: z.number().int().min(1).optional(),
     threshold: z.number().int().min(1).optional(),
@@ -529,6 +533,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     providerConfig._connectionRetries = p.connectionRetries;
     providerConfig._staleAgentThresholdMs = p.staleAgentThresholdMs;
     providerConfig._rateLimitBackoffMs = p.rateLimitBackoffMs;
+    providerConfig.retryableErrorPatterns = p.retryableErrorPatterns;
     // Create per-provider circuit breaker
     const cbConfig = p.circuitBreaker;
     providerConfig._circuitBreaker = new CircuitBreaker(cbConfig ? {
