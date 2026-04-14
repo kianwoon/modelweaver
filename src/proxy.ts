@@ -251,7 +251,7 @@ function isConnectionErrorResponse(response: Response): boolean {
 const DEFAULT_SPECULATIVE_DELAY = 1000;
 
 export function isRetriable(status: number): boolean {
-  return status === 429 || status >= 500;
+  return status === 408 || status === 429 || status >= 500;
 }
 
 /**
@@ -1410,17 +1410,17 @@ async function forwardWithRetry(
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const result = await forwardRequest(provider, entry, ctx, incomingRequest, chainSignal, index, probeId, sessionPool);
 
-    // Non-502 responses pass through immediately (success or upstream error)
-    if (result.status !== 502) return result;
+    // Non-502/504 responses pass through immediately (success or upstream error)
+    if (result.status !== 502 && result.status !== 504) return result;
 
-    // Check if this is a connection error vs an actual upstream 502
+    // Check if this is a connection error vs an actual upstream 502/504
     const body = await result.text().catch(() => "");
     const isConnectionError = body.includes("timed out") || body.includes("connection failed") || body.includes("stalled");
 
     if (!isConnectionError) {
-      // Actual 502 from upstream — return as-is, let caller handle fallback
+      // Actual 502/504 from upstream — return as-is, let caller handle fallback
       return new Response(body, {
-        status: 502,
+        status: result.status,
         headers: { "content-type": "application/json" },
       });
     }
