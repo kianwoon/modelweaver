@@ -472,6 +472,17 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     return c.body("", 200);
   });
 
+  // OpenAI-compatible models list endpoint
+  app.get("/v1/models", (c) => {
+    const models = [...config.modelRouting.entries()].map(([modelId, entries]) => ({
+      id: modelId,
+      object: "model",
+      created: 0,
+      owned_by: entries[0]?.provider ?? "unknown",
+    }));
+    return c.json({ object: "list", data: models });
+  });
+
   app.post("/v1/messages", async (c) => {
     const requestId = randomUUID();
 
