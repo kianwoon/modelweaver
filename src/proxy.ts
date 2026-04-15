@@ -911,9 +911,32 @@ export async function forwardRequest(
 
     // For error status codes (4xx/5xx), consume body immediately without stall detection.
     // Rate limits (429) and server errors (5xx) return small JSON bodies that arrive instantly.
+    // Safety: race body read against a short timeout — if the body doesn't arrive within
+    // ERROR_BODY_TIMEOUT_MS (e.g., due to a degraded HTTP/2 connection where headers arrive
+    // but DATA frames are severely delayed), abort and throw so the caller falls back to
+    // the next provider. Hanging for tens of seconds on a body we don't need is pointless
+    // when the status line already tells us the request failed.
     if (undiciResponse.statusCode >= 400) {
       clearTimeout(timeout);
-      const errBody = await undiciResponse.body.text();
+      const ERROR_BODY_TIMEOUT_MS = 3000;
+      let errBody: string;
+      try {
+        errBody = await Promise.race([
+          undiciResponse.body.text(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => {
+              // Destroy the upstream body to free the HTTP/2 stream back to the pool
+              try { (undiciResponse.body as any).destroy(); } catch { /* already done */ }
+              reject(new Error(`error body read timed out after ${ERROR_BODY_TIMEOUT_MS}ms`));
+            }, ERROR_BODY_TIMEOUT_MS)
+          ),
+        ]);
+      } catch (err) {
+        // Body read failed or timed out. The status line already told us this is an error —
+        // no point waiting longer. Destroy and re-throw so the fallback loop tries the next provider.
+        try { (undiciResponse.body as any).destroy(); } catch { /* already done */ }
+        throw err;
+      }
       // Explicitly destroy the upstream body — prevents undici from holding the
       // HTTP/2 connection open until GC collects the Readable.
       try { (undiciResponse.body as any).destroy(); } catch { /* already done */ }
