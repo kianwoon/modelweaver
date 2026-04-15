@@ -30,13 +30,15 @@ No config file editing. No provider SDK installs. The wizard tests your API key 
 
 
 
-## What's New — v0.3.69
+## What's New — v0.3.73
 
 - **Smart request routing** — classify message content by complexity and route to the appropriate model tier automatically (#97)
-- **Session pool timer leak fix** — `closeAll()` now clears the `sweepTimer` interval (#199)
-- **Tauri GUI crash protection** — defensive `if let` replaces unsafe `.unwrap()` in setup (#200)
-- **WS reconnect timer cleanup** — prevent dual polling on reconnect (#198)
-- **Monitor signal handler** — defensive exit handler prevents double-signal crashes (#197)
+- **Single-provider hedge skip** — hedging disabled for single-provider chains, prevents rate-limit amplification (#231)
+- **408/504 retry with fresh pool** — request timeout and server-unavailable now retry with a new connection pool (#231)
+- **Transient error detection** — detect and retry on transient errors in 400/413 response bodies (#230)
+- **GET /v1/models endpoint** — list available models from configured providers (#229)
+- **Retry-After header support** — respect provider rate-limit backoff for 429/503 responses (#228)
+- **Streaming-only token speed** — TTFB excluded from token-per-second calculations for accurate metrics (#227)
 - **Per-model connection pools** — each model gets its own HTTP/2 connection for TCP isolation (#186)
 - **GOAWAY-aware retry** — graceful HTTP/2 drain no longer marks pool as "failed" (#188)
 
@@ -69,7 +71,7 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 - **Model name rewriting** — each provider in the chain can use a different model name
 - **Weighted distribution** — spread traffic across providers by weight percentage
 - **Circuit breaker** — per-provider circuit breaker with closed/open/half-open states, prevents hammering unhealthy providers
-- **Request hedging** — sends multiple copies when a provider shows high latency variance (CV > 0.5), returns the fastest response
+- **Request hedging** — sends multiple copies when a provider shows high latency variance (CV > 0.5), returns the fastest response (skipped for single-provider chains to avoid rate-limit amplification)
 - **TTFB timeout** — fails slow providers before full timeout elapses (configurable per provider)
 - **Stall detection** — detects stalled streams and aborts them, triggering fallback
 - **Connection pooling** — per-provider undici Agent dispatcher with configurable pool size
@@ -326,6 +328,10 @@ providers:
     concurrentLimit: 10           # Max concurrent requests (default: unlimited)
     connectionRetries: 3          # Retries for stale connections (default: 3, max: 10)
     staleAgentThresholdMs: 30000  # Mark pooled agent stale after idle ms (optional)
+    rateLimitBackoffMs: 2000      # Backoff after 429/503 in ms (optional, overrides Retry-After)
+    retryableErrorPatterns:       # Regex patterns for retryable error messages (optional)
+      - "network error"
+      - "system error"
     modelPools:                   # Per-model pool size overrides (optional)
       "claude-sonnet-4-20250514": 20
     modelLimits:                  # Per-provider token limits (optional)
@@ -412,7 +418,8 @@ tierPatterns:
 - **Fallback triggers** on: 429 (rate limit), 5xx (server error), network timeout, stream stall
 - **Adaptive race mode** — when a 429 is received, remaining providers are raced simultaneously (not sequentially) for faster recovery
 - **Circuit breaker** — providers that repeatedly fail are temporarily skipped (auto-recovers after cooldown, configurable window)
-- **No fallback on**: 4xx (bad request, auth failure, forbidden) — returned immediately
+- **Hedging skip** — single-provider chains skip hedging entirely (multi-copy to one provider amplifies rate limits without improving outcome)
+- **No fallback on**: 4xx (bad request, auth failure, forbidden) — returned immediately (except 429 and transient errors in 400/413 bodies)
 - **Model rewriting**: each provider entry can override the `model` field in the request body
 
 ### Supported providers
@@ -461,6 +468,14 @@ curl http://localhost:3456/api/version
 ```
 
 Returns the running ModelWeaver version.
+
+### Available models
+
+```bash
+curl http://localhost:3456/v1/models
+```
+
+Returns the list of available models from configured providers (Anthropic-compatible format).
 
 ### Connection pool status
 
