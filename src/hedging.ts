@@ -122,10 +122,15 @@ export const inFlightCounter = new InFlightCounter();
  * Clamped by available concurrency slots: maxConcurrent - inFlight.
  * Calibration note: production data shows glm/minimax have CV 1.5-4.0 (extreme tail variance),
  * so hedging is warranted. CV threshold of 0.5 prevents over-hedging on stable runs.
+ *
+ * IMPORTANT: Hedging is skipped (returns 1) when the provider chain has only one entry.
+ * Multi-copy hedging to a single provider multiplies load on a rate-limited endpoint —
+ * it can never improve outcome and makes 429 bursts worse.
  */
 export function computeHedgingCount(
   provider: ProviderConfig,
   config?: { cvThreshold?: number; maxHedge?: number },
+  chainLength?: number,
 ): number {
   const cv = latencyTracker.getCV(provider.name);
   const inFlight = inFlightCounter.get(provider.name);
@@ -134,6 +139,10 @@ export function computeHedgingCount(
 
   const cvThreshold = config?.cvThreshold ?? 0.5;
   const maxHedge = config?.maxHedge ?? 4;
+
+  // Skip hedging for single-provider chains — multi-copy to the same provider
+  // can never improve outcome and amplifies rate-limit bursts (e.g. 429 × 3).
+  if (chainLength !== undefined && chainLength <= 1) return 1;
 
   if (cv < cvThreshold) return 1;
 
