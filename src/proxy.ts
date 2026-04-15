@@ -1709,11 +1709,35 @@ export async function forwardWithFallback(
     onAttempt?.(entry.provider, 0);
 
     const singleStart = Date.now();
-    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging, singleProbeId, sessionPool, chain.length);
+    let response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging, singleProbeId, sessionPool, chain.length);
     const success = response.status >= 200 && response.status < 300;
     const isConnErr = response.status === 502 && await isConnectionErrorBody(response);
     if (!isConnErr) {
       recordHealthEvent(provider.name, success, Date.now() - singleStart);
+    }
+
+    // Single-provider transient body error retry: if the provider returned 400/413
+    // with a transient body pattern (e.g., "Network error", "please contact customer service"),
+    // retry with a fresh connection pool instead of returning the error to the client.
+    // This matches the multi-provider loop behavior where transient errors trigger fallback.
+    if (!success && !isConnErr && (response.status === 400 || response.status === 413)) {
+      try {
+        const errBody = await response.text();
+        if (isTransientBodyError(response.status, errBody, provider.retryableErrorPatterns)) {
+          console.warn(`[proxy] Single-provider chain detected transient body error on "${provider.name}" (HTTP ${response.status}): ${errBody.slice(0, 300)} — retrying with fresh pool`);
+          // Evict session agent to force a new connection on retry
+          if (sessionPool && ctx.sessionId) {
+            sessionPool.evict(ctx.sessionId, ctx.actualModel ?? ctx.model);
+            ctx.sessionId = undefined;
+          }
+          // Retry once with fresh pool
+          response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging, singleProbeId, sessionPool, chain.length);
+          const retrySuccess = response.status >= 200 && response.status < 300;
+          recordHealthEvent(provider.name, retrySuccess, Date.now() - singleStart);
+        }
+      } catch {
+        // Body read failed — proceed with original response
+      }
     }
 
     return { response, actualModel: entry.model, actualProvider: entry.provider };
