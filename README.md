@@ -329,7 +329,7 @@ providers:
     connectionRetries: 3          # Retries for stale connections (default: 3, max: 10)
     staleAgentThresholdMs: 30000  # Mark pooled agent stale after idle ms (optional)
     rateLimitBackoffMs: 2000      # Backoff after 429/503 in ms (optional, overrides Retry-After)
-    retryableErrorPatterns:       # Regex patterns for retryable error messages (optional)
+    retryableErrorPatterns:       # Substring patterns for retryable error messages (optional, case-insensitive)
       - "network error"
       - "system error"
     modelPools:                   # Per-model pool size overrides (optional)
