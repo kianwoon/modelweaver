@@ -1493,8 +1493,9 @@ async function hedgedForwardRequest(
   hedging?: HedgingConfig,
   probeId?: number,
   sessionPool?: SessionAgentPool,
+  chainLength?: number,
 ): Promise<Response> {
-  const count = ctx.hasDistribution ? 1 : computeHedgingCount(provider, hedging);
+  const count = ctx.hasDistribution ? 1 : computeHedgingCount(provider, hedging, chainLength);
 
   if (count <= 1) {
     // No hedging — single request (with automatic retry on timeout)
@@ -1685,7 +1686,7 @@ export async function forwardWithFallback(
     onAttempt?.(entry.provider, 0);
 
     const singleStart = Date.now();
-    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging, singleProbeId, sessionPool);
+    const response = await hedgedForwardRequest(provider, entry, ctx, incomingRequest, undefined, 0, logger, hedging, singleProbeId, sessionPool, chain.length);
     const success = response.status >= 200 && response.status < 300;
     const isConnErr = response.status === 502 && await isConnectionErrorBody(response);
     if (!isConnErr) {
@@ -1736,7 +1737,7 @@ export async function forwardWithFallback(
       try {
         const response = await hedgedForwardRequest(
           provider, entry, ctx, incomingRequest, undefined, i, logger, hedging,
-          cbProbeId, sessionPool,
+          cbProbeId, sessionPool, chain.length,
         );
 
         const attemptLatency = Date.now() - attemptStart;
@@ -1902,6 +1903,7 @@ export async function forwardWithFallback(
         hedging,
         cbProbeId,
         sessionPool,
+        chain.length,
       );
       const attemptLatency = Date.now() - attemptStart;
       const success = response.status >= 200 && response.status < 300;
