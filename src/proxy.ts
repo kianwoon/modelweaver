@@ -284,8 +284,8 @@ const TRANSIENT_BODY_PATTERNS = [
  * 400 with non-standard error messages for what are actually server-side
  * or network issues (e.g. "Network error, error id: xxx").
  */
-export function isTransientBodyError(status: number, body: string, customPatterns?: string[]): boolean {
-  if (status !== 400 && status !== 413) return false;
+export function isTransientBodyError(_status: number, body: string, customPatterns?: string[]): boolean {
+  // No status gate — check patterns for any error code
   const lower = body.toLowerCase();
   const patterns = customPatterns && customPatterns.length > 0
     ? [...TRANSIENT_BODY_PATTERNS, ...customPatterns.map(p => p.toLowerCase())]
@@ -1716,11 +1716,10 @@ export async function forwardWithFallback(
       recordHealthEvent(provider.name, success, Date.now() - singleStart);
     }
 
-    // Single-provider transient body error retry: if the provider returned 400/413
-    // with a transient body pattern (e.g., "Network error", "please contact customer service"),
+    // Single-provider transient body error retry: if the provider returned any error
+    // with a transient body pattern (e.g., "Network error", "Operation failed"),
     // retry with a fresh connection pool instead of returning the error to the client.
-    // This matches the multi-provider loop behavior where transient errors trigger fallback.
-    if (!success && !isConnErr && (response.status === 400 || response.status === 413)) {
+    if (!success && !isConnErr) {
       try {
         const errBody = await response.text();
         if (isTransientBodyError(response.status, errBody, provider.retryableErrorPatterns)) {
@@ -1819,25 +1818,25 @@ export async function forwardWithFallback(
         }
 
         if (!isRetriable(response.status)) {
-          // Non-retriable error — check for transient body patterns and context window errors
-          if ((response.status === 400 || response.status === 413) && response.body) {
+          // Non-retriable error — check body for transient patterns regardless of status code
+          if (response.body) {
             try {
               const errBody = await response.text();
 
-              // Check: is this actually a transient error disguised as a 400?
-              // Some providers return 400 with "Network error" for what is really a server-side issue.
+              // Check: does the body match a transient error pattern?
+              // Any status code can carry a transient error — providers return
+              // server-side failures as 400, 403, 422, etc.
               if (isTransientBodyError(response.status, errBody, provider.retryableErrorPatterns)) {
                 console.warn(`[proxy] Transient body error on "${provider.name}" (HTTP ${response.status}): ${errBody.slice(0, 300)} — treating as retriable`);
                 // Fall through to retriable path below — trigger fallback to next provider
               } else {
-                // Not transient — check for context window error
+                // Not transient — check for context window error (400/413 only)
                 const handled = handleContextWindowError(response.status, errBody);
                 if (handled) return { response: handled, actualModel: entry.model, actualProvider: entry.provider };
                 return {
                   response: new Response(errBody, {
                     status: response.status,
                     statusText: response.statusText,
-                    // Filter transfer-encoding — body was consumed to static string
                     headers: stripTransferEncoding(response.headers),
                   }),
                   actualModel: entry.model,
@@ -2029,26 +2028,33 @@ export async function forwardWithFallback(
       if (!isRetriable(winner.response.status)) {
         sharedController.abort();
         const winnerEntry = chain[winner.index];
-        if ((winner.response.status === 400 || winner.response.status === 413) && winner.response.body) {
+        if (winner.response.body) {
           try {
             const errBody = await winner.response.text();
-            const handled = handleContextWindowError(winner.response.status, errBody);
-            if (handled) return { response: handled, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
-            return {
-              response: new Response(errBody, {
-                status: winner.response.status,
-                statusText: winner.response.statusText,
-                // Filter transfer-encoding — body was consumed to static string
-                headers: stripTransferEncoding(winner.response.headers),
-              }),
-              actualModel: winnerEntry?.model,
-              actualProvider: winnerEntry?.provider,
-            };
+            // Check transient body patterns for any status code
+            const winningProvider = providers.get(winnerEntry?.provider ?? '');
+            if (isTransientBodyError(winner.response.status, errBody, winningProvider?.retryableErrorPatterns)) {
+              console.warn(`[proxy] Race winner transient body error on "${winnerEntry?.provider}" (HTTP ${winner.response.status}): ${errBody.slice(0, 300)} — treating as retriable`);
+              // Fall through to failure path — push to failures and continue racing
+            } else {
+              const handled = handleContextWindowError(winner.response.status, errBody);
+              if (handled) return { response: handled, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
+              return {
+                response: new Response(errBody, {
+                  status: winner.response.status,
+                  statusText: winner.response.statusText,
+                  headers: stripTransferEncoding(winner.response.headers),
+                }),
+                actualModel: winnerEntry?.model,
+                actualProvider: winnerEntry?.provider,
+              };
+            }
           } catch {
             return { response: winner.response, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
           }
+        } else {
+          return { response: winner.response, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
         }
-        return { response: winner.response, actualModel: winnerEntry?.model, actualProvider: winnerEntry?.provider };
       }
 
       failures.push(winner);

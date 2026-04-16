@@ -15,15 +15,15 @@ describe("isRetriable", () => {
 });
 
 describe("isTransientBodyError", () => {
-  // Should only trigger on 400/413
-  it("returns false for 429 (already retriable via status)", () => {
-    expect(isTransientBodyError(429, '{"message":"Network error"}')).toBe(false);
+  // Status-agnostic: any error code can carry a transient body pattern
+  it("detects transient patterns on 429", () => {
+    expect(isTransientBodyError(429, '{"message":"Network error"}')).toBe(true);
   });
-  it("returns false for 500 (already retriable via status)", () => {
-    expect(isTransientBodyError(500, '{"message":"Network error"}')).toBe(false);
+  it("detects transient patterns on 500", () => {
+    expect(isTransientBodyError(500, '{"message":"Network error"}')).toBe(true);
   });
-  it("returns false for 401", () => {
-    expect(isTransientBodyError(401, '{"message":"Network error"}')).toBe(false);
+  it("detects transient patterns on 401", () => {
+    expect(isTransientBodyError(401, '{"message":"Network error"}')).toBe(true);
   });
 
   // Default transient patterns
