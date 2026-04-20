@@ -12,6 +12,7 @@ export interface ProviderConfig {
   ttfbTimeout?: number;
   stallTimeout?: number;
   authType?: "anthropic" | "bearer";
+  apiFormat?: "anthropic" | "openai-chat" | "openai-responses";
   modelLimits?: ModelLimits;
   concurrentLimit?: number;
 
