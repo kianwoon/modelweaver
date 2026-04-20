@@ -25,7 +25,7 @@ const statSpeed = document.getElementById('stat-speed');
 const statRequests = document.getElementById('stat-requests');
 const statInputTokens = document.getElementById('stat-input-tokens');
 const statOutputTokens = document.getElementById('stat-output-tokens');
-const statCache = document.getElementById('stat-cache');
+const statCache = null;
 const modelsEl = document.getElementById('models');
 const providersEl = document.getElementById('providers');
 const recentEl = document.getElementById('recent');
@@ -249,7 +249,7 @@ function updateSummary(data) {
   statRequests.textContent = _rawRequests;
   statInputTokens.textContent = formatNumber(_rawInputTokens);
   statOutputTokens.textContent = formatNumber(_rawOutputTokens);
-  statCache.textContent = data.avgCacheHitRate > 0 ? data.avgCacheHitRate.toFixed(0) + '%' : '\u2014';
+  if (statCache) statCache.textContent = data.avgCacheHitRate > 0 ? data.avgCacheHitRate.toFixed(0) + '%' : '\u2014';
   // Uptime
   const uptimeEl = document.getElementById('last-refresh');
   if (uptimeEl) uptimeEl.textContent = formatUptime(data.uptimeSeconds || 0);
@@ -387,14 +387,30 @@ function updateSummary(data) {
       if (!item) {
         item = document.createElement('div');
         item.className = 'recent-item';
-        const refs = ['recent-model', 'recent-provider', 'recent-tokens'];
-        const cacheKeys = ['_modelEl', '_providerEl', '_tokensEl'];
-        refs.forEach((cls, i) => {
-          const el = document.createElement('span');
-          el.className = cls;
-          item.appendChild(el);
-          item[cacheKeys[i]] = el;
-        });
+        // Left side: model + provider
+        const left = document.createElement('div');
+        left.className = 'recent-left';
+        const modelEl = document.createElement('span');
+        modelEl.className = 'recent-model';
+        const providerEl = document.createElement('span');
+        providerEl.className = 'recent-provider';
+        left.appendChild(modelEl);
+        left.appendChild(providerEl);
+        // Right side: tokens + latency
+        const right = document.createElement('div');
+        right.className = 'recent-right';
+        const tokensEl = document.createElement('span');
+        tokensEl.className = 'recent-tokens';
+        const latencyEl = document.createElement('span');
+        latencyEl.className = 'recent-latency';
+        right.appendChild(tokensEl);
+        right.appendChild(latencyEl);
+        item.appendChild(left);
+        item.appendChild(right);
+        item._modelEl = modelEl;
+        item._providerEl = providerEl;
+        item._tokensEl = tokensEl;
+        item._latencyEl = latencyEl;
         recentEl.appendChild(item);
         recentRows.set(key, item);
       }
@@ -412,8 +428,14 @@ function updateSummary(data) {
       }
       const newProvider = r.targetProvider || r.provider || '';
       if (item._providerEl.textContent !== newProvider) item._providerEl.textContent = newProvider;
-      const newTokens = formatNumber((r.inputTokens || 0) + (r.cacheReadTokens || 0) + (r.cacheCreationTokens || 0) + (r.outputTokens || 0)) + ' ' + latency;
+      const newTokens = formatNumber((r.inputTokens || 0) + (r.cacheReadTokens || 0) + (r.cacheCreationTokens || 0) + (r.outputTokens || 0));
       if (item._tokensEl.textContent !== newTokens) item._tokensEl.textContent = newTokens;
+      // Color-coded latency
+      const latencyMs = r.latencyMs || 0;
+      const lc = latencyMs < 2000 ? 'fast' : latencyMs < 10000 ? 'medium' : 'slow';
+      const newLatencyText = latency;
+      if (item._latencyEl.textContent !== newLatencyText) item._latencyEl.textContent = newLatencyText;
+      item._latencyEl.className = 'recent-latency ' + lc;
     }
   }
 }
@@ -463,7 +485,7 @@ function appendRequestMetric(r) {
   }
 
   // Cache hit rate
-  if (_rawInputTokens > 0 && _rawCacheRead > 0) {
+  if (_rawInputTokens > 0 && _rawCacheRead > 0 && statCache) {
     statCache.textContent = (Math.round((_rawCacheRead / _rawInputTokens) * 1000) / 10).toFixed(0) + '%';
   }
 
@@ -481,6 +503,10 @@ function appendRequestMetric(r) {
   const item = document.createElement('div');
   item.className = 'recent-item';
 
+  // Left side: model + provider
+  const left = document.createElement('div');
+  left.className = 'recent-left';
+
   const model = document.createElement('span');
   model.className = 'recent-model';
   const actualModel = r.actualModel || r.model || 'unknown';
@@ -495,13 +521,29 @@ function appendRequestMetric(r) {
   provider.className = 'recent-provider';
   provider.textContent = r.targetProvider || r.provider || '';
 
+  left.appendChild(model);
+  left.appendChild(provider);
+
+  // Right side: tokens + latency
+  const right = document.createElement('div');
+  right.className = 'recent-right';
+
   const tokens = document.createElement('span');
   tokens.className = 'recent-tokens';
-  tokens.textContent = formatNumber((r.inputTokens || 0) + (r.cacheReadTokens || 0) + (r.cacheCreationTokens || 0) + (r.outputTokens || 0)) + ' ' + latency;
+  tokens.textContent = formatNumber((r.inputTokens || 0) + (r.cacheReadTokens || 0) + (r.cacheCreationTokens || 0) + (r.outputTokens || 0));
 
-  item.appendChild(model);
-  item.appendChild(provider);
-  item.appendChild(tokens);
+  const latencyEl = document.createElement('span');
+  latencyEl.className = 'recent-latency';
+  const latencyMs = r.latencyMs || 0;
+  const lc = latencyMs < 2000 ? 'fast' : latencyMs < 10000 ? 'medium' : 'slow';
+  latencyEl.classList.add(lc);
+  latencyEl.textContent = latency;
+
+  right.appendChild(tokens);
+  right.appendChild(latencyEl);
+
+  item.appendChild(left);
+  item.appendChild(right);
   recentEl.prepend(item);
   recentRows.set(r.requestId, item);
 
@@ -910,7 +952,7 @@ function renderProviders() {
   }
   const empty = providersEl.querySelector('.empty');
   if (empty) empty.remove();
-  const stateMap = { closed: '\uD83D\uDFE2 OK', 'half-open': '\uD83D\uDFE1 Resuming', open: '\uD83D\uDD34 Not OK' };
+  const stateMap = { closed: 'OK', 'half-open': 'Resuming', open: 'Not OK' };
   for (const [name, entry] of Object.entries(health)) {
     let row = providerRows.get(name);
     if (!row) {
@@ -924,6 +966,13 @@ function renderProviders() {
       nameEl.textContent = name;
       const stateEl = document.createElement('span');
       stateEl.className = 'provider-state';
+      // Status dot
+      const dot = document.createElement('span');
+      dot.className = 'status-indicator';
+      stateEl.appendChild(dot);
+      const stateText = document.createElement('span');
+      stateText.className = 'state-text';
+      stateEl.appendChild(stateText);
       row1.appendChild(nameEl);
       row1.appendChild(stateEl);
       row.appendChild(row1);
@@ -935,33 +984,51 @@ function renderProviders() {
       row.appendChild(errsEl);
       providersEl.appendChild(row);
       row._nameEl = nameEl;
-      row._stateEl = stateEl;
+      row._stateEl = stateText;
+      row._dotEl = dot;
       row._statsEl = statsEl;
       row._errsEl = errsEl;
       providerRows.set(name, row);
     }
     row._nameEl.textContent = name;
     row._stateEl.textContent = stateMap[entry.state] || entry.state || '\u2014';
+    // Status dot color based on state
+    row._dotEl.className = 'status-indicator';
+    const errs = entry.errorBreakdown?.errors || {};
+    const connErrs = entry.connectionErrors || {};
+    const has429 = errs[429] > 0;
+    const has5xx = Object.keys(errs).some(c => parseInt(c) >= 500 && errs[c] > 0);
+    const hasTtfb = connErrs.ttfbTimeouts > 0;
+    const hasStall = connErrs.stalls > 0;
+    const hasConn = connErrs.connectionErrors > 0;
+    // Determine status color
+    if (entry.state === 'open') {
+      row._dotEl.classList.add('error');
+    } else if (has5xx) {
+      row._dotEl.classList.add('error');
+    } else if (hasTtfb || hasStall || has429) {
+      row._dotEl.classList.add('warning');
+    } else {
+      row._dotEl.classList.add('healthy');
+    }
     const total = entry.totalRequests || 0;
     const errTotal = entry.errorBreakdown?.total || 0;
     const successRate = total > 0 ? Math.round((total - errTotal) / total * 100) : null;
     row._statsEl.textContent = total + ' req \u00B7 ' + (successRate !== null ? successRate + '% success' : '\u2014 success');
-    const errs = entry.errorBreakdown?.errors || {};
-    const connErrs = entry.connectionErrors || {};
     // Clear previous chips
     row._errsEl.replaceChildren();
     let hasChips = false;
-    if (errs[429] > 0) { appendChip(row._errsEl, 'err-429', errs[429] + '\u00D7 429'); hasChips = true; }
+    if (errs[429] > 0) { appendChip(row._errsEl, 'err-tag err-429', errs[429] + '\u00D7 429'); hasChips = true; }
     for (const [code, count] of Object.entries(errs)) {
       if (parseInt(code) >= 500 && code !== '429' && count > 0) {
-        appendChip(row._errsEl, 'err-5xx', count + '\u00D7 ' + code);
+        appendChip(row._errsEl, 'err-tag err-5xx', count + '\u00D7 ' + code);
         hasChips = true;
       }
     }
-    if (connErrs.stalls > 0) { appendChip(row._errsEl, 'err-stall', connErrs.stalls + '\u00D7 stall'); hasChips = true; }
-    if (connErrs.ttfbTimeouts > 0) { appendChip(row._errsEl, 'err-ttfb', connErrs.ttfbTimeouts + '\u00D7 TTFB'); hasChips = true; }
-    if (connErrs.connectionErrors > 0) { appendChip(row._errsEl, 'err-conn', connErrs.connectionErrors + '\u00D7 conn'); hasChips = true; }
-    if (!hasChips) appendChip(row._errsEl, 'no-errors', '\u2014');
+    if (connErrs.stalls > 0) { appendChip(row._errsEl, 'err-tag err-stall', connErrs.stalls + '\u00D7 stall'); hasChips = true; }
+    if (connErrs.ttfbTimeouts > 0) { appendChip(row._errsEl, 'err-tag err-ttfb', connErrs.ttfbTimeouts + '\u00D7 TTFB'); hasChips = true; }
+    if (connErrs.connectionErrors > 0) { appendChip(row._errsEl, 'err-tag err-conn', connErrs.connectionErrors + '\u00D7 conn'); hasChips = true; }
+    if (!hasChips) appendChip(row._errsEl, 'err-tag no-errors', '\u2713 healthy');
   }
   const cards = Array.from(providersEl.querySelectorAll('.provider-card'));
   cards.sort((a, b) => {
