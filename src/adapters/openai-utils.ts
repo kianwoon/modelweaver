@@ -1,3 +1,5 @@
+import { Transform } from "node:stream";
+
 /**
  * OpenAI shared utilities for request mapping and error normalization.
  * Used by both OpenAI Chat and Responses API adapters.
@@ -351,5 +353,220 @@ export function mapOpenAIErrorToAnthropic(status: number, body: string): string 
   return JSON.stringify({
     type: "error",
     error: { type: errorType, message },
+  });
+}
+
+/**
+ * Creates a Node.js Transform stream that converts OpenAI Chat SSE format to Anthropic SSE format.
+ *
+ * Handles:
+ * - message_start/content_block_start initialization
+ * - text_delta, thinking_delta, input_json_delta content streaming
+ * - content_block_stop for switching between block types
+ * - message_delta/message_stop on finish_reason or [DONE]
+ * - Flush fallback for incomplete streams
+ */
+export function createOpenAIChatToAnthropicStream() {
+  let messageId = "msg_" + Math.random().toString(36).substring(2, 15);
+  let model = "model";
+  let inputTokens = 0;
+  let outputTokens = 0;
+
+  let started = false;
+  let closed = false;
+  let currentBlockType: "text" | "thinking" | "tool_use" | null = null;
+  let toolArgsBuffer = "";
+
+  type PushFn = (data: string) => boolean;
+
+  function emitMessageStart(push: PushFn) {
+    if (!started) {
+      push(
+        `event: message_start\ndata: ${JSON.stringify({
+          type: "message_start",
+          message: {
+            id: messageId,
+            type: "message",
+            role: "assistant",
+            model,
+            content: [],
+            stop_reason: null,
+            usage: { input_tokens: inputTokens, output_tokens: 0 },
+          },
+        })}\n\n`,
+      );
+      started = true;
+    }
+  }
+
+  function closeBlock(push: PushFn) {
+    if (currentBlockType) {
+      push(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
+      currentBlockType = null;
+    }
+  }
+
+  function emitClosingEvents(push: PushFn) {
+    if (closed) return;
+    closed = true;
+    closeBlock(push);
+    const stopReason = toolArgsBuffer ? "tool_use" : "end_turn";
+    push(
+      `event: message_delta\ndata: ${JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: stopReason },
+        usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+      })}\n\n`,
+    );
+    push(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
+  }
+
+  function processChunk(parsed: any, push: PushFn) {
+    if (parsed.id) messageId = `msg_${parsed.id}`;
+    if (parsed.model) model = parsed.model;
+
+    if (parsed.usage) {
+      if (parsed.usage.prompt_tokens) inputTokens = parsed.usage.prompt_tokens;
+      if (parsed.usage.completion_tokens) outputTokens = parsed.usage.completion_tokens;
+    }
+
+    const choice = parsed.choices?.[0];
+    if (!choice) return;
+
+    emitMessageStart(push);
+    const delta = choice.delta;
+
+    // Handle role/assistant start
+    if (delta?.role === "assistant" && !currentBlockType) {
+      currentBlockType = "text";
+      push(
+        `event: content_block_start\ndata: ${JSON.stringify({
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        })}\n\n`,
+      );
+    }
+
+    // Handle reasoning_content -> thinking block
+    if (delta?.reasoning_content) {
+      if (currentBlockType === "text") {
+        push(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
+      }
+      if (currentBlockType !== "thinking") {
+        currentBlockType = "thinking";
+        push(
+          `event: content_block_start\ndata: ${JSON.stringify({
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "thinking", thinking: "" },
+          })}\n\n`,
+        );
+      }
+      push(
+        `event: content_block_delta\ndata: ${JSON.stringify({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "thinking_delta", thinking: delta.reasoning_content },
+        })}\n\n`,
+      );
+      return;
+    }
+
+    // Handle text content
+    if (delta?.content) {
+      if (currentBlockType === "thinking") {
+        push(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
+      }
+      if (currentBlockType !== "text") {
+        currentBlockType = "text";
+        push(
+          `event: content_block_start\ndata: ${JSON.stringify({
+            type: "content_block_start",
+            index: 0,
+            content_block: { type: "text", text: "" },
+          })}\n\n`,
+        );
+      }
+      push(
+        `event: content_block_delta\ndata: ${JSON.stringify({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: delta.content },
+        })}\n\n`,
+      );
+      return;
+    }
+
+    // Handle tool_calls
+    if (delta?.tool_calls) {
+      for (const tc of delta.tool_calls) {
+        // New tool call with id
+        if (tc.id) {
+          closeBlock(push);
+          currentBlockType = "tool_use";
+          toolArgsBuffer = "";
+
+          push(
+            `event: content_block_start\ndata: ${JSON.stringify({
+              type: "content_block_start",
+              index: 0,
+              content_block: { type: "tool_use", id: tc.id, name: tc.function?.name ?? "", input: {} },
+            })}\n\n`,
+          );
+        }
+
+        // Accumulate arguments
+        if (tc.function?.arguments) {
+          toolArgsBuffer += tc.function.arguments;
+          push(
+            `event: content_block_delta\ndata: ${JSON.stringify({
+              type: "content_block_delta",
+              index: 0,
+              delta: { type: "input_json_delta", partial_json: tc.function.arguments },
+            })}\n\n`,
+          );
+        }
+      }
+      return;
+    }
+
+    // Handle finish_reason
+    if (choice.finish_reason) {
+      emitClosingEvents(push);
+    }
+  }
+
+  return new Transform({
+    transform(chunk: Buffer, _encoding: BufferEncoding, callback: () => void) {
+      const lines = chunk.toString().split("\n");
+      const push = this.push.bind(this);
+
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+
+        const data = line.slice(6).trim();
+        if (data === "[DONE]") {
+          emitMessageStart(push);
+          emitClosingEvents(push);
+          callback();
+          return;
+        }
+
+        try {
+          processChunk(JSON.parse(data), push);
+        } catch {
+          // Skip invalid JSON
+        }
+      }
+      callback();
+    },
+
+    flush(callback: () => void) {
+      const push = this.push.bind(this);
+      emitMessageStart(push);
+      emitClosingEvents(push);
+      callback();
+    },
   });
 }
