@@ -6,6 +6,7 @@ import { PassThrough } from "node:stream";
 import { TextEncoder } from "node:util";
 import { getOrCreateAgent } from "./pool.js";
 import { boostManager } from "./adaptive-timeout.js";
+import { getAdapter } from "./adapters/registry.js";
 
 /**
  * Generate Anthropic-compatible SSE closing events as Uint8Array[].
@@ -631,7 +632,10 @@ export async function forwardRequest(
   }
 
   // Build outbound URL from provider base URL and request path
-  const url = buildOutboundUrl(provider, outgoingPath);
+  const adapter = getAdapter(provider.apiFormat);
+  const url = adapter.format === "anthropic"
+    ? buildOutboundUrl(provider, outgoingPath)
+    : adapter.buildUpstreamUrl(provider.baseUrl, outgoingPath, ctx.actualModel ?? ctx.model);
 
   // Prepare body — prefer raw passthrough to preserve upstream prompt caching.
   // Only parse and re-serialize when a modification is actually required,
@@ -727,7 +731,20 @@ export async function forwardRequest(
   }
 
   const headers = buildOutboundHeaders(incomingRequest.headers, provider, ctx.requestId);
-  headers.set("content-length", Buffer.byteLength(body, 'utf-8').toString());
+
+  // Apply adapter transformation for non-Anthropic formats
+  let requestHeaders: Headers;
+  let requestBody = body;
+  if (adapter.format !== "anthropic") {
+    const headersObj: Record<string, string> = {};
+    headers.forEach((v, k) => { headersObj[k] = v; });
+    const transformed = adapter.transformRequest(body, headersObj);
+    requestBody = transformed.body;
+    requestHeaders = new Headers(Object.entries(transformed.headers));
+  } else {
+    requestHeaders = headers;
+  }
+  requestHeaders.set("content-length", Buffer.byteLength(requestBody, 'utf-8').toString());
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), provider.timeout);
@@ -822,8 +839,8 @@ export async function forwardRequest(
     const undiciResponse = await Promise.race([
       undiciRequest(url, {
         method: "POST",
-        headers,
-        body,
+        headers: requestHeaders,
+        body: requestBody,
         signal: controller.signal,
         dispatcher,
       }),
@@ -971,7 +988,17 @@ export async function forwardRequest(
         }
       }
 
-      return new Response(errBody, {
+      // Normalize error body to Anthropic format for non-Anthropic adapters
+      const normalizedErrBody = adapter.format !== "anthropic"
+        ? (() => {
+            try {
+              const { type, message } = adapter.transformError(undiciResponse.statusCode, errBody);
+              return JSON.stringify({ type: "error", error: { type, message } });
+            } catch { return errBody; }
+          })()
+        : errBody;
+
+      return new Response(normalizedErrBody, {
         status: undiciResponse.statusCode,
         statusText: undiciResponse.statusText,
         headers: errHeaders,
@@ -1175,7 +1202,11 @@ export async function forwardRequest(
     // If upstream errored before passThrough, the passThrough already has the SSE
     // error payload written — skip the pipe setup to avoid redundant data flow.
     if (!earlyUpstreamError) {
-      undiciResponse.body.pipe(passThrough);
+      if (adapter.format !== "anthropic") {
+        adapter.transformResponse(undiciResponse.body).pipe(passThrough);
+      } else {
+        undiciResponse.body.pipe(passThrough);
+      }
     }
 
     // Wrap in a ReadableStream to catch undici's internal double-close bug.

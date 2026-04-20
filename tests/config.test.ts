@@ -219,6 +219,48 @@ tierPatterns:
     delete process.env.KEY;
   });
 
+  it("parses apiFormat field on provider", async () => {
+    process.env.KEY = "sk-123";
+    writeTestConfig(`
+server:
+  port: 8080
+providers:
+  openrouter:
+    baseUrl: https://openrouter.ai/api
+    apiKey: \${KEY}
+    apiFormat: openai-chat
+    authType: bearer
+routing:
+  t:
+    - provider: openrouter
+tierPatterns:
+  t: ["t"]
+`);
+    const { config } = await loadConfig(TEST_DIR);
+    expect(config.providers.get("openrouter")?.apiFormat).toBe("openai-chat");
+    delete process.env.KEY;
+  });
+
+  it("defaults apiFormat to anthropic", async () => {
+    process.env.KEY = "sk-123";
+    writeTestConfig(`
+server:
+  port: 8080
+providers:
+  anthro:
+    baseUrl: https://api.anthropic.com
+    apiKey: \${KEY}
+routing:
+  t:
+    - provider: anthro
+tierPatterns:
+  t: ["t"]
+`);
+    const { config } = await loadConfig(TEST_DIR);
+    expect(config.providers.get("anthro")?.apiFormat).toBe("anthropic");
+    delete process.env.KEY;
+  });
+
   it("rejects baseUrl with non-http scheme", async () => {
     process.env.KEY = "sk-123";
     writeTestConfig(`
