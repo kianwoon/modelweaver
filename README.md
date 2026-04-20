@@ -32,6 +32,7 @@ No config file editing. No provider SDK installs. The wizard tests your API key 
 
 ## What's New — v0.3.73
 
+- **OpenAI-compatible upstream providers** — Chat Completions (`/v1/chat/completions`) and Responses API (`/v1/responses`) formats with full Anthropic downstream compatibility (#240)
 - **Smart request routing** — classify message content by complexity and route to the appropriate model tier automatically (#97)
 - **Single-provider hedge skip** — hedging disabled for single-provider chains, prevents rate-limit amplification (#231)
 - **408/504 retry with fresh pool** — request timeout and server-unavailable now retry with a new connection pool (#231)
@@ -51,14 +52,16 @@ No config file editing. No provider SDK installs. The wizard tests your API key 
 ModelWeaver sits between Claude Code and upstream model providers as a local HTTP proxy. It inspects the `model` field in each Anthropic Messages API request and routes it to the best-fit provider.
 
 ```
-Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
-                   (localhost)   ──→  OpenRouter (fallback)
+Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)       [Anthropic format]
+                   (localhost)   ──→  OpenRouter (fallback)    [Anthropic format]
+                                  ──→  OpenAI-compatible        [OpenAI format]
                    │
               0. Classify message content → tier override? (smartRouting)
               1. Match exact model name (modelRouting)
               2. Match tier via substring (tierPatterns)
-              3. Fallback on 429 / 5xx errors
-              4. Race remaining providers on 429
+              3. Translate request/response per provider apiFormat
+              4. Fallback on 429 / 5xx errors
+              5. Race remaining providers on 429
 ```
 
 ## Features
@@ -80,6 +83,7 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)
 - **Session agent pooling** — reuses HTTP/2 agents across requests within the same session for connection affinity
 - **Adaptive TTFB** — dynamically adjusts TTFB timeout based on observed latency history
 - **GOAWAY-aware retry** — graceful HTTP/2 GOAWAY drain no longer marks pool as "failed"
+- **OpenAI-compatible upstream** — translate Anthropic Messages API requests to OpenAI Chat Completions or Responses API format in real time, with SSE stream translation back to Anthropic format
 - **Stream buffering** — optional time-based and size-based SSE buffering (`streamBufferMs`, `streamBufferBytes`)
 - **Health scores** — per-provider health scoring based on latency and error rates
 - **Provider error tracking** — per-provider error counts with status code breakdown, displayed in GUI in real-time
@@ -337,6 +341,7 @@ providers:
     modelLimits:                  # Per-provider token limits (optional)
       maxOutputTokens: 16384
     authType: anthropic           # "anthropic" | "bearer"  (default: anthropic)
+    apiFormat: anthropic          # "anthropic" | "openai-chat" | "openai-responses"  (default: anthropic)
     circuitBreaker:               # Per-provider circuit breaker (optional)
       failureThreshold: 3         # Failures before opening circuit (alias: threshold, default: 3)
       windowSeconds: 60           # Time window for failure count  (default: 60)
@@ -347,6 +352,13 @@ providers:
     apiKey: ${OPENROUTER_API_KEY}
     authType: bearer
     timeout: 60000
+  # OpenAI-compatible upstream (translates Anthropic → OpenAI format)
+  openai-compatible:
+    baseUrl: https://api.openai.com
+    apiKey: ${OPENAI_API_KEY}
+    authType: bearer
+    apiFormat: openai-chat           # or "openai-responses" for Responses API
+    timeout: 30000
 
 # Exact model name routing (checked FIRST, before tier patterns)
 modelRouting:
@@ -422,6 +434,52 @@ tierPatterns:
 - **No fallback on**: 4xx (bad request, auth failure, forbidden) — returned immediately (except 429 and transient errors in 400/413 bodies)
 - **Model rewriting**: each provider entry can override the `model` field in the request body
 
+### OpenAI-Compatible Providers
+
+ModelWeaver can proxy to any OpenAI-compatible API while keeping the downstream (Claude Code) connection in Anthropic format. Set `apiFormat` on the provider to control the upstream wire format:
+
+| `apiFormat` | Upstream Endpoint | SSE Translation |
+|---|---|---|
+| `anthropic` (default) | `/v1/messages` | Passthrough |
+| `openai-chat` | `/v1/chat/completions` | OpenAI chunks → Anthropic SSE events |
+| `openai-responses` | `/v1/responses` | Responses API events → Anthropic SSE events |
+
+**What gets translated:**
+
+- **Request body**: system → instructions, messages → input/chat format, tool_use → tool_calls, tool_result → role:tool, thinking → reasoning, max_tokens → max_output_tokens
+- **Headers**: `x-api-key` → `Authorization: Bearer`, strips `anthropic-version`/`anthropic-beta`
+- **SSE stream**: OpenAI `choices[].delta` chunks → Anthropic `content_block_start/delta/stop` events with proper message lifecycle (message_start → content blocks → message_delta → message_stop)
+- **Errors**: OpenAI error JSON → Anthropic `{type:"error", error:{type,message}}` format
+
+**Supported features:** text, tool calls, streaming, thinking/reasoning, vision (image blocks), system messages, cache control (stripped).
+
+**Example — OpenAI provider:**
+
+```yaml
+providers:
+  my-openai:
+    baseUrl: https://api.openai.com
+    apiKey: ${OPENAI_API_KEY}
+    authType: bearer
+    apiFormat: openai-chat
+
+routing:
+  sonnet:
+    - provider: my-openai
+      model: gpt-4o
+```
+
+**Example — Responses API provider:**
+
+```yaml
+providers:
+  my-responses:
+    baseUrl: https://api.example.com
+    apiKey: ${EXAMPLE_API_KEY}
+    authType: bearer
+    apiFormat: openai-responses
+```
+
 ### Supported providers
 
 | Provider | Auth Type | Base URL |
@@ -433,7 +491,7 @@ tierPatterns:
 | Minimax | `x-api-key` | `https://api.minimax.io/anthropic` |
 | Fireworks | Bearer | `https://api.fireworks.ai/inference/v1` |
 
-Any OpenAI/Anthropic-compatible API works — just set `baseUrl` and `authType` appropriately.
+Any OpenAI/Anthropic-compatible API works — set `baseUrl`, `authType`, and `apiFormat` appropriately. For OpenAI-compatible endpoints, set `apiFormat: openai-chat` or `apiFormat: openai-responses`.
 
 ### Config hot-reload
 
@@ -570,6 +628,19 @@ npx @kianwoon/modelweaver gui
 **How do I switch providers?**
 
 Run `npx @kianwoon/modelweaver init` again — it opens your existing config for editing. Or edit `~/.modelweaver/config.yaml` directly (hot-reloaded automatically in daemon mode).
+
+**Can I use OpenAI-compatible providers with Claude Code?**
+
+Yes. Set `apiFormat: openai-chat` (for `/v1/chat/completions`) or `apiFormat: openai-responses` on the provider. ModelWeaver translates Anthropic Messages API requests to OpenAI format upstream, then translates responses back to Anthropic format for Claude Code. Features like tools, thinking, vision, and system messages are fully supported.
+
+```yaml
+providers:
+  my-provider:
+    baseUrl: https://api.example.com
+    apiKey: ${EXAMPLE_API_KEY}
+    authType: bearer
+    apiFormat: openai-chat
+```
 
 ## License
 
