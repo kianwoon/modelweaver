@@ -570,3 +570,206 @@ export function createOpenAIChatToAnthropicStream() {
     },
   });
 }
+
+/**
+ * Creates a Node.js Transform stream that converts OpenAI Responses API SSE format
+ * to Anthropic SSE format.
+ *
+ * Responses API events mapped:
+ * - response.created (status: "in_progress") → message_start
+ * - response.content_part.added (type: "output_text") → content_block_start(type: "text")
+ * - response.output_text.delta → content_block_delta(text_delta)
+ * - response.function_call_arguments.delta → content_block_delta(input_json_delta)
+ * - response.output_item.done → content_block_stop
+ * - response.completed (has usage) → message_delta (usage) + message_stop
+ */
+export function createOpenAIResponsesToAnthropicStream() {
+  let messageId = "msg_" + Math.random().toString(36).substring(2, 15);
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let blockIndex = 0;
+
+  let started = false;
+  let closed = false;
+  let blockOpen = false;
+
+  type PushFn = (data: string) => boolean;
+
+  function emitMessageStart(push: PushFn) {
+    if (!started) {
+      push(
+        `event: message_start\ndata: ${JSON.stringify({
+          type: "message_start",
+          message: {
+            id: messageId,
+            type: "message",
+            role: "assistant",
+            content: [],
+            stop_reason: null,
+            usage: { input_tokens: inputTokens, output_tokens: 0 },
+          },
+        })}\n\n`,
+      );
+      started = true;
+    }
+  }
+
+  function closeBlock(push: PushFn) {
+    if (blockOpen) {
+      push(
+        `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: blockIndex })}\n\n`,
+      );
+      blockOpen = false;
+      blockIndex++;
+    }
+  }
+
+  function emitClosingEvents(push: PushFn, stopReason = "end_turn") {
+    if (closed) return;
+    closed = true;
+    closeBlock(push);
+    push(
+      `event: message_delta\ndata: ${JSON.stringify({
+        type: "message_delta",
+        delta: { stop_reason: stopReason },
+        usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+      })}\n\n`,
+    );
+    push(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
+  }
+
+  // Buffer for incomplete lines across chunks
+  let lineBuffer = "";
+
+  return new Transform({
+    transform(chunk: Buffer, _encoding: BufferEncoding, callback: () => void) {
+      const text = lineBuffer + chunk.toString();
+      const lines = text.split("\n");
+      // Last element might be incomplete — save for next chunk
+      lineBuffer = lines.pop() ?? "";
+
+      const push = this.push.bind(this);
+
+      let currentEvent = "";
+      for (const line of lines) {
+        const trimmed = line.trim();
+
+        if (trimmed.startsWith("event: ")) {
+          currentEvent = trimmed.slice(7).trim();
+          continue;
+        }
+
+        if (!trimmed.startsWith("data: ")) continue;
+        const data = trimmed.slice(6).trim();
+
+        let parsed: any;
+        try {
+          parsed = JSON.parse(data);
+        } catch {
+          continue;
+        }
+
+        // Track message id from response.created or response.completed
+        if (parsed.id && (currentEvent === "response.created" || currentEvent === "response.completed")) {
+          messageId = `msg_${parsed.id}`;
+        }
+
+        // Track usage
+        if (parsed.usage) {
+          if (parsed.usage.input_tokens !== undefined) inputTokens = parsed.usage.input_tokens;
+          if (parsed.usage.output_tokens !== undefined) outputTokens = parsed.usage.output_tokens;
+        }
+
+        // response.created → message_start
+        if (currentEvent === "response.created" && parsed.status === "in_progress") {
+          emitMessageStart(push);
+          continue;
+        }
+
+        // response.content_part.added (type: "output_text") → content_block_start
+        if (currentEvent === "response.content_part.added") {
+          if (parsed.type === "output_text") {
+            closeBlock(push);
+            blockOpen = true;
+            push(
+              `event: content_block_start\ndata: ${JSON.stringify({
+                type: "content_block_start",
+                index: blockIndex,
+                content_block: { type: "text", text: "" },
+              })}\n\n`,
+            );
+          }
+          continue;
+        }
+
+        // response.output_text.delta → content_block_delta (text_delta)
+        if (currentEvent === "response.output_text.delta" && parsed.delta !== undefined) {
+          if (!started) emitMessageStart(push);
+          if (!blockOpen) {
+            blockOpen = true;
+            push(
+              `event: content_block_start\ndata: ${JSON.stringify({
+                type: "content_block_start",
+                index: blockIndex,
+                content_block: { type: "text", text: "" },
+              })}\n\n`,
+            );
+          }
+          push(
+            `event: content_block_delta\ndata: ${JSON.stringify({
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: { type: "text_delta", text: parsed.delta },
+            })}\n\n`,
+          );
+          continue;
+        }
+
+        // response.function_call_arguments.delta → content_block_delta (input_json_delta)
+        if (currentEvent === "response.function_call_arguments.delta" && parsed.delta !== undefined) {
+          if (!started) emitMessageStart(push);
+          push(
+            `event: content_block_delta\ndata: ${JSON.stringify({
+              type: "content_block_delta",
+              index: blockIndex,
+              delta: { type: "input_json_delta", partial_json: parsed.delta },
+            })}\n\n`,
+          );
+          continue;
+        }
+
+        // response.output_item.done → content_block_stop
+        if (currentEvent === "response.output_item.done") {
+          closeBlock(push);
+          continue;
+        }
+
+        // response.completed → message_delta + message_stop
+        if (currentEvent === "response.completed") {
+          emitMessageStart(push);
+          emitClosingEvents(push);
+          continue;
+        }
+      }
+      callback();
+    },
+
+    flush(callback: () => void) {
+      const push = this.push.bind(this);
+      // Process any remaining buffered line
+      if (lineBuffer.trim()) {
+        const line = lineBuffer.trim();
+        if (line.startsWith("data: ")) {
+          try {
+            JSON.parse(line.slice(6).trim());
+          } catch {
+            // Ignore
+          }
+        }
+      }
+      emitMessageStart(push);
+      emitClosingEvents(push);
+      callback();
+    },
+  });
+}
