@@ -737,75 +737,102 @@ export async function forwardRequest(
       const parsed = JSON.parse(body);
       if (Array.isArray(parsed.messages) && parsed.messages.length > provider.maxContextMessages) {
         const allMsgs = parsed.messages;
+        const original = allMsgs.length;
+        const limit = provider.maxContextMessages;
 
         // Don't trim during active tool chains — if the last message is a tool_result,
-        // the model is mid-task and expects to continue. Trimming here causes the model
-        // to lose context and return end_turn prematurely, stalling the agent loop.
+        // the model is mid-task and expects to continue. BUT: if the conversation exceeds
+        // 1.5x the limit, force-trim anyway to prevent context overflow.
         const lastMsg = allMsgs[allMsgs.length - 1];
         const lastIsToolResult = lastMsg?.role === "user" &&
           Array.isArray(lastMsg.content) && lastMsg.content.some((b: any) => b?.type === "tool_result");
-        if (lastIsToolResult) {
-          console.warn(`[context-trim] Skipping trim (${allMsgs.length} msgs) — active tool chain detected for provider ${provider.name}`);
+        const hardCeiling = Math.floor(limit * 1.5);
+        const forceTrim = original > hardCeiling;
+
+        if (lastIsToolResult && !forceTrim) {
+          console.warn(`[context-trim] Skipping trim (${original} msgs) — active tool chain detected for provider ${provider.name}`);
         } else {
-          const original = allMsgs.length;
-          const limit = provider.maxContextMessages;
-
-          // Preserve the original task instruction (first non-tool user message)
-        let firstInstruction: any = null;
-        for (const msg of allMsgs) {
-          if (msg.role === "user" && !(Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result"))) {
-            firstInstruction = msg;
-            break;
+          if (forceTrim && lastIsToolResult) {
+            console.warn(`[context-trim] Force trimming (${original} msgs, ceiling: ${hardCeiling}) — exceeded 1.5x limit during active tool chain for provider ${provider.name}`);
           }
-        }
 
-        // Identify turn boundaries: a turn starts at each `user` message that is NOT a tool_result.
-        // Everything between two turn boundaries is one complete turn (tool_use/tool_result pairs stay together).
-        const turnStarts: number[] = [];
-        for (let i = 0; i < allMsgs.length; i++) {
-          const msg = allMsgs[i];
-          if (msg.role === "user" && !(Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result"))) {
-            turnStarts.push(i);
+          // Find the best task instruction: longest user text message in the first 20% of conversation.
+          // "First non-tool user" can be trivial like "ok" — the longest message is more likely the real task.
+          let bestInstruction: any = null;
+          let bestLen = 0;
+          const searchEnd = Math.max(3, Math.floor(allMsgs.length * 0.2));
+          for (let i = 0; i < Math.min(allMsgs.length, searchEnd); i++) {
+            const msg = allMsgs[i];
+            if (msg.role === "user") {
+              const text = typeof msg.content === "string" ? msg.content :
+                Array.isArray(msg.content) ? msg.content.filter((b: any) => b?.type === "text").map((b: any) => b.text).join("") : "";
+              if (text.length > bestLen && !msg.content?.some?.((b: any) => b?.type === "tool_result")) {
+                bestLen = text.length;
+                bestInstruction = msg;
+              }
+            }
           }
-        }
 
-        // Binary search: find the earliest turn start where messages from that turn onward fit within limit.
-        // Each turn = allMsgs[turnStarts[i] .. turnStarts[i+1]-1], last turn = allMsgs[turnStarts[i] .. end]
-        let bestStart = 0;
-        for (const start of turnStarts) {
-          const count = allMsgs.length - start;
-          // Reserve 1 slot for the prepended instruction if it would be outside this range
-          const needsInstruction = firstInstruction && start > 0 && allMsgs[start] !== firstInstruction;
-          const total = needsInstruction ? count + 1 : count;
-          if (total <= limit) {
-            bestStart = start;
-            break;
+          // Identify turn boundaries: a turn starts at each `user` message that is NOT a tool_result.
+          const turnStarts: number[] = [];
+          for (let i = 0; i < allMsgs.length; i++) {
+            const msg = allMsgs[i];
+            if (msg.role === "user" && !(Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result"))) {
+              turnStarts.push(i);
+            }
           }
-        }
 
-        let trimmed = allMsgs.slice(bestStart);
+          // Find the earliest turn start where messages fit within limit (accounting for instruction + hint = +2)
+          let bestStart = 0;
+          const extraSlots = (bestInstruction ? 1 : 0) + 1; // instruction + hint
+          for (const start of turnStarts) {
+            const count = allMsgs.length - start;
+            const needsInstruction = bestInstruction && start > 0 && allMsgs[start] !== bestInstruction;
+            const total = count + (needsInstruction ? extraSlots : 1); // always +1 for hint
+            if (total <= limit) {
+              bestStart = start;
+              break;
+            }
+          }
 
-        // Prepend the original instruction if it was trimmed away
-        if (firstInstruction && trimmed[0] !== firstInstruction) {
-          trimmed = [firstInstruction, ...trimmed];
-        }
+          // Fallback: if no turn fits (single massive turn or all turns too large),
+          // hard-cut from the back and align to safe boundary.
+          if (bestStart === 0 && original > limit) {
+            const cutPoint = Math.max(0, original - limit + extraSlots);
+            // Find safe start: skip forward from cutPoint to first non-tool-result user message
+            for (let i = cutPoint; i < allMsgs.length; i++) {
+              const msg = allMsgs[i];
+              const isToolResult = msg.role === "user" &&
+                Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result");
+              if (!isToolResult) {
+                bestStart = i;
+                break;
+              }
+            }
+          }
 
-        // Inject a continuation hint after the instruction so the model knows
-        // earlier context was trimmed and it should keep working, not stop prematurely.
-        const trimmedCount = original - trimmed.length;
-        if (trimmedCount > 0 && trimmed.length > 1) {
-          const hint = {
-            role: "user",
-            content: `[System: ${trimmedCount} earlier messages were trimmed to fit context window. Continue working on the original task — do not stop until it is fully complete.]`,
-          };
-          // Insert after the instruction (index 0) and before the rest
-          trimmed = [trimmed[0], hint, ...trimmed.slice(1)];
-        }
+          let trimmed = allMsgs.slice(bestStart);
 
-        parsed.messages = trimmed;
-        body = JSON.stringify(parsed);
-        const turnsKept = turnStarts.filter(s => s >= bestStart).length;
-        console.warn(`[context-trim] Trimmed messages from ${original} to ${trimmed.length} (${turnsKept} turns, limit: ${limit}, instruction preserved: ${firstInstruction !== null}) for provider ${provider.name}`);
+          // Prepend the instruction if it was trimmed away
+          if (bestInstruction && trimmed[0] !== bestInstruction) {
+            trimmed = [bestInstruction, ...trimmed];
+          }
+
+          // Inject continuation hint as array content (not plain string) so it doesn't
+          // create a fake turn boundary in future requests' turn detection.
+          const trimmedCount = original - trimmed.length;
+          if (trimmedCount > 0 && trimmed.length > 1) {
+            const hint = {
+              role: "user",
+              content: [{ type: "text", text: `[System: ${trimmedCount} earlier messages were trimmed to fit context window. Continue working on the original task — do not stop until it is fully complete.]` }],
+            };
+            trimmed = [trimmed[0], hint, ...trimmed.slice(1)];
+          }
+
+          parsed.messages = trimmed;
+          body = JSON.stringify(parsed);
+          const turnsKept = turnStarts.filter(s => s >= bestStart).length;
+          console.warn(`[context-trim] Trimmed messages from ${original} to ${trimmed.length} (${turnsKept} turns, limit: ${limit}, instruction preserved: ${bestInstruction !== null}) for provider ${provider.name}`);
         }
       }
     } catch {
