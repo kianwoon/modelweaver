@@ -159,7 +159,7 @@ const REPLACEMENT_REGEX_BOTH = new RegExp(MODEL_KEY_REGEX.source + "|" + MAX_TOK
 const ERR_HEADERS = Object.freeze({ "content-type": "application/json" });
 
 /** Keywords that indicate a synthetic 502 from a local failure (not an upstream 502). */
-const CONNECTION_ERROR_KEYWORDS = ["timed out", "connection failed", "stalled", "ReadableStream is locked"];
+const CONNECTION_ERROR_KEYWORDS = ["timed out", "connection failed", "stalled", "ReadableStream is locked", "empty_response"];
 
 /**
  * Check if a 502 response is a connection-level error (stale pool, timeout, stall)
@@ -171,6 +171,27 @@ const CONNECTION_ERROR_KEYWORDS = ["timed out", "connection failed", "stalled", 
 function isConnectionError502FromBody(body: string): boolean {
   return CONNECTION_ERROR_KEYWORDS.some(kw => body.includes(kw));
 }
+
+// --- Empty response detection ---
+// GLM upstream returns empty end_turn (output_tokens:0, no content) at 111K+ input tokens.
+// These are 200 responses with SSE — the fallback chain can't detect them.
+// Detection happens inside the passThrough data handler via a Promise-based inspection.
+const EMPTY_END_TURN_RE = /"stop_reason"\s*:\s*"end_turn"/;
+const ZERO_OUTPUT_RE = /"output_tokens"\s*:\s*0[,\s}]/;
+const HAS_TEXT_DELTA_RE = /"type"\s*:\s*"text_delta"/;
+const HAS_TOOL_USE_RE = /"type"\s*:\s*"tool_use"/;
+
+function isEmptyEndTurn(buf: string): boolean {
+  return EMPTY_END_TURN_RE.test(buf)
+    && ZERO_OUTPUT_RE.test(buf)
+    && !HAS_TEXT_DELTA_RE.test(buf)
+    && !HAS_TOOL_USE_RE.test(buf);
+}
+
+// Max wait (ms) for the SSE stream to reveal whether it's empty.
+// Empty GLM responses complete in <1s (no content to generate).
+// Normal responses show content_block_start within ~2-3s of first byte.
+const EMPTY_RESPONSE_INSPECT_MS = 5000;
 
 /** Async: clone a response and check if its body indicates a connection-level error. */
 async function isConnectionErrorBody(response: Response): Promise<boolean> {
@@ -1204,6 +1225,15 @@ export async function forwardRequest(
     let sawContentBlockStop = false;
     let sawMessageStop = false;
     let _rollingTail = "";
+
+    // Empty response inspection: resolves when we know whether the upstream
+    // response is empty (no content) or normal. Used to trigger fallback
+    // for empty end_turn responses before the 200 status reaches the client.
+    let inspectResolve: ((result: "empty" | "normal") => void) | undefined;
+    const emptyResponseInspect = new Promise<"empty" | "normal">((resolve) => {
+      inspectResolve = resolve;
+    });
+
     passThrough.on("data", (chunk: Buffer) => {
       // Lightweight SSE state tracking via rolling tail buffer.
       // Accumulate last ~500 bytes across chunks to detect event types
@@ -1216,6 +1246,23 @@ export async function forwardRequest(
         if (!sawContentBlockStop && _rollingTail.includes('"content_block_stop"')) sawContentBlockStop = true;
         if (_rollingTail.includes('"message_stop"')) sawMessageStop = true;
       }
+
+      // Empty response inspection: check if this is an empty end_turn.
+      // Once we see content (text_delta or tool_use), it's normal — resolve immediately.
+      // Once we see message_stop without any content, check for empty end_turn pattern.
+      if (inspectResolve) {
+        if (sawContentBlockStart) {
+          // Content is flowing — normal response
+          inspectResolve("normal");
+          inspectResolve = undefined;
+        } else if (sawMessageStop && isEmptyEndTurn(_rollingTail)) {
+          // Stream completed with end_turn + 0 output + no content
+          console.warn(`[empty-response] Provider "${provider.name}" returned empty end_turn — triggering fallback`);
+          inspectResolve("empty");
+          inspectResolve = undefined;
+        }
+      }
+
       // Debug: dump first chunk to see actual SSE content
       if (((passThrough as any)._bytesForwarded ?? 0) <= chunk.length) {
         console.warn(`[tracking] First chunk (${chunk.length}b): ${chunk.toString("utf8").slice(0, 400)}`);
@@ -1483,6 +1530,40 @@ export async function forwardRequest(
         }
       },
     });
+
+    // ── Empty response inspection ──────────────────────────────────────────
+    // Wait for the SSE data handler to determine whether the response is empty
+    // or normal. Empty GLM responses complete in <1s; normal responses show
+    // content_block_start within ~2-3s. Timeout after 5s and assume normal
+    // (safe fallback — doesn't break anything, just misses the empty detection).
+    if (undiciResponse.statusCode >= 200 && undiciResponse.statusCode < 300) {
+      const inspectTimeout = new Promise<"normal">((resolve) => {
+        setTimeout(() => resolve("normal"), EMPTY_RESPONSE_INSPECT_MS);
+      });
+      const result = await Promise.race([emptyResponseInspect, inspectTimeout]);
+
+      if (result === "empty") {
+        // Empty end_turn detected — destroy streams and return 502 so
+        // the fallback chain retries with the next provider.
+        clearTimeout(timeout);
+        if (ttfbTimer) clearTimeout(ttfbTimer);
+        if (stallTimerRef) clearTimeout(stallTimerRef);
+        // Mark streams as intentionally closed to suppress error propagation
+        (passThrough as any)._intentionalClose = true;
+        if (upstreamBody && !upstreamBody.destroyed) {
+          (upstreamBody as any)._intentionalClose = true;
+        }
+        // Cancel the wrappedStream — this triggers the cancel() handler
+        // which releases the session pool connection.
+        try { wrappedStream.cancel(); } catch { /* already cancelled */ }
+        try { passThrough.destroy(); } catch { /* already done */ }
+        try { (undiciResponse.body as any).destroy(); } catch { /* already done */ }
+        return makeErrorResponse(502, "overloaded_error",
+          `empty_response: Provider "${provider.name}" returned empty end_turn`,
+          true,
+        );
+      }
+    }
 
     const response = new Response(wrappedStream, {
       status: undiciResponse.statusCode,
