@@ -608,17 +608,12 @@ export function createOpenAIChatToAnthropicStream() {
 
   return new Transform({
     transform(chunk: Buffer, _encoding: BufferEncoding, callback: () => void) {
-      console.warn(`[openai-transform] Received chunk: ${chunk.toString().slice(0, 200)}`);
       const text = lineBuffer + chunk.toString();
       const lines = text.split("\n");
       // Last element might be incomplete — save for next chunk
       lineBuffer = lines.pop() ?? "";
 
-      const push = this.push.bind(this);
-      const debugPush: PushFn = (data: string) => {
-        console.warn(`[openai-push] ${data.slice(0, 150)}`);
-        return push(data);
-      };
+      const push: PushFn = this.push.bind(this);
       let lastFinishReason: string | null = null;
 
       for (const line of lines) {
@@ -628,8 +623,8 @@ export function createOpenAIChatToAnthropicStream() {
         // Handle both "data: ..." and "data:..." (with/without space)
         const data = trimmed.startsWith("data: ") ? trimmed.slice(6).trim() : trimmed.slice(5).trim();
         if (data === "[DONE]") {
-          emitMessageStart(debugPush);
-          emitClosingEvents(debugPush, lastFinishReason ?? undefined);
+          emitMessageStart(push);
+          emitClosingEvents(push, lastFinishReason ?? undefined);
           callback();
           return;
         }
@@ -641,7 +636,7 @@ export function createOpenAIChatToAnthropicStream() {
           if (choice?.finish_reason) {
             lastFinishReason = choice.finish_reason;
           }
-          processChunk(parsed, debugPush);
+          processChunk(parsed, push);
         } catch {
           // Skip invalid JSON — likely a partial chunk that spans boundaries
           // (handled by lineBuffer on next chunk)

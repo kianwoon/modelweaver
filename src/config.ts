@@ -136,6 +136,7 @@ const providerSchema = z.object({
   apiFormat: z.enum(["anthropic", "openai-chat", "openai-responses"]).optional().default("anthropic"),
   modelLimits: modelLimitsSchema,
   concurrentLimit: z.number().int().min(1).optional(),
+  maxContextMessages: z.number().int().positive().optional(),
   poolSize: z.number().int().min(1).max(100).optional(),
   modelPools: z.record(z.string(), z.number().int().min(1).max(50)).optional(),
   connectionRetries: z.number().int().min(0).max(10).optional(),
