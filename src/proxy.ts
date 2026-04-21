@@ -736,11 +736,21 @@ export async function forwardRequest(
     try {
       const parsed = JSON.parse(body);
       if (Array.isArray(parsed.messages) && parsed.messages.length > provider.maxContextMessages) {
-        const original = parsed.messages.length;
         const allMsgs = parsed.messages;
-        const limit = provider.maxContextMessages;
 
-        // Preserve the original task instruction (first non-tool user message)
+        // Don't trim during active tool chains — if the last message is a tool_result,
+        // the model is mid-task and expects to continue. Trimming here causes the model
+        // to lose context and return end_turn prematurely, stalling the agent loop.
+        const lastMsg = allMsgs[allMsgs.length - 1];
+        const lastIsToolResult = lastMsg?.role === "user" &&
+          Array.isArray(lastMsg.content) && lastMsg.content.some((b: any) => b?.type === "tool_result");
+        if (lastIsToolResult) {
+          console.warn(`[context-trim] Skipping trim (${allMsgs.length} msgs) — active tool chain detected for provider ${provider.name}`);
+        } else {
+          const original = allMsgs.length;
+          const limit = provider.maxContextMessages;
+
+          // Preserve the original task instruction (first non-tool user message)
         let firstInstruction: any = null;
         for (const msg of allMsgs) {
           if (msg.role === "user" && !(Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result"))) {
@@ -796,6 +806,7 @@ export async function forwardRequest(
         body = JSON.stringify(parsed);
         const turnsKept = turnStarts.filter(s => s >= bestStart).length;
         console.warn(`[context-trim] Trimmed messages from ${original} to ${trimmed.length} (${turnsKept} turns, limit: ${limit}, instruction preserved: ${firstInstruction !== null}) for provider ${provider.name}`);
+        }
       }
     } catch {
       // If body can't be parsed, skip trimming
