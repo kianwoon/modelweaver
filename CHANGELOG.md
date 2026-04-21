@@ -2,6 +2,68 @@
 
 All notable changes to ModelWeaver.
 
+## [v0.3.83] — 2026-04-22
+
+### Fixes
+
+- **Empty response detection** — detect upstream `end_turn` responses with 0 output tokens and no content, then trigger fallback retry with the next provider in the chain (#248)
+- **Context trim duplicate instruction** — prevent injecting duplicate system instructions when the original task instruction is already present after trimming (#247)
+- **Accurate needsInstruction check** — fix `needsInstruction` to correctly detect when synthetic SSE events lack the `input_tokens` field (#247)
+
+## [v0.3.82] — 2026-04-21
+
+### Fixes
+
+- **Hint boundary alignment** — ensure continuation hints are injected at the correct message boundary, not mid-conversation (#247)
+- **Fallback on trim failure** — if context trimming produces an invalid message array, fall back to the original untrimmed messages (#247)
+
+## [v0.3.81] — 2026-04-20
+
+### Fixes
+
+- **5 context trimming bugfixes** — fix off-by-one message boundary, preserve `tool_result` pairs, handle empty message arrays, prevent trimming during streaming, and validate message role sequences (#246)
+
+## [v0.3.80] — 2026-04-19
+
+### Fixes
+
+- **Skip context trim during active tool chains** — avoid trimming conversation history while a multi-step tool chain is in progress, preventing broken `tool_use`→`tool_result` sequences (#245)
+
+## [v0.3.79] — 2026-04-18
+
+### Fixes
+
+- **Inject continuation hint on trim** — when context is trimmed, inject a synthetic assistant message hinting the model to continue, preventing agent stalls from lost conversation state (#244)
+
+## [v0.3.78] — 2026-04-17
+
+### Features
+
+- **Turn-aware context trimming** — trim context at conversation turn boundaries instead of arbitrary message counts, preserving complete `user`/`assistant` exchanges and `tool_use`/`tool_result` pairs (#243)
+
+## [v0.3.77] — 2026-04-16
+
+### Fixes
+
+- **Preserve original task instruction** — when trimming context, keep the original task/system instruction at the top of the message array instead of losing it (#242)
+
+## [v0.3.76] — 2026-04-15
+
+### Fixes
+
+- **Safe message boundary alignment** — ensure context trimming cuts at valid message boundaries (always after an `assistant` turn), preventing malformed request arrays (#241)
+
+## [v0.3.75] — 2026-04-14
+
+### Features
+
+- **Per-provider context message trimming** �� new `maxContextMessages` provider option limits outgoing conversation history to the most recent N messages, reducing token waste on long sessions (#239)
+
+### Fixes
+
+- **Stream state race** — fix truncated responses when using OpenAI-compatible upstream providers caused by eager Transform streams
+- **Versioned URL construction** — OpenAI adapter handles versioned base URLs (e.g., `/v4`) without double-prefixing
+
 ## [v0.3.69] — 2026-04-07
 
 ### Features

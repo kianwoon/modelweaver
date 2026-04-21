@@ -35,6 +35,12 @@ No config file editing. No provider SDK installs. The wizard tests your API key 
 - **Empty response detection** — detects when upstream providers return empty `end_turn` (0 output tokens, no content) and automatically retries with the next provider in the fallback chain (#248)
 - **Context trimming fixes** — duplicate instruction prevention, accurate `needsInstruction` check, missing `input_tokens` in synthetic SSE events (#247)
 
+## What's New — v0.3.78
+
+- **Turn-aware context trimming** — context is now trimmed at conversation turn boundaries instead of arbitrary message counts, preserving complete `user`/`assistant` exchanges and `tool_use`/`tool_result` pairs (#243)
+- **Continuation hints** — when context is trimmed, a synthetic assistant message is injected to hint the model to continue, preventing agent stalls (#244)
+- **Tool chain protection** — context trimming is skipped during active tool chains to avoid breaking multi-step tool sequences (#245)
+
 ## What's New — v0.3.75
 
 - **Per-provider context message trimming** — set `maxContextMessages` to limit outgoing conversation history, reducing token waste on long sessions (#239)
