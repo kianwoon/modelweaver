@@ -780,6 +780,18 @@ export async function forwardRequest(
           trimmed = [firstInstruction, ...trimmed];
         }
 
+        // Inject a continuation hint after the instruction so the model knows
+        // earlier context was trimmed and it should keep working, not stop prematurely.
+        const trimmedCount = original - trimmed.length;
+        if (trimmedCount > 0 && trimmed.length > 1) {
+          const hint = {
+            role: "user",
+            content: `[System: ${trimmedCount} earlier messages were trimmed to fit context window. Continue working on the original task — do not stop until it is fully complete.]`,
+          };
+          // Insert after the instruction (index 0) and before the rest
+          trimmed = [trimmed[0], hint, ...trimmed.slice(1)];
+        }
+
         parsed.messages = trimmed;
         body = JSON.stringify(parsed);
         const turnsKept = turnStarts.filter(s => s >= bestStart).length;
