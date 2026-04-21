@@ -14,5 +14,7 @@ export interface ProviderAdapter {
 
   transformResponse(upstreamBody: NodeJS.ReadableStream): NodeJS.ReadableStream;
 
+  transformNonStreamingResponse?(body: string): string;
+
   transformError(status: number, body: string): { type: string; message: string };
 }

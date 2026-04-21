@@ -401,6 +401,7 @@ export function buildOutboundHeaders(
   // Rewrite auth headers based on provider authType
   if (provider.authType === "bearer") {
     headers.set("Authorization", `Bearer ${provider.apiKey}`);
+    headers.delete("x-api-key"); // Prevent adapter from converting stale x-api-key to auth
   } else {
     headers.set("x-api-key", provider.apiKey);
   }
@@ -741,6 +742,19 @@ export async function forwardRequest(
     const transformed = adapter.transformRequest(body, headersObj);
     requestBody = transformed.body;
     requestHeaders = new Headers(Object.entries(transformed.headers));
+    // DEBUG: log outbound auth and URL
+    console.warn(`[adapter-debug] auth=${requestHeaders.get("authorization")?.slice(0, 20)}... model=${JSON.parse(requestBody).model} url=${adapter.buildUpstreamUrl(provider.baseUrl, incomingRequest.url, ctx.actualModel ?? ctx.model)}`);
+
+    // Apply model override to the request body (routing may map e.g. glm-5-turbo → glm-5)
+    if (ctx.actualModel) {
+      try {
+        const parsed = JSON.parse(requestBody);
+        if (parsed.model !== ctx.actualModel) {
+          parsed.model = ctx.actualModel;
+          requestBody = JSON.stringify(parsed);
+        }
+      } catch { /* keep as-is */ }
+    }
   } else {
     requestHeaders = headers;
   }
@@ -1037,6 +1051,17 @@ export async function forwardRequest(
       try { (undiciResponse.body as any).destroy(); } catch { /* already done */ }
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
+
+      // For non-anthropic adapters, transform the JSON response to Anthropic SSE format
+      if (adapter.format !== "anthropic" && adapter.transformNonStreamingResponse) {
+        const sseBody = adapter.transformNonStreamingResponse(jsonBody);
+        return new Response(sseBody, {
+          status: undiciResponse.statusCode,
+          statusText: undiciResponse.statusText,
+          headers: { "content-type": "text/event-stream", "cache-control": "no-cache" },
+        });
+      }
+
       const jsonHeaders = new Headers(undiciResponse.headers as unknown as HeadersInit);
       jsonHeaders.delete("transfer-encoding");
       return new Response(jsonBody, {
@@ -1079,6 +1104,10 @@ export async function forwardRequest(
       // Debug: dump first chunk to see actual SSE content
       if (((passThrough as any)._bytesForwarded ?? 0) <= chunk.length) {
         console.warn(`[tracking] First chunk (${chunk.length}b): ${chunk.toString("utf8").slice(0, 400)}`);
+      }
+      // Debug: dump ALL chunks for non-anthropic adapters to compare format
+      if (adapter.format !== "anthropic") {
+        console.warn(`[openai-out] ${chunk.toString("utf8")}`);
       }
     });
 
@@ -1201,13 +1230,8 @@ export async function forwardRequest(
 
     // If upstream errored before passThrough, the passThrough already has the SSE
     // error payload written — skip the pipe setup to avoid redundant data flow.
-    if (!earlyUpstreamError) {
-      if (adapter.format !== "anthropic") {
-        adapter.transformResponse(undiciResponse.body).pipe(passThrough);
-      } else {
-        undiciResponse.body.pipe(passThrough);
-      }
-    }
+    // NOTE: Pipe setup is deferred to AFTER the ReadableStream's start() callback
+    // registers its data handler, to prevent early chunks from being lost.
 
     // Wrap in a ReadableStream to catch undici's internal double-close bug.
     // When handleStall() destroys passThrough, undici's async GC can fire a
@@ -1313,6 +1337,18 @@ export async function forwardRequest(
           safeError(err);
         });
         passThrough.on("close", safeClose);
+
+        // Pipe upstream into passThrough AFTER all listeners are registered.
+        // If we pipe before start() sets up the data handler, early chunks
+        // from eager adapters (e.g. openai-chat) are lost before
+        // controller.enqueue() can forward them to the HTTP client.
+        if (!earlyUpstreamError) {
+          if (adapter.format !== "anthropic") {
+            adapter.transformResponse(undiciResponse.body).pipe(passThrough);
+          } else {
+            undiciResponse.body.pipe(passThrough);
+          }
+        }
       },
       cancel() {
         // Mark both streams as intentionally closed so upstream error handler

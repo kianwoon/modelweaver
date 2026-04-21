@@ -114,6 +114,7 @@ function mapAnthropicMessageToChat(
           },
         });
       }
+      // Note: thinking blocks are ignored for OpenAI format - they're Anthropic-specific
     }
 
     if (toolCalls.length > 0) {
@@ -121,6 +122,11 @@ function mapAnthropicMessageToChat(
         content: textParts.length > 0 ? textParts.join("") : null,
         tool_calls: toolCalls,
       };
+    }
+
+    // Assistant messages with only text (no tool_calls) - flatten to string
+    if (textParts.length > 0) {
+      return { content: textParts.join("") };
     }
   }
 
@@ -146,11 +152,19 @@ function mapAnthropicMessageToChat(
         return { content: null, skipOriginal: true, extraMessages };
       }
 
+      // Flatten all text blocks into a single string
+      const allText = mappedNonTool.every(
+        (m) => typeof m === "string" || (m && typeof m === "object" && (m as { type?: string }).type === "text"),
+      );
+      const finalContent = allText
+        ? mappedNonTool
+            .map((m) => (typeof m === "string" ? m : (m as { text?: string }).text ?? ""))
+            .filter(Boolean)
+            .join("\n")
+        : mappedNonTool;
+
       return {
-        content:
-          mappedNonTool.length === 1 && mappedNonTool[0] && (mappedNonTool[0] as { type?: string }).type === "text"
-            ? (mappedNonTool[0] as { text?: string }).text ?? mappedNonTool
-            : mappedNonTool,
+        content: finalContent,
         extraMessages,
       };
     }
@@ -158,6 +172,20 @@ function mapAnthropicMessageToChat(
 
   // General case: map each content block
   const mapped = content.map(mapContentBlockToChat);
+
+  // Flatten all text blocks into a single string — many OpenAI-compatible providers
+  // (Z.AI, etc.) do not accept content arrays, only plain strings.
+  const allText = mapped.every(
+    (m) => typeof m === "string" || (m && typeof m === "object" && (m as { type?: string }).type === "text"),
+  );
+  if (allText) {
+    const joined = mapped
+      .map((m) => (typeof m === "string" ? m : (m as { text?: string }).text ?? ""))
+      .filter(Boolean)
+      .join("\n");
+    return { content: joined };
+  }
+
   return { content: mapped };
 }
 
@@ -261,7 +289,7 @@ export function mapAnthropicToOpenAIChat(anthropicBody: string): string {
   }
 
   // Deep strip cache_control
-  const cleaned = stripCacheControl(result);
+  const cleaned = stripCacheControl(result) as Record<string, unknown>;
   return JSON.stringify(cleaned);
 }
 
@@ -363,7 +391,8 @@ export function mapOpenAIErrorToAnthropic(status: number, body: string): string 
  * - message_start/content_block_start initialization
  * - text_delta, thinking_delta, input_json_delta content streaming
  * - content_block_stop for switching between block types
- * - message_delta/message_stop on finish_reason or [DONE]
+ * - message_delta/message_stop on [DONE]
+ * - Multiple tool calls with proper block index tracking
  * - Flush fallback for incomplete streams
  */
 export function createOpenAIChatToAnthropicStream() {
@@ -374,8 +403,12 @@ export function createOpenAIChatToAnthropicStream() {
 
   let started = false;
   let closed = false;
-  let currentBlockType: "text" | "thinking" | "tool_use" | null = null;
-  let toolArgsBuffer = "";
+  let currentBlockType: "text" | "thinking" | null = null;
+  let currentBlockIndex = 0;
+  let hasToolCalls = false;
+
+  // Track tool calls by OpenAI index → block index mapping
+  const toolBlockIndices = new Map<number, number>();
 
   type PushFn = (data: string) => boolean;
 
@@ -391,6 +424,7 @@ export function createOpenAIChatToAnthropicStream() {
             model,
             content: [],
             stop_reason: null,
+            stop_sequence: null,
             usage: { input_tokens: inputTokens, output_tokens: 0 },
           },
         })}\n\n`,
@@ -399,23 +433,56 @@ export function createOpenAIChatToAnthropicStream() {
     }
   }
 
-  function closeBlock(push: PushFn) {
-    if (currentBlockType) {
-      push(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
+  function closeBlock(push: PushFn, index: number) {
+    push(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index })}\n\n`);
+  }
+
+  function closeCurrentBlock(push: PushFn) {
+    if (currentBlockType !== null) {
+      closeBlock(push, currentBlockIndex);
+      currentBlockIndex++;
       currentBlockType = null;
     }
   }
 
-  function emitClosingEvents(push: PushFn) {
+  function mapFinishReason(reason: string): string {
+    switch (reason) {
+      case "tool_calls":
+        return "tool_use";
+      case "stop":
+        return "end_turn";
+      case "length":
+        return "max_tokens";
+      case "content_filter":
+        return "end_turn";
+      default:
+        return "end_turn";
+    }
+  }
+
+  function emitClosingEvents(push: PushFn, finishReason?: string) {
     if (closed) return;
     closed = true;
-    closeBlock(push);
-    const stopReason = toolArgsBuffer ? "tool_use" : "end_turn";
+
+    // Close any open text/thinking block
+    closeCurrentBlock(push);
+
+    // Close all open tool blocks
+    for (const [_tcIndex, blockIdx] of toolBlockIndices) {
+      closeBlock(push, blockIdx);
+    }
+    toolBlockIndices.clear();
+
+    // Determine stop_reason: prefer explicit finish_reason, fall back to tool call presence
+    const stopReason = finishReason
+      ? mapFinishReason(finishReason)
+      : (hasToolCalls ? "tool_use" : "end_turn");
+
     push(
       `event: message_delta\ndata: ${JSON.stringify({
         type: "message_delta",
-        delta: { stop_reason: stopReason },
-        usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+        delta: { stop_reason: stopReason, stop_sequence: null },
+        usage: { output_tokens: outputTokens, input_tokens: inputTokens },
       })}\n\n`,
     );
     push(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
@@ -436,29 +503,18 @@ export function createOpenAIChatToAnthropicStream() {
     emitMessageStart(push);
     const delta = choice.delta;
 
-    // Handle role/assistant start
-    if (delta?.role === "assistant" && !currentBlockType) {
-      currentBlockType = "text";
-      push(
-        `event: content_block_start\ndata: ${JSON.stringify({
-          type: "content_block_start",
-          index: 0,
-          content_block: { type: "text", text: "" },
-        })}\n\n`,
-      );
-    }
-
     // Handle reasoning_content -> thinking block
     if (delta?.reasoning_content) {
+      // Close text block if we're transitioning from text to thinking
       if (currentBlockType === "text") {
-        push(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
+        closeCurrentBlock(push);
       }
       if (currentBlockType !== "thinking") {
         currentBlockType = "thinking";
         push(
           `event: content_block_start\ndata: ${JSON.stringify({
             type: "content_block_start",
-            index: 0,
+            index: currentBlockIndex,
             content_block: { type: "thinking", thinking: "" },
           })}\n\n`,
         );
@@ -466,7 +522,7 @@ export function createOpenAIChatToAnthropicStream() {
       push(
         `event: content_block_delta\ndata: ${JSON.stringify({
           type: "content_block_delta",
-          index: 0,
+          index: currentBlockIndex,
           delta: { type: "thinking_delta", thinking: delta.reasoning_content },
         })}\n\n`,
       );
@@ -475,15 +531,16 @@ export function createOpenAIChatToAnthropicStream() {
 
     // Handle text content
     if (delta?.content) {
+      // Close thinking block if we're transitioning from thinking to text
       if (currentBlockType === "thinking") {
-        push(`event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`);
+        closeCurrentBlock(push);
       }
       if (currentBlockType !== "text") {
         currentBlockType = "text";
         push(
           `event: content_block_start\ndata: ${JSON.stringify({
             type: "content_block_start",
-            index: 0,
+            index: currentBlockIndex,
             content_block: { type: "text", text: "" },
           })}\n\n`,
         );
@@ -491,7 +548,7 @@ export function createOpenAIChatToAnthropicStream() {
       push(
         `event: content_block_delta\ndata: ${JSON.stringify({
           type: "content_block_delta",
-          index: 0,
+          index: currentBlockIndex,
           delta: { type: "text_delta", text: delta.content },
         })}\n\n`,
       );
@@ -501,62 +558,93 @@ export function createOpenAIChatToAnthropicStream() {
     // Handle tool_calls
     if (delta?.tool_calls) {
       for (const tc of delta.tool_calls) {
-        // New tool call with id
+        const tcIndex = tc.index ?? 0;
+
+        // New tool call with id — start a new content block
         if (tc.id) {
-          closeBlock(push);
-          currentBlockType = "tool_use";
-          toolArgsBuffer = "";
+          hasToolCalls = true;
+          // Close any open text/thinking block
+          closeCurrentBlock(push);
+
+          const blockIdx = currentBlockIndex;
+          toolBlockIndices.set(tcIndex, blockIdx);
 
           push(
             `event: content_block_start\ndata: ${JSON.stringify({
               type: "content_block_start",
-              index: 0,
+              index: blockIdx,
               content_block: { type: "tool_use", id: tc.id, name: tc.function?.name ?? "", input: {} },
             })}\n\n`,
           );
+
+          currentBlockIndex++;
         }
 
-        // Accumulate arguments
+        // Stream argument deltas using the correct block index for this tool call
         if (tc.function?.arguments) {
-          toolArgsBuffer += tc.function.arguments;
-          push(
-            `event: content_block_delta\ndata: ${JSON.stringify({
-              type: "content_block_delta",
-              index: 0,
-              delta: { type: "input_json_delta", partial_json: tc.function.arguments },
-            })}\n\n`,
-          );
+          const blockIdx = toolBlockIndices.get(tcIndex);
+          if (blockIdx !== undefined) {
+            push(
+              `event: content_block_delta\ndata: ${JSON.stringify({
+                type: "content_block_delta",
+                index: blockIdx,
+                delta: { type: "input_json_delta", partial_json: tc.function.arguments },
+              })}\n\n`,
+            );
+          }
         }
       }
       return;
     }
 
-    // Handle finish_reason
-    if (choice.finish_reason) {
-      emitClosingEvents(push);
-    }
+    // Note: We do NOT close blocks on finish_reason.
+    // Block closing is handled at [DONE] to avoid premature closes
+    // with providers that send finish_reason on every chunk.
+    // We just capture the finish_reason for stop_reason mapping.
   }
+
+  // Buffer for incomplete lines across chunks
+  let lineBuffer = "";
 
   return new Transform({
     transform(chunk: Buffer, _encoding: BufferEncoding, callback: () => void) {
-      const lines = chunk.toString().split("\n");
+      console.warn(`[openai-transform] Received chunk: ${chunk.toString().slice(0, 200)}`);
+      const text = lineBuffer + chunk.toString();
+      const lines = text.split("\n");
+      // Last element might be incomplete — save for next chunk
+      lineBuffer = lines.pop() ?? "";
+
       const push = this.push.bind(this);
+      const debugPush: PushFn = (data: string) => {
+        console.warn(`[openai-push] ${data.slice(0, 150)}`);
+        return push(data);
+      };
+      let lastFinishReason: string | null = null;
 
       for (const line of lines) {
-        if (!line.startsWith("data: ")) continue;
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
 
-        const data = line.slice(6).trim();
+        // Handle both "data: ..." and "data:..." (with/without space)
+        const data = trimmed.startsWith("data: ") ? trimmed.slice(6).trim() : trimmed.slice(5).trim();
         if (data === "[DONE]") {
-          emitMessageStart(push);
-          emitClosingEvents(push);
+          emitMessageStart(debugPush);
+          emitClosingEvents(debugPush, lastFinishReason ?? undefined);
           callback();
           return;
         }
 
         try {
-          processChunk(JSON.parse(data), push);
+          const parsed = JSON.parse(data);
+          // Capture finish_reason from the chunk for stop_reason mapping
+          const choice = parsed.choices?.[0];
+          if (choice?.finish_reason) {
+            lastFinishReason = choice.finish_reason;
+          }
+          processChunk(parsed, debugPush);
         } catch {
-          // Skip invalid JSON
+          // Skip invalid JSON — likely a partial chunk that spans boundaries
+          // (handled by lineBuffer on next chunk)
         }
       }
       callback();
@@ -569,6 +657,84 @@ export function createOpenAIChatToAnthropicStream() {
       callback();
     },
   });
+}
+
+/**
+ * Converts a non-streaming OpenAI Chat Completions JSON response to Anthropic SSE format.
+ * Used when the upstream returns application/json instead of text/event-stream.
+ */
+export function mapOpenAIChatJsonToAnthropicSSE(body: string): string {
+  const parsed = JSON.parse(body);
+  const messageId = `msg_${parsed.id ?? Math.random().toString(36).substring(2, 15)}`;
+  const model = parsed.model ?? "model";
+  const choice = parsed.choices?.[0];
+  const message = choice?.message;
+  const finishReason = choice?.finish_reason;
+  const usage = parsed.usage ?? {};
+  const inputTokens = usage.prompt_tokens ?? 0;
+  const outputTokens = usage.completion_tokens ?? 0;
+
+  const events: string[] = [];
+
+  // message_start
+  events.push(`event: message_start\ndata: ${JSON.stringify({
+    type: "message_start",
+    message: {
+      id: messageId, type: "message", role: "assistant", model, content: [],
+      stop_reason: null, stop_sequence: null,
+      usage: { input_tokens: inputTokens, output_tokens: 0 },
+    },
+  })}\n\n`);
+
+  let blockIndex = 0;
+
+  // Text content
+  if (message?.content) {
+    events.push(`event: content_block_start\ndata: ${JSON.stringify({
+      type: "content_block_start", index: blockIndex,
+      content_block: { type: "text", text: "" },
+    })}\n\n`);
+    events.push(`event: content_block_delta\ndata: ${JSON.stringify({
+      type: "content_block_delta", index: blockIndex,
+      delta: { type: "text_delta", text: message.content },
+    })}\n\n`);
+    events.push(`event: content_block_stop\ndata: ${JSON.stringify({
+      type: "content_block_stop", index: blockIndex,
+    })}\n\n`);
+    blockIndex++;
+  }
+
+  // Tool calls
+  if (message?.tool_calls?.length) {
+    for (const tc of message.tool_calls) {
+      let input: unknown = {};
+      try { input = JSON.parse(tc.function?.arguments ?? "{}"); } catch { /* keep empty */ }
+      events.push(`event: content_block_start\ndata: ${JSON.stringify({
+        type: "content_block_start", index: blockIndex,
+        content_block: { type: "tool_use", id: tc.id, name: tc.function?.name ?? "", input: {} },
+      })}\n\n`);
+      events.push(`event: content_block_delta\ndata: ${JSON.stringify({
+        type: "content_block_delta", index: blockIndex,
+        delta: { type: "input_json_delta", partial_json: JSON.stringify(input) },
+      })}\n\n`);
+      events.push(`event: content_block_stop\ndata: ${JSON.stringify({
+        type: "content_block_stop", index: blockIndex,
+      })}\n\n`);
+      blockIndex++;
+    }
+  }
+
+  // message_delta + message_stop
+  const stopReason = message?.tool_calls?.length ? "tool_use"
+    : finishReason === "length" ? "max_tokens" : "end_turn";
+  events.push(`event: message_delta\ndata: ${JSON.stringify({
+    type: "message_delta",
+    delta: { stop_reason: stopReason, stop_sequence: null },
+    usage: { output_tokens: outputTokens, input_tokens: inputTokens },
+  })}\n\n`);
+  events.push(`event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`);
+
+  return events.join("");
 }
 
 /**

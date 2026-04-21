@@ -725,7 +725,15 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       }
       const latencyMs = Date.now() - ctx.startTime;
       setImmediate(() => {
-        ctx._streamState = transitionStreamState(ctx, "complete", ctx.requestId);
+        // For streaming responses, do NOT transition to "complete" here.
+        // The proxy's safeClose() handles stream completion when passThrough ends.
+        // Premature "complete" blocks the data handler (proxy.ts passThrough.on("data"))
+        // which drops all chunks when ctx._streamState === "complete".
+        // Only transition for non-streaming responses (no ReadableStream body).
+        const isStreaming = response.body instanceof ReadableStream;
+        if (!isStreaming) {
+          ctx._streamState = transitionStreamState(ctx, "complete", ctx.requestId);
+        }
         if (ctx._streamState !== "complete") return;
         broadcastStreamEvent({
           requestId,
