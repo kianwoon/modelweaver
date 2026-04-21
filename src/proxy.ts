@@ -737,7 +737,18 @@ export async function forwardRequest(
       const parsed = JSON.parse(body);
       if (Array.isArray(parsed.messages) && parsed.messages.length > provider.maxContextMessages) {
         const original = parsed.messages.length;
-        let trimmed = parsed.messages.slice(-provider.maxContextMessages);
+        const allMsgs = parsed.messages;
+
+        // Preserve the original task instruction (first non-tool user message)
+        let firstInstruction: any = null;
+        for (const msg of allMsgs) {
+          if (msg.role === "user" && !(Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result"))) {
+            firstInstruction = msg;
+            break;
+          }
+        }
+
+        let trimmed = allMsgs.slice(-provider.maxContextMessages);
         // Align to safe boundary: find the first `user` message that is NOT a tool_result.
         // This avoids orphaned tool_result entries (which need a preceding tool_use).
         let safeStart = 0;
@@ -754,9 +765,15 @@ export async function forwardRequest(
           }
         }
         if (safeStart > 0) trimmed = trimmed.slice(safeStart);
+
+        // Prepend the original instruction if it was trimmed away and isn't already in the array
+        if (firstInstruction && trimmed[0] !== firstInstruction) {
+          trimmed = [firstInstruction, ...trimmed];
+        }
+
         parsed.messages = trimmed;
         body = JSON.stringify(parsed);
-        console.warn(`[context-trim] Trimmed messages from ${original} to ${trimmed.length} (limit: ${provider.maxContextMessages}) for provider ${provider.name}`);
+        console.warn(`[context-trim] Trimmed messages from ${original} to ${trimmed.length} (limit: ${provider.maxContextMessages}, instruction preserved: ${firstInstruction !== null}) for provider ${provider.name}`);
       }
     } catch {
       // If body can't be parsed, skip trimming
