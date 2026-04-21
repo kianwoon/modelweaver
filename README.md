@@ -30,6 +30,12 @@ No config file editing. No provider SDK installs. The wizard tests your API key 
 
 
 
+## What's New — v0.3.75
+
+- **Per-provider context message trimming** — set `maxContextMessages` to limit outgoing conversation history, reducing token waste on long sessions (#239)
+- **Stream state race fix** — fixed truncated responses when using OpenAI-compatible upstream providers (eager Transform streams)
+- **Version-aware URL construction** — OpenAI adapter now handles versioned base URLs (e.g., `/v4`) without double-prefixing
+
 ## What's New — v0.3.73
 
 - **OpenAI-compatible upstream providers** — Chat Completions (`/v1/chat/completions`) and Responses API (`/v1/responses`) formats with full Anthropic downstream compatibility (#240)
@@ -88,6 +94,7 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)       [Anthr
 - **Health scores** — per-provider health scoring based on latency and error rates
 - **Provider error tracking** — per-provider error counts with status code breakdown, displayed in GUI in real-time
 - **Concurrent limits** — cap concurrent requests per provider
+- **Context message trimming** — limit outgoing conversation history per provider with `maxContextMessages`, keeps only the most recent messages to reduce token waste
 - **Interactive setup wizard** — guided configuration with API key validation, hedging config, and provider editing
 - **Config hot-reload** — changes to config file are picked up automatically, no restart needed
 - **Daemon mode** — background process with auto-restart, launchd integration, and reload support
@@ -330,6 +337,7 @@ providers:
     stallTimeout: 15000           # Stall detection timeout (default: 15000)
     poolSize: 10                  # Connection pool size   (default: 10)
     concurrentLimit: 10           # Max concurrent requests (default: unlimited)
+    maxContextMessages: 50        # Keep only last N messages (optional, trims long conversations)
     connectionRetries: 3          # Retries for stale connections (default: 3, max: 10)
     staleAgentThresholdMs: 30000  # Mark pooled agent stale after idle ms (optional)
     rateLimitBackoffMs: 2000      # Backoff after 429/503 in ms (optional, overrides Retry-After)
@@ -641,6 +649,18 @@ providers:
     authType: bearer
     apiFormat: openai-chat
 ```
+
+**Long conversations waste tokens on upstream providers?**
+
+Set `maxContextMessages` on a provider to trim outgoing message history to the most recent N messages. The `system` prompt is always preserved.
+
+```yaml
+providers:
+  my-provider:
+    maxContextMessages: 50    # Only send last 50 messages upstream
+```
+
+This is hot-reloaded — edit the config and the daemon picks it up immediately.
 
 ## License
 
