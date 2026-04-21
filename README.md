@@ -30,6 +30,11 @@ No config file editing. No provider SDK installs. The wizard tests your API key 
 
 
 
+## What's New — v0.3.83
+
+- **Empty response detection** — detects when upstream providers return empty `end_turn` (0 output tokens, no content) and automatically retries with the next provider in the fallback chain (#248)
+- **Context trimming fixes** — duplicate instruction prevention, accurate `needsInstruction` check, missing `input_tokens` in synthetic SSE events (#247)
+
 ## What's New — v0.3.75
 
 - **Per-provider context message trimming** — set `maxContextMessages` to limit outgoing conversation history, reducing token waste on long sessions (#239)
@@ -83,6 +88,7 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)       [Anthr
 - **Request hedging** — sends multiple copies when a provider shows high latency variance (CV > 0.5), returns the fastest response (skipped for single-provider chains to avoid rate-limit amplification)
 - **TTFB timeout** — fails slow providers before full timeout elapses (configurable per provider)
 - **Stall detection** — detects stalled streams and aborts them, triggering fallback
+- **Empty response detection** — detects empty `end_turn` responses (0 output tokens, no content) and retries with the next provider
 - **Connection pooling** — per-provider undici Agent dispatcher with configurable pool size
 - **Per-model connection pools** — isolate HTTP/2 connections per model via `modelPools` config for TCP-level isolation
 - **Connection retry** — automatic retry with exponential backoff for stale connections, TTFB timeouts, and GOAWAY drains
