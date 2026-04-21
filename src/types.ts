@@ -15,6 +15,8 @@ export interface ProviderConfig {
   apiFormat?: "anthropic" | "openai-chat" | "openai-responses";
   modelLimits?: ModelLimits;
   concurrentLimit?: number;
+  /** Max conversation messages to forward upstream. Keeps only the most recent N messages. */
+  maxContextMessages?: number;
 
   /** Runtime-only cached fields — not serialized to config */
   _cachedHost?: string;

@@ -731,6 +731,21 @@ export async function forwardRequest(
     body = ctx.rawBody;
   }
 
+  // Trim conversation history if maxContextMessages is configured
+  if (provider.maxContextMessages) {
+    try {
+      const parsed = JSON.parse(body);
+      if (Array.isArray(parsed.messages) && parsed.messages.length > provider.maxContextMessages) {
+        const original = parsed.messages.length;
+        parsed.messages = parsed.messages.slice(-provider.maxContextMessages);
+        body = JSON.stringify(parsed);
+        console.warn(`[context-trim] Trimmed messages from ${original} to ${provider.maxContextMessages} for provider ${provider.name}`);
+      }
+    } catch {
+      // If body can't be parsed, skip trimming
+    }
+  }
+
   const headers = buildOutboundHeaders(incomingRequest.headers, provider, ctx.requestId);
 
   // Apply adapter transformation for non-Anthropic formats
@@ -742,8 +757,6 @@ export async function forwardRequest(
     const transformed = adapter.transformRequest(body, headersObj);
     requestBody = transformed.body;
     requestHeaders = new Headers(Object.entries(transformed.headers));
-    // DEBUG: log outbound auth and URL
-    console.warn(`[adapter-debug] auth=${requestHeaders.get("authorization")?.slice(0, 20)}... model=${JSON.parse(requestBody).model} url=${adapter.buildUpstreamUrl(provider.baseUrl, incomingRequest.url, ctx.actualModel ?? ctx.model)}`);
 
     // Apply model override to the request body (routing may map e.g. glm-5-turbo → glm-5)
     if (ctx.actualModel) {
