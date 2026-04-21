@@ -738,6 +738,7 @@ export async function forwardRequest(
       if (Array.isArray(parsed.messages) && parsed.messages.length > provider.maxContextMessages) {
         const original = parsed.messages.length;
         const allMsgs = parsed.messages;
+        const limit = provider.maxContextMessages;
 
         // Preserve the original task instruction (first non-tool user message)
         let firstInstruction: any = null;
@@ -748,32 +749,41 @@ export async function forwardRequest(
           }
         }
 
-        let trimmed = allMsgs.slice(-provider.maxContextMessages);
-        // Align to safe boundary: find the first `user` message that is NOT a tool_result.
-        // This avoids orphaned tool_result entries (which need a preceding tool_use).
-        let safeStart = 0;
-        for (let i = 0; i < trimmed.length; i++) {
-          const msg = trimmed[i];
+        // Identify turn boundaries: a turn starts at each `user` message that is NOT a tool_result.
+        // Everything between two turn boundaries is one complete turn (tool_use/tool_result pairs stay together).
+        const turnStarts: number[] = [];
+        for (let i = 0; i < allMsgs.length; i++) {
+          const msg = allMsgs[i];
           if (msg.role === "user" && !(Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result"))) {
-            safeStart = i;
-            break;
+            turnStarts.push(i);
           }
-          // Also accept a plain assistant text message as a safe start
-          if (msg.role === "assistant" && typeof msg.content === "string") {
-            safeStart = i;
+        }
+
+        // Binary search: find the earliest turn start where messages from that turn onward fit within limit.
+        // Each turn = allMsgs[turnStarts[i] .. turnStarts[i+1]-1], last turn = allMsgs[turnStarts[i] .. end]
+        let bestStart = 0;
+        for (const start of turnStarts) {
+          const count = allMsgs.length - start;
+          // Reserve 1 slot for the prepended instruction if it would be outside this range
+          const needsInstruction = firstInstruction && start > 0 && allMsgs[start] !== firstInstruction;
+          const total = needsInstruction ? count + 1 : count;
+          if (total <= limit) {
+            bestStart = start;
             break;
           }
         }
-        if (safeStart > 0) trimmed = trimmed.slice(safeStart);
 
-        // Prepend the original instruction if it was trimmed away and isn't already in the array
+        let trimmed = allMsgs.slice(bestStart);
+
+        // Prepend the original instruction if it was trimmed away
         if (firstInstruction && trimmed[0] !== firstInstruction) {
           trimmed = [firstInstruction, ...trimmed];
         }
 
         parsed.messages = trimmed;
         body = JSON.stringify(parsed);
-        console.warn(`[context-trim] Trimmed messages from ${original} to ${trimmed.length} (limit: ${provider.maxContextMessages}, instruction preserved: ${firstInstruction !== null}) for provider ${provider.name}`);
+        const turnsKept = turnStarts.filter(s => s >= bestStart).length;
+        console.warn(`[context-trim] Trimmed messages from ${original} to ${trimmed.length} (${turnsKept} turns, limit: ${limit}, instruction preserved: ${firstInstruction !== null}) for provider ${provider.name}`);
       }
     } catch {
       // If body can't be parsed, skip trimming
