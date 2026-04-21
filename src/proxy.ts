@@ -756,6 +756,16 @@ export async function forwardRequest(
             console.warn(`[context-trim] Force trimming (${original} msgs, ceiling: ${hardCeiling}) — exceeded 1.5x limit during active tool chain for provider ${provider.name}`);
           }
 
+          // Helper: is this message a real turn start (user text, not tool_result, not our injected hint)?
+          const isTurnStart = (msg: any): boolean => {
+            if (msg.role !== "user") return false;
+            if (Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result")) return false;
+            // Exclude injected context-trim hints (array with single text block starting with "[System:")
+            if (Array.isArray(msg.content) && msg.content.length === 1 && msg.content[0]?.type === "text" &&
+                typeof msg.content[0].text === "string" && msg.content[0].text.startsWith("[System:")) return false;
+            return true;
+          };
+
           // Find the best task instruction: longest user text message in the first 20% of conversation.
           // "First non-tool user" can be trivial like "ok" — the longest message is more likely the real task.
           let bestInstruction: any = null;
@@ -763,23 +773,20 @@ export async function forwardRequest(
           const searchEnd = Math.max(3, Math.floor(allMsgs.length * 0.2));
           for (let i = 0; i < Math.min(allMsgs.length, searchEnd); i++) {
             const msg = allMsgs[i];
-            if (msg.role === "user") {
+            if (isTurnStart(msg)) {
               const text = typeof msg.content === "string" ? msg.content :
                 Array.isArray(msg.content) ? msg.content.filter((b: any) => b?.type === "text").map((b: any) => b.text).join("") : "";
-              if (text.length > bestLen && !msg.content?.some?.((b: any) => b?.type === "tool_result")) {
+              if (text.length > bestLen) {
                 bestLen = text.length;
                 bestInstruction = msg;
               }
             }
           }
 
-          // Identify turn boundaries: a turn starts at each `user` message that is NOT a tool_result.
+          // Identify turn boundaries.
           const turnStarts: number[] = [];
           for (let i = 0; i < allMsgs.length; i++) {
-            const msg = allMsgs[i];
-            if (msg.role === "user" && !(Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result"))) {
-              turnStarts.push(i);
-            }
+            if (isTurnStart(allMsgs[i])) turnStarts.push(i);
           }
 
           // Find the earliest turn start where messages fit within limit (accounting for instruction + hint = +2)
@@ -799,16 +806,17 @@ export async function forwardRequest(
           // hard-cut from the back and align to safe boundary.
           if (bestStart === 0 && original > limit) {
             const cutPoint = Math.max(0, original - limit + extraSlots);
-            // Find safe start: skip forward from cutPoint to first non-tool-result user message
+            // Try to find a real turn start first
             for (let i = cutPoint; i < allMsgs.length; i++) {
-              const msg = allMsgs[i];
-              const isToolResult = msg.role === "user" &&
-                Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result");
-              if (!isToolResult) {
+              if (isTurnStart(allMsgs[i])) {
                 bestStart = i;
                 break;
               }
             }
+            // If still no turn start found (entire conversation is one tool chain),
+            // just hard-cut at cutPoint. Some tool_results may be orphaned but this is
+            // better than sending the entire conversation and hitting context overflow.
+            if (bestStart === 0) bestStart = cutPoint;
           }
 
           let trimmed = allMsgs.slice(bestStart);
