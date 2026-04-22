@@ -552,7 +552,6 @@ const TOOL_BUCKET: Record<string, CompressionBucket> = {
   grep: "structured",
   glob: "structured",
   WebSearch: "structured",
-  WebFetch: "structured",
   search: "structured",
   list: "structured",
 };
@@ -561,6 +560,19 @@ const LOGS_HEAD_LINES = 20;
 const LOGS_TAIL_LINES = 50;
 const ERROR_LINE_RE = /\b(Error|error|FAIL|fatal|WARN|warn|Exception|TypeError|ReferenceError|SyntaxError|exit code|EXIT|FAILED|SEVERE)\b/;
 
+/** Slice text safely — repairs truncated UTF-16 surrogate pairs at boundaries. */
+function safeSlice(text: string, start: number, end?: number): string {
+  const s = text.slice(start, end);
+  if (s.length === 0) return s;
+  // Repair trailing lone high surrogate (split before the low surrogate)
+  const last = s.charCodeAt(s.length - 1);
+  if (last >= 0xD800 && last <= 0xDBFF) return s.slice(0, -1);
+  // Repair leading lone low surrogate (split after the high surrogate)
+  const first = s.charCodeAt(0);
+  if (first >= 0xDC00 && first <= 0xDFFF) return s.slice(1);
+  return s;
+}
+
 function compressSource(text: string, limit: number, toolName: string): string {
   const truncated = text.length - limit;
   // Compute separator first, deduct its length from the content budget
@@ -568,8 +580,8 @@ function compressSource(text: string, limit: number, toolName: string): string {
   const contentBudget = limit - sep.length;
   const headChars = Math.floor(contentBudget * 0.6);
   const tailChars = contentBudget - headChars;
-  const head = text.slice(0, Math.max(0, headChars));
-  const tail = text.slice(Math.max(0, text.length - tailChars));
+  const head = safeSlice(text, 0, Math.max(0, headChars));
+  const tail = safeSlice(text, Math.max(0, text.length - tailChars));
   return `${head}${sep}${tail}`;
 }
 
@@ -646,8 +658,8 @@ function compressDefault(text: string, limit: number, toolName: string): string 
   const sep = `\n\n... [${truncated.toLocaleString()} chars compressed from ${toolName}] ...\n\n`;
   const contentBudget = limit - sep.length;
   const half = Math.floor(contentBudget / 2);
-  const head = text.slice(0, Math.max(0, half));
-  const tail = text.slice(Math.max(0, text.length - half));
+  const head = safeSlice(text, 0, Math.max(0, half));
+  const tail = safeSlice(text, Math.max(0, text.length - half));
   return `${head}${sep}${tail}`;
 }
 
