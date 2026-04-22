@@ -1435,6 +1435,7 @@ export async function forwardRequest(
     let sawContentBlockStart = false;
     let sawContentBlockStop = false;
     let sawMessageStop = false;
+    let sawRealContent = false; // true only when text_delta has non-empty text or tool_use appears
     let _rollingTail = "";
 
     // Empty response inspection: resolves when we know whether the upstream
@@ -1451,23 +1452,46 @@ export async function forwardRequest(
       // that may span chunk boundaries.
       (passThrough as any)._bytesForwarded = ((passThrough as any)._bytesForwarded || 0) + chunk.length;
       if (!sawMessageStop) {
-        _rollingTail = (_rollingTail + chunk.toString("utf8")).slice(-500);
+        const chunkText = chunk.toString("utf8");
+        _rollingTail = (_rollingTail + chunkText).slice(-500);
         if (!sawMessageStart && _rollingTail.includes('"message_start"')) sawMessageStart = true;
         if (!sawContentBlockStart && _rollingTail.includes('"content_block_start"')) sawContentBlockStart = true;
         if (!sawContentBlockStop && _rollingTail.includes('"content_block_stop"')) sawContentBlockStop = true;
         if (_rollingTail.includes('"message_stop"')) sawMessageStop = true;
+        // Detect real content: text_delta with non-empty text, or tool_use blocks.
+        // OpenAI adapters emit synthetic text_delta events even for empty responses,
+        // so we must check that actual text content exists.
+        if (!sawRealContent) {
+          if (HAS_TOOL_USE_RE.test(chunkText)) {
+            sawRealContent = true;
+          } else {
+            // Match "text_delta" with non-empty text: "text":"<at least 1 non-quote char>"
+            // Avoids false positive from transform's synthetic empty text_delta.
+            const textDeltaMatch = chunkText.match(/"type"\s*:\s*"text_delta"[^}]*"text"\s*:\s*"([^"]+)"/);
+            if (textDeltaMatch && textDeltaMatch[1].length > 0) {
+              sawRealContent = true;
+            }
+          }
+        }
       }
 
       // Empty response inspection: check if this is an empty end_turn.
-      // Once we see content (text_delta or tool_use), it's normal — resolve immediately.
-      // Once we see message_stop without any content, check for empty end_turn pattern.
+      // sawRealContent means we got actual text or tool_use — definitely normal.
+      // sawContentBlockStart without sawRealContent means the OpenAI transform
+      // emitted synthetic events for an empty upstream — keep inspecting.
+      // Once we see message_stop without real content, trigger fallback.
       if (inspectResolve) {
-        if (sawContentBlockStart) {
-          // Content is flowing — normal response
+        if (sawRealContent) {
+          // Real content flowing — normal response
           inspectResolve("normal");
           inspectResolve = undefined;
+        } else if (sawMessageStop && !sawRealContent) {
+          // Stream completed without any real content
+          console.warn(`[empty-response] Provider "${provider.name}" returned empty/malformed response (no real content) — triggering fallback`);
+          inspectResolve("empty");
+          inspectResolve = undefined;
         } else if (sawMessageStop && isEmptyEndTurn(_rollingTail)) {
-          // Stream completed with end_turn + 0 output + no content
+          // Anthropic-native empty end_turn detection (fallback for non-adapted streams)
           console.warn(`[empty-response] Provider "${provider.name}" returned empty end_turn — triggering fallback`);
           inspectResolve("empty");
           inspectResolve = undefined;
@@ -1638,8 +1662,8 @@ export async function forwardRequest(
           // Inject a complete synthetic SSE message so Claude Code gets a parseable
           // response instead of crashing on empty content.
           const bytes = (passThrough as any)._bytesForwarded ?? 0;
-          if (bytes === 0 || !sawMessageStart) {
-            console.warn(`[safeClose] Empty/malformed stream: bytes=${bytes} msgStart=${sawMessageStart} — injecting error message`);
+          if (bytes === 0 || !sawMessageStart || !sawRealContent) {
+            console.warn(`[safeClose] Empty/malformed stream: bytes=${bytes} msgStart=${sawMessageStart} realContent=${sawRealContent} — injecting error message`);
             const msgId = `msg_proxy_empty_${Date.now()}`;
             const errorChunks = [
               `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: "proxy", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`,
