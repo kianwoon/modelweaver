@@ -187,17 +187,7 @@ function isConnectionError502FromBody(body: string): boolean {
 // GLM upstream returns empty end_turn (output_tokens:0, no content) at 111K+ input tokens.
 // These are 200 responses with SSE — the fallback chain can't detect them.
 // Detection happens inside the passThrough data handler via a Promise-based inspection.
-const EMPTY_END_TURN_RE = /"stop_reason"\s*:\s*"end_turn"/;
-const ZERO_OUTPUT_RE = /"output_tokens"\s*:\s*0[,\s}]/;
-const HAS_TEXT_DELTA_RE = /"type"\s*:\s*"text_delta"/;
 const HAS_TOOL_USE_RE = /"type"\s*:\s*"tool_use"/;
-
-function isEmptyEndTurn(buf: string): boolean {
-  return EMPTY_END_TURN_RE.test(buf)
-    && ZERO_OUTPUT_RE.test(buf)
-    && !HAS_TEXT_DELTA_RE.test(buf)
-    && !HAS_TOOL_USE_RE.test(buf);
-}
 
 // Max wait (ms) for the SSE stream to reveal whether it's empty.
 // Empty GLM responses complete in <1s (no content to generate).
@@ -635,6 +625,10 @@ function compressStructured(text: string, limit: number, toolName: string): stri
   }
 
   // Still over limit — keep first half and last half of match lines
+  // Guard against kept.length <= 1: slice(-0) returns full array, causing negative midDropped
+  if (kept.length <= 1) {
+    return compressDefault(kept.length === 1 ? kept[0] : "", limit, toolName);
+  }
   const half = Math.floor(kept.length / 2);
   const headLines = kept.slice(0, half);
   const tailLines = kept.slice(-half);
@@ -859,6 +853,7 @@ export async function forwardRequest(
   // because Anthropic's cache breakpoints are position-sensitive and
   // JSON.stringify changes whitespace / key order, breaking cache hits.
   let body: string;
+  let parsedForTrim: Record<string, unknown> | undefined;
   const contentType = incomingRequest.headers.get("content-type") || "";
 
   if (contentType.includes("application/json")) {
@@ -967,6 +962,7 @@ export async function forwardRequest(
           }
 
           body = JSON.stringify(mutable);
+          parsedForTrim = mutable;
         }
       } else {
         // No modifications needed — passthrough raw body to preserve prompt caching
@@ -983,7 +979,8 @@ export async function forwardRequest(
   // Trim conversation history if maxContextMessages is configured
   if (provider.maxContextMessages) {
     try {
-      const parsed = JSON.parse(body);
+      // Reuse already-parsed object if available (avoids double JSON.parse)
+      const parsed = parsedForTrim ?? JSON.parse(body);
       if (Array.isArray(parsed.messages) && parsed.messages.length > provider.maxContextMessages) {
         const allMsgs = parsed.messages;
         const original = allMsgs.length;
@@ -1069,6 +1066,8 @@ export async function forwardRequest(
           }
 
           let trimmed = allMsgs.slice(bestStart);
+          // Count before instruction prepend so trimmedCount is accurate
+          const trimmedCount = original - trimmed.length;
 
           // Prepend the instruction if it was trimmed away
           if (bestInstruction && trimmed[0] !== bestInstruction) {
@@ -1077,8 +1076,7 @@ export async function forwardRequest(
 
           // Inject continuation hint as array content (not plain string) so it doesn't
           // create a fake turn boundary in future requests' turn detection.
-          const trimmedCount = original - trimmed.length;
-          if (trimmedCount > 0 && trimmed.length > 1) {
+          if (trimmedCount > 0 && trimmed.length > 0) {
             const hint = {
               role: "user",
               content: [{ type: "text", text: `[System: ${trimmedCount} earlier messages were trimmed to fit context window. Continue working on the original task — do not stop until it is fully complete.]` }],
@@ -1516,11 +1514,6 @@ export async function forwardRequest(
         } else if (sawMessageStop && !sawRealContent && !(passThrough as any)._intentionalClose) {
           // Stream completed without any real content (not a stall-handled close)
           console.warn(`[empty-response] Provider "${provider.name}" returned empty/malformed response (no real content) — triggering fallback`);
-          inspectResolve("empty");
-          inspectResolve = undefined;
-        } else if (sawMessageStop && isEmptyEndTurn(_rollingTail)) {
-          // Anthropic-native empty end_turn detection (fallback for non-adapted streams)
-          console.warn(`[empty-response] Provider "${provider.name}" returned empty end_turn — triggering fallback`);
           inspectResolve("empty");
           inspectResolve = undefined;
         }
