@@ -137,6 +137,7 @@ const providerSchema = z.object({
   modelLimits: modelLimitsSchema,
   concurrentLimit: z.number().int().min(1).optional(),
   maxContextMessages: z.number().int().positive().optional(),
+  toolResultLimit: z.number().int().positive().optional(),
   poolSize: z.number().int().min(1).max(100).optional(),
   modelPools: z.record(z.string(), z.number().int().min(1).max(50)).optional(),
   connectionRetries: z.number().int().min(0).max(10).optional(),
@@ -521,6 +522,8 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       modelLimits: p.modelLimits ? { maxOutputTokens: p.modelLimits.maxOutputTokens } : undefined,
       concurrentLimit: p.concurrentLimit,
       modelPools: p.modelPools !== undefined ? { ...p.modelPools } : undefined,
+      maxContextMessages: p.maxContextMessages,
+      toolResultLimit: p.toolResultLimit,
     };
     try {
       const parsedUrl = new URL(p.baseUrl);

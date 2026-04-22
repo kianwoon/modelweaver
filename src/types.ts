@@ -17,6 +17,8 @@ export interface ProviderConfig {
   concurrentLimit?: number;
   /** Max conversation messages to forward upstream. Keeps only the most recent N messages. */
   maxContextMessages?: number;
+  /** Max characters per tool_result content block. Head+tail truncation if exceeded. */
+  toolResultLimit?: number;
 
   /** Runtime-only cached fields — not serialized to config */
   _cachedHost?: string;

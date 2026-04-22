@@ -523,6 +523,184 @@ function cleanOrphanedToolMessages(body: Record<string, unknown>): void {
 }
 
 /**
+ * Compress tool_result content blocks using per-type strategies.
+ *
+ * 4 buckets based on tool name:
+ *   source     — Read: wider head (60/40), preserves line-numbered output
+ *   logs       — Bash: head 20 lines + error lines + tail 50 lines
+ *   structured — Grep/Glob/search: keep match lines, drop noise
+ *   default    — everything else: head+tail with guardrails
+ *
+ * Builds a tool_use_id -> tool_name index from assistant messages for bucket classification.
+ * Mutates body.messages in-place (same pattern as cleanOrphanedToolMessages).
+ */
+
+type CompressionBucket = "source" | "logs" | "structured" | "default";
+
+const TOOL_BUCKET: Record<string, CompressionBucket> = {
+  // Source material — exact lines matter
+  Read: "source",
+  read: "source",
+  // Execution output — preserve errors + tail
+  Bash: "logs",
+  bash: "logs",
+  "shell-exec": "logs",
+  // Structured lookup — keep matches, drop noise
+  Grep: "structured",
+  Glob: "structured",
+  grep: "structured",
+  glob: "structured",
+  WebSearch: "structured",
+  WebFetch: "structured",
+  search: "structured",
+  list: "structured",
+};
+
+const LOGS_HEAD_LINES = 20;
+const LOGS_TAIL_LINES = 50;
+const ERROR_LINE_RE = /\b(Error|error|FAIL|fatal|WARN|warn|Exception|TypeError|ReferenceError|SyntaxError|exit code|EXIT|FAILED|SEVERE)\b/;
+
+function compressSource(text: string, limit: number, toolName: string): string {
+  const headChars = Math.floor(limit * 0.6);
+  const tailChars = limit - headChars;
+  const head = text.slice(0, headChars);
+  const tail = text.slice(text.length - tailChars);
+  const truncated = text.length - limit;
+  return `${head}\n\n... [${truncated.toLocaleString()} chars compressed from ${toolName} — preserving top/bottom sections] ...\n\n${tail}`;
+}
+
+function compressLogs(text: string, limit: number, toolName: string): string {
+  const lines = text.split("\n");
+  if (lines.length <= LOGS_HEAD_LINES + LOGS_TAIL_LINES + 10) {
+    // Short enough — use default head+tail char compression
+    return compressDefault(text, limit, toolName);
+  }
+
+  const head = lines.slice(0, LOGS_HEAD_LINES);
+  const tail = lines.slice(-LOGS_TAIL_LINES);
+  const middle = lines.slice(LOGS_HEAD_LINES, -LOGS_TAIL_LINES);
+
+  // Extract error/warning lines from middle
+  const errorLines = middle.filter(l => ERROR_LINE_RE.test(l));
+
+  const skipped = middle.length - errorLines.length;
+  const parts: string[] = [...head];
+  if (errorLines.length > 0) {
+    parts.push(`\n... [${skipped} lines skipped, errors/warnings preserved] ...`);
+    parts.push(...errorLines);
+  } else {
+    parts.push(`\n... [${skipped} lines skipped] ...`);
+  }
+  parts.push(...tail);
+
+  const result = parts.join("\n");
+  if (result.length <= limit) return result;
+
+  // Still too long — fall back to char-level compression
+  return compressDefault(result, limit, toolName);
+}
+
+function compressStructured(text: string, limit: number, toolName: string): string {
+  const lines = text.split("\n");
+
+  // Keep substantive lines — drop blanks, separators, repeated headers
+  const kept: string[] = [];
+  let dropped = 0;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === "" || /^[─═─━─\-=]{3,}$/.test(trimmed)) {
+      dropped++;
+      continue;
+    }
+    kept.push(line);
+  }
+
+  const result = kept.join("\n");
+  if (result.length <= limit) {
+    return dropped > 0 ? `${result}\n\n[${dropped} blank/separator lines removed from ${toolName} result]` : result;
+  }
+
+  // Still over limit — keep first half and last half of match lines
+  const half = Math.floor(kept.length / 2);
+  const headLines = kept.slice(0, half);
+  const tailLines = kept.slice(-half);
+  const midDropped = kept.length - headLines.length - tailLines.length;
+  const compressed = `${headLines.join("\n")}\n\n... [${midDropped} results compressed from ${toolName}] ...\n\n${tailLines.join("\n")}`;
+
+  if (compressed.length <= limit) return compressed;
+
+  return compressDefault(compressed, limit, toolName);
+}
+
+function compressDefault(text: string, limit: number, toolName: string): string {
+  const half = Math.floor(limit / 2);
+  const head = text.slice(0, half);
+  const tail = text.slice(text.length - half);
+  const truncated = text.length - limit;
+  return `${head}\n\n... [${truncated.toLocaleString()} chars compressed from ${toolName}] ...\n\n${tail}`;
+}
+
+const COMPRESSORS: Record<CompressionBucket, (text: string, limit: number, toolName: string) => string> = {
+  source: compressSource,
+  logs: compressLogs,
+  structured: compressStructured,
+  default: compressDefault,
+};
+
+function compressToolResults(body: Record<string, unknown>, limit: number): void {
+  const messages = body.messages;
+  if (!Array.isArray(messages)) return;
+
+  // Fast exit: scan for tool_result blocks
+  let hasResults = false;
+  for (const msg of messages) {
+    if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block.type === "tool_result") { hasResults = true; break; }
+    }
+    if (hasResults) break;
+  }
+  if (!hasResults) return;
+
+  // Build tool_use_id -> tool_name index from assistant messages
+  const toolNames = new Map<string, string>();
+  for (const msg of messages) {
+    if (msg.role !== "assistant" || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block.type === "tool_use" && block.id && block.name) {
+        toolNames.set(String(block.id), String(block.name));
+      }
+    }
+  }
+
+  // Compress each tool_result block exceeding the limit
+  for (const msg of messages) {
+    if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+    for (const block of msg.content) {
+      if (block.type !== "tool_result") continue;
+
+      let text: string;
+      if (typeof block.content === "string") {
+        text = block.content;
+      } else if (Array.isArray(block.content)) {
+        text = block.content
+          .filter((b: any) => b.type === "text")
+          .map((b: any) => b.text)
+          .join("\n");
+      } else {
+        continue;
+      }
+
+      if (text.length <= limit) continue;
+
+      const toolName = toolNames.get(String(block.tool_use_id)) ?? "unknown";
+      const bucket = TOOL_BUCKET[toolName] ?? "default";
+      block.content = COMPRESSORS[bucket](text, limit, toolName);
+    }
+  }
+}
+
+/**
  * Apply targeted string replacements to rawBody to preserve prompt caching.
  * On the primary attempt (chainIndex === 0), we avoid full JSON.stringify which
  * breaks Anthropic's cache breakpoints (position-sensitive, whitespace/order-sensitive).
@@ -535,14 +713,14 @@ function applyTargetedReplacements(
   parsed: Record<string, unknown>,
   needsOrphanClean: boolean,
   needsThinkingStrip = false,
+  needsCompression = false,
 ): string {
-  // If orphan cleaning or thinking stripping is needed, fall back to full JSON
-  // (orphan clean requires structural changes; thinking requires nested-brace handling)
-  if (needsOrphanClean || needsThinkingStrip) {
-    // shallow clone: cleanOrphanedToolMessages reassigns body.messages
+  // If orphan cleaning, thinking stripping, or compression is needed, fall back to full JSON
+  if (needsOrphanClean || needsThinkingStrip || needsCompression) {
     const mutable = shallowCloneForMutation(parsed);
     if (entry.model) mutable.model = entry.model;
     if (needsOrphanClean) cleanOrphanedToolMessages(mutable);
+    if (provider.toolResultLimit) compressToolResults(mutable, provider.toolResultLimit);
     if (provider.modelLimits) {
       const { maxOutputTokens } = provider.modelLimits;
       const requested = typeof mutable.max_tokens === "number" ? mutable.max_tokens : maxOutputTokens;
@@ -701,14 +879,43 @@ export async function forwardRequest(
       const needsThinkingStrip = !!(provider._serverConfig?.disableThinking && parsed.thinking !== undefined);
       if (needsThinkingStrip) needsModification = true;
 
+      // Check 5: Tool result compression needed?
+      // Only trigger full mutation when tool_result blocks actually exist AND are oversized.
+      // Avoids forcing JSON.stringify on every request (breaks prompt cache).
+      let needsCompression = false;
+      if (provider.toolResultLimit && Array.isArray(parsed.messages)) {
+        for (const msg of parsed.messages) {
+          if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
+          for (const block of msg.content) {
+            if (block.type === "tool_result") {
+              // Found a tool_result — check if it's actually oversized
+              let textLen = 0;
+              if (typeof block.content === "string") textLen = block.content.length;
+              else if (Array.isArray(block.content)) {
+                for (const b of block.content) {
+                  if (b.type === "text" && typeof b.text === "string") textLen += b.text.length;
+                }
+              }
+              if (textLen > provider.toolResultLimit) {
+                needsCompression = true;
+                break;
+              }
+            }
+          }
+          if (needsCompression) break;
+        }
+      }
+      if (needsCompression) needsModification = true;
+
       if (needsModification) {
-        // On primary attempt (chainIndex === 0) without orphan cleaning, use targeted
-        // string replacements to preserve prompt caching. Anthropic's cache breakpoints
-        // are position-sensitive -- JSON.stringify changes whitespace/order, breaking hits.
-        if (chainIndex === 0 && !needsOrphanClean) {
+        // On primary attempt (chainIndex === 0) without orphan cleaning or compression,
+        // use targeted string replacements to preserve prompt caching.
+        // Anthropic's cache breakpoints are position-sensitive -- JSON.stringify changes
+        // whitespace/order, breaking hits.
+        if (chainIndex === 0 && !needsOrphanClean && !needsCompression) {
           body = applyTargetedReplacements(ctx.rawBody, entry, provider, parsed, false, needsThinkingStrip);
         } else {
-          // Fallback attempts: full JSON parse/mutate/stringify (caching already broken)
+          // Full JSON parse/mutate/stringify (caching already broken or compression needed)
           // shallow clone: cleanOrphanedToolMessages reassigns body.messages
           const mutable = shallowCloneForMutation(parsed);
 
@@ -724,6 +931,10 @@ export async function forwardRequest(
 
           if (needsOrphanClean) {
             cleanOrphanedToolMessages(mutable);
+          }
+
+          if (provider.toolResultLimit) {
+            compressToolResults(mutable, provider.toolResultLimit);
           }
 
           if (provider.modelLimits) {
@@ -1379,6 +1590,19 @@ export async function forwardRequest(
 
     passThrough.on("end", () => {
       if (stallTimerRef) { clearTimeout(stallTimerRef); stallTimerRef = undefined; }
+      // Stream ended without any SSE data — resolve as empty so the inspection
+      // path triggers fallback instead of forwarding a blank response.
+      const bytes = (passThrough as any)._bytesForwarded ?? 0;
+      if (inspectResolve && bytes === 0) {
+        console.warn(`[empty-response] Provider "${provider.name}" returned zero-byte response (HTTP 200) — triggering fallback`);
+        inspectResolve("empty");
+        inspectResolve = undefined;
+      } else if (inspectResolve && !sawMessageStart && bytes > 0) {
+        // Got bytes but no valid SSE — malformed response
+        console.warn(`[empty-response] Provider "${provider.name}" returned ${bytes}b with no message_start (malformed SSE) — triggering fallback`);
+        inspectResolve("empty");
+        inspectResolve = undefined;
+      }
     });
 
     passThrough.on("error", () => {
@@ -1410,9 +1634,25 @@ export async function forwardRequest(
         const safeClose = () => {
           if (controllerClosed) return;
           controllerClosed = true;
-          // If the upstream ended without sending message_stop, the stream is incomplete.
-          // Inject the missing Anthropic SSE events to prevent Y8.content crash.
-          if (!sawMessageStop && ((passThrough as any)._bytesForwarded ?? 0) > 0) {
+          // Zero-byte or no message_start: upstream returned an empty/malformed response.
+          // Inject a complete synthetic SSE message so Claude Code gets a parseable
+          // response instead of crashing on empty content.
+          const bytes = (passThrough as any)._bytesForwarded ?? 0;
+          if (bytes === 0 || !sawMessageStart) {
+            console.warn(`[safeClose] Empty/malformed stream: bytes=${bytes} msgStart=${sawMessageStart} — injecting error message`);
+            const msgId = `msg_proxy_empty_${Date.now()}`;
+            const errorChunks = [
+              `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: "proxy", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`,
+              `event: content_block_start\ndata: ${JSON.stringify({ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } })}\n\n`,
+              `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "[Proxy error: upstream returned empty/malformed response. Retrying may help.]" } })}\n\n`,
+              `event: content_block_stop\ndata: ${JSON.stringify({ type: "content_block_stop", index: 0 })}\n\n`,
+              `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 20 } })}\n\n`,
+              `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}\n\n`,
+            ];
+            for (const chunk of errorChunks) {
+              try { controller.enqueue(new TextEncoder().encode(chunk)); } catch { /* already closed */ }
+            }
+          } else if (!sawMessageStop) {
             console.warn(`[safeClose] Injecting closing events: bytes=${(passThrough as any)._bytesForwarded} start=${sawMessageStart} blockStart=${sawContentBlockStart} blockStop=${sawContentBlockStop} msgStop=${sawMessageStop}`);
             // Upstream ended without sending message_stop — stream is incomplete.
             // Inject only the missing events to prevent Y8.content crash.
