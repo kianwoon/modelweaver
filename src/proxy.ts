@@ -1485,8 +1485,8 @@ export async function forwardRequest(
           // Real content flowing — normal response
           inspectResolve("normal");
           inspectResolve = undefined;
-        } else if (sawMessageStop && !sawRealContent) {
-          // Stream completed without any real content
+        } else if (sawMessageStop && !sawRealContent && !(passThrough as any)._intentionalClose) {
+          // Stream completed without any real content (not a stall-handled close)
           console.warn(`[empty-response] Provider "${provider.name}" returned empty/malformed response (no real content) — triggering fallback`);
           inspectResolve("empty");
           inspectResolve = undefined;
@@ -1662,8 +1662,14 @@ export async function forwardRequest(
           // Inject a complete synthetic SSE message so Claude Code gets a parseable
           // response instead of crashing on empty content.
           const bytes = (passThrough as any)._bytesForwarded ?? 0;
-          if (bytes === 0 || !sawMessageStart || !sawRealContent) {
-            console.warn(`[safeClose] Empty/malformed stream: bytes=${bytes} msgStart=${sawMessageStart} realContent=${sawRealContent} — injecting error message`);
+          const isStallHandled = !!(passThrough as any)._intentionalClose;
+          if ((bytes === 0 || !sawMessageStart || (sawMessageStop && !sawRealContent)) && !isStallHandled) {
+            // Zero-byte, no message_start, or upstream completed without real content.
+            // Inject a complete synthetic SSE message so Claude Code gets a parseable
+            // response instead of crashing on empty content.
+            // Skip when _intentionalClose — stall/hedge handlers already wrote graceful
+            // termination events; injecting more would corrupt the stream.
+            console.warn(`[safeClose] Empty/malformed stream: bytes=${bytes} msgStart=${sawMessageStart} realContent=${sawRealContent} stallHandled=${isStallHandled} — injecting error message`);
             const msgId = `msg_proxy_empty_${Date.now()}`;
             const errorChunks = [
               `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: "proxy", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`,
