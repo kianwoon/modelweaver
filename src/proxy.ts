@@ -108,20 +108,31 @@ export function pruneProviderLatencySamples(activeProviders: string[]): void {
 }
 
 /**
- * Shallow-clone a parsed API request body just enough so that
- * cleanOrphanedToolMessages() can safely reassign body.messages
- * without affecting the original parsed object.
+ * Deep-clone a parsed API request body enough that mutations to individual
+ * message content blocks (e.g. compressToolResults replacing block.content)
+ * do not corrupt the original parsed object used by fallback retries.
  *
- * cleanOrphanedToolMessages either:
- *   - leaves body.messages untouched (no orphans found), or
- *   - replaces body.messages with a new array (via .map())
- * It never mutates individual message objects in-place.
- * Therefore a one-level-deep clone of the messages array is sufficient.
+ * Clones:
+ *   - Top-level keys (shallow spread)
+ *   - The messages array (new array)
+ *   - Each message object (shallow copy)
+ *   - Each message's content array if present (new array + shallow block copies)
+ *
+ * This ensures compressToolResults can safely reassign block.content without
+ * affecting the original parsed body that may be reused on fallback attempts.
  */
 function shallowCloneForMutation(parsed: Record<string, unknown>): Record<string, unknown> {
   const clone = { ...parsed };
   if (Array.isArray(clone.messages)) {
-    clone.messages = [...clone.messages];
+    clone.messages = (clone.messages as any[]).map((msg: any) => {
+      if (!msg || typeof msg !== "object") return msg;
+      if (Array.isArray(msg.content)) {
+        return { ...msg, content: msg.content.map((block: any) =>
+          block && typeof block === "object" ? { ...block } : block
+        ) };
+      }
+      return { ...msg };
+    });
   }
   return clone;
 }
@@ -561,12 +572,15 @@ const LOGS_TAIL_LINES = 50;
 const ERROR_LINE_RE = /\b(Error|error|FAIL|fatal|WARN|warn|Exception|TypeError|ReferenceError|SyntaxError|exit code|EXIT|FAILED|SEVERE)\b/;
 
 function compressSource(text: string, limit: number, toolName: string): string {
-  const headChars = Math.floor(limit * 0.6);
-  const tailChars = limit - headChars;
-  const head = text.slice(0, headChars);
-  const tail = text.slice(text.length - tailChars);
   const truncated = text.length - limit;
-  return `${head}\n\n... [${truncated.toLocaleString()} chars compressed from ${toolName} — preserving top/bottom sections] ...\n\n${tail}`;
+  // Compute separator first, deduct its length from the content budget
+  const sep = `\n\n... [${truncated.toLocaleString()} chars compressed from ${toolName} — preserving top/bottom sections] ...\n\n`;
+  const contentBudget = limit - sep.length;
+  const headChars = Math.floor(contentBudget * 0.6);
+  const tailChars = contentBudget - headChars;
+  const head = text.slice(0, Math.max(0, headChars));
+  const tail = text.slice(Math.max(0, text.length - tailChars));
+  return `${head}${sep}${tail}`;
 }
 
 function compressLogs(text: string, limit: number, toolName: string): string {
@@ -633,11 +647,14 @@ function compressStructured(text: string, limit: number, toolName: string): stri
 }
 
 function compressDefault(text: string, limit: number, toolName: string): string {
-  const half = Math.floor(limit / 2);
-  const head = text.slice(0, half);
-  const tail = text.slice(text.length - half);
   const truncated = text.length - limit;
-  return `${head}\n\n... [${truncated.toLocaleString()} chars compressed from ${toolName}] ...\n\n${tail}`;
+  // Compute separator first, deduct its length from the content budget
+  const sep = `\n\n... [${truncated.toLocaleString()} chars compressed from ${toolName}] ...\n\n`;
+  const contentBudget = limit - sep.length;
+  const half = Math.floor(contentBudget / 2);
+  const head = text.slice(0, Math.max(0, half));
+  const tail = text.slice(Math.max(0, text.length - half));
+  return `${head}${sep}${tail}`;
 }
 
 const COMPRESSORS: Record<CompressionBucket, (text: string, limit: number, toolName: string) => string> = {
@@ -1070,9 +1087,12 @@ export async function forwardRequest(
           }
 
           parsed.messages = trimmed;
+          // Trimming can cut mid-tool-chain, creating orphan tool_results.
+          cleanOrphanedToolMessages(parsed);
           body = JSON.stringify(parsed);
+          const finalCount = (parsed.messages as any[]).length;
           const turnsKept = turnStarts.filter(s => s >= bestStart).length;
-          console.warn(`[context-trim] Trimmed messages from ${original} to ${trimmed.length} (${turnsKept} turns, limit: ${limit}, instruction preserved: ${bestInstruction !== null}) for provider ${provider.name}`);
+          console.warn(`[context-trim] Trimmed messages from ${original} to ${finalCount} (${turnsKept} turns, limit: ${limit}, instruction preserved: ${bestInstruction !== null}) for provider ${provider.name}`);
         }
       }
     } catch {
@@ -1465,11 +1485,19 @@ export async function forwardRequest(
           if (HAS_TOOL_USE_RE.test(chunkText)) {
             sawRealContent = true;
           } else {
-            // Match "text_delta" with non-empty text: "text":"<at least 1 non-quote char>"
-            // Avoids false positive from transform's synthetic empty text_delta.
-            const textDeltaMatch = chunkText.match(/"type"\s*:\s*"text_delta"[^}]*"text"\s*:\s*"([^"]+)"/);
-            if (textDeltaMatch && textDeltaMatch[1].length > 0) {
-              sawRealContent = true;
+            // Parse SSE data lines to find text_delta with non-empty text.
+            // Avoids regex that assumes JSON key ordering and breaks on escaped quotes.
+            for (const line of chunkText.split("\n")) {
+              if (!line.startsWith("data: ")) continue;
+              const payload = line.slice(6).trim();
+              if (!payload || payload === "[DONE]") continue;
+              try {
+                const evt = JSON.parse(payload);
+                if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta" && evt.delta.text && evt.delta.text.length > 0) {
+                  sawRealContent = true;
+                  break;
+                }
+              } catch { /* not valid JSON — skip */ }
             }
           }
         }
