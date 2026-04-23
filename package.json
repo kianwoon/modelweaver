@@ -1,6 +1,6 @@
 {
   "name": "@kianwoon/modelweaver",
-  "version": "0.3.90",
+  "version": "0.3.91",
   "description": "Multi-provider model orchestration proxy for Claude Code",
   "type": "module",
   "main": "dist/index.js",
