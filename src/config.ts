@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
 import { CircuitBreaker } from "./circuit-breaker.js";
-import type { AppConfig, ClassificationRule, HedgingConfig, ProviderConfig, RoutingEntry, ServerConfig, SmartRoutingConfig } from "./types.js";
+import type { AppConfig, ClassificationRule, ConcurrencyConfig, HedgingConfig, ProviderConfig, RoutingEntry, ServerConfig, SmartRoutingConfig } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -214,6 +214,18 @@ const rawConfigSchema = z.object({
   modelRouting: z.record(z.string(), z.array(routingEntrySchema)).default({}),
   hedging: hedgingSchema.optional(),
   smartRouting: smartRoutingSchema.optional(),
+  tierConcurrency: z.record(z.string(), z.object({
+    max_inflight: z.number().int().min(0),
+    queueTimeoutMs: z.number().int().min(1000).default(30000),
+  })).default({}),
+  modelConcurrency: z.record(z.string(), z.object({
+    max_inflight: z.number().int().min(0),
+    queueTimeoutMs: z.number().int().min(1000).default(30000),
+  })).default({}),
+  providerConcurrency: z.record(z.string(), z.object({
+    max_inflight: z.number().int().min(0),
+    queueTimeoutMs: z.number().int().min(1000).default(30000),
+  })).default({}),
 });
 
 // --- Env var resolution ---
@@ -601,6 +613,15 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       maxHedge: validated.hedging.maxHedge,
     } : undefined,
     smartRouting: compileSmartRouting(validated.smartRouting),
+    tierConcurrency: Object.keys(validated.tierConcurrency).length > 0
+      ? new Map(Object.entries(validated.tierConcurrency) as [string, ConcurrencyConfig][])
+      : undefined,
+    modelConcurrency: Object.keys(validated.modelConcurrency).length > 0
+      ? new Map(Object.entries(validated.modelConcurrency) as [string, ConcurrencyConfig][])
+      : undefined,
+    providerConcurrency: Object.keys(validated.providerConcurrency).length > 0
+      ? new Map(Object.entries(validated.providerConcurrency) as [string, ConcurrencyConfig][])
+      : undefined,
   };
 
   // Cross-validate smart routing tier references against routing entries

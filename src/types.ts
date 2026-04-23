@@ -57,6 +57,11 @@ export interface ClassificationRule {
   _compiled?: RegExp;
 }
 
+export interface ConcurrencyConfig {
+  max_inflight: number;
+  queueTimeoutMs: number;
+}
+
 export interface SmartRoutingConfig {
   /** Master switch — when false, smart routing is skipped entirely */
   enabled: boolean;
@@ -105,6 +110,9 @@ export interface AppConfig {
   modelRouting: Map<string, RoutingEntry[]>;
   hedging?: HedgingConfig;
   smartRouting?: SmartRoutingConfig;
+  tierConcurrency?: Map<string, ConcurrencyConfig>;
+  modelConcurrency?: Map<string, ConcurrencyConfig>;
+  providerConcurrency?: Map<string, ConcurrencyConfig>;
 }
 
 export interface RequestContext {
