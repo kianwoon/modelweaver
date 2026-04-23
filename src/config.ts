@@ -160,6 +160,8 @@ const providerSchema = z.object({
     windowSeconds: cb.windowSeconds,
     cooldownSeconds: cb.cooldownSeconds ?? cb.cooldown,
   })).optional(),
+  /** Whether to pre-warm the connection pool on startup. Default: true */
+  prewarm: z.boolean().default(true).optional(),
 });
 
 const routingEntrySchema = z.object({
@@ -171,6 +173,8 @@ const routingEntrySchema = z.object({
 const hedgingSchema = z.object({
   /** Delay (ms) before starting backup providers in staggered race */
   speculativeDelay: z.number().int().positive().default(500),
+  /** Multiplier on provider p50 latency to compute adaptive delay. Default: 0.5 (hedge at half p50) */
+  speculativeDelayFactor: z.number().min(0).max(5).default(0.5).optional(),
   /** Coefficient of variation threshold — hedging activates when CV >= this */
   cvThreshold: z.number().min(0).max(10).default(0.5),
   /** Maximum number of hedged copies per request */
@@ -319,6 +323,7 @@ export function peekConfig(
   const hedgingRaw = parsed?.hedging as Record<string, unknown> | undefined;
   const hedging = hedgingRaw ? {
     speculativeDelay: Number(hedgingRaw.speculativeDelay ?? 500),
+    speculativeDelayFactor: hedgingRaw.speculativeDelayFactor != null ? Number(hedgingRaw.speculativeDelayFactor) : undefined,
     cvThreshold: Number(hedgingRaw.cvThreshold ?? 0.5),
     maxHedge: Number(hedgingRaw.maxHedge ?? 4),
   } : undefined;
@@ -524,6 +529,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       modelPools: p.modelPools !== undefined ? { ...p.modelPools } : undefined,
       maxContextMessages: p.maxContextMessages,
       toolResultLimit: p.toolResultLimit,
+      prewarm: p.prewarm,
     };
     try {
       const parsedUrl = new URL(p.baseUrl);
@@ -590,6 +596,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
     modelRouting,
     hedging: validated.hedging ? {
       speculativeDelay: validated.hedging.speculativeDelay,
+      speculativeDelayFactor: validated.hedging.speculativeDelayFactor,
       cvThreshold: validated.hedging.cvThreshold,
       maxHedge: validated.hedging.maxHedge,
     } : undefined,
