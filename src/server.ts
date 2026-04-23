@@ -7,6 +7,7 @@ import { SessionAgentPool, DEFAULT_STALE_AGENT_THRESHOLD_MS } from "./session-po
 import { createLogger, type LogLevel } from "./logger.js";
 import type { AppConfig, ProviderConfig, RequestContext, StreamState } from "./types.js";
 import { transitionStreamState } from "./types.js";
+import { resolveConcurrency, getSemaphore, resetSemaphores } from "./concurrency.js";
 import { randomUUID } from "node:crypto";
 import { gzip } from "node:zlib";
 import { promisify } from "node:util";
@@ -614,6 +615,27 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     // Forward with fallback chain
     let successfulProvider = "unknown";
     let result: FallbackResult;
+    const conc = resolveConcurrency(ctx.model, ctx.tier, ctx.providerChain[0]?.provider, config.providerConcurrency, config.modelConcurrency, config.tierConcurrency);
+    const sem = conc ? getSemaphore(conc.key, conc.config.max_inflight) : null;
+    const acquired = sem ? await sem.acquire(conc!.config.queueTimeoutMs) : true;
+    if (!acquired) {
+      return new Response(
+        JSON.stringify({
+          type: "error",
+          error: {
+            type: "api_error",
+            message: `Concurrency limit reached for "${conc!.key}" (${conc!.config.max_inflight} inflight). Retry after queue timeout.`,
+          },
+        }),
+        {
+          status: 503,
+          headers: {
+            "content-type": "application/json",
+            "retry-after": String(Math.ceil(conc!.config.queueTimeoutMs / 1000)),
+          },
+        },
+      );
+    }
     inFlightCount++;
     try {
       result = await forwardWithFallback(
@@ -650,6 +672,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
         502
       );
     } finally {
+      if (sem) sem.release();
       inFlightCount--;
     }
 
@@ -939,6 +962,7 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       activeProbeManager.updateProviders(newConfig.providers);
       clearRoutingCache();
       clearHedgeStats();
+      resetSemaphores();
 
       // Update session pool thresholds from new config
       const newIdleTtl = newConfig.server?.sessionIdleTtlMs ?? 600_000;
