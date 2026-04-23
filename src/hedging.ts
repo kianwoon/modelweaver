@@ -147,7 +147,7 @@ export function computeHedgingCount(
   const available = Math.max(1, maxConcurrent - inFlight);
 
   const cvThreshold = config?.cvThreshold ?? 0.5;
-  const maxHedge = config?.maxHedge ?? 4;
+  const maxHedge = Math.min(config?.maxHedge ?? 4, maxConcurrent);
 
   // Skip hedging for single-provider chains — multi-copy to the same provider
   // can never improve outcome and amplifies rate-limit bursts (e.g. 429 × 3).

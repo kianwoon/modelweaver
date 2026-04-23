@@ -1697,12 +1697,18 @@ export async function forwardRequest(
           const bytes = (passThrough as any)._bytesForwarded ?? 0;
           const isStallHandled = !!(passThrough as any)._intentionalClose;
           if ((bytes === 0 || !sawMessageStart || (sawMessageStop && !sawRealContent)) && !isStallHandled) {
-            // Zero-byte, no message_start, or upstream completed without real content.
+            // Zero-byte or upstream completed without real content.
             // Inject a complete synthetic SSE message so Claude Code gets a parseable
             // response instead of crashing on empty content.
             // Skip when _intentionalClose — stall/hedge handlers already wrote graceful
             // termination events; injecting more would corrupt the stream.
-            console.warn(`[safeClose] Empty/malformed stream: bytes=${bytes} msgStart=${sawMessageStart} realContent=${sawRealContent} stallHandled=${isStallHandled} — injecting error message`);
+            // Skip when sawRealContent — real content proves the stream was valid;
+            // !sawMessageStart with sawRealContent is a detection gap, not a malformed stream.
+            if (sawRealContent) {
+              console.warn(`[safeClose] Stream had real content but msgStart=${sawMessageStart} — likely detection gap, skipping error injection (requestId=${ctx.requestId}, bytes=${bytes})`);
+              // Fall through to normal closing events below
+            } else {
+            console.warn(`[safeClose] Empty/malformed stream: bytes=${bytes} msgStart=${sawMessageStart} realContent=${sawRealContent} stallHandled=${isStallHandled} requestId=${ctx.requestId} — injecting error message`);
             const msgId = `msg_proxy_empty_${Date.now()}`;
             const errorChunks = [
               `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: "proxy", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`,
@@ -1714,6 +1720,7 @@ export async function forwardRequest(
             ];
             for (const chunk of errorChunks) {
               try { controller.enqueue(new TextEncoder().encode(chunk)); } catch { /* already closed */ }
+            }
             }
           } else if (!sawMessageStop) {
             console.warn(`[safeClose] Injecting closing events: bytes=${(passThrough as any)._bytesForwarded} start=${sawMessageStart} blockStart=${sawContentBlockStart} blockStop=${sawContentBlockStop} msgStop=${sawMessageStop}`);
