@@ -65,8 +65,10 @@ export interface SmartRoutingConfig {
 }
 
 export interface HedgingConfig {
-  /** Delay (ms) before starting backup providers in staggered race */
+  /** Delay (ms) before starting backup providers in staggered race — also serves as max cap for adaptive delay */
   speculativeDelay: number;
+  /** Multiplier on provider p50 latency to compute adaptive delay. Default: 0.5 (hedge at half p50) */
+  speculativeDelayFactor?: number;
   /** Coefficient of variation threshold — hedging activates when CV >= this */
   cvThreshold: number;
   /** Maximum number of hedged copies per request */

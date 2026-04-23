@@ -61,7 +61,7 @@ import type { SessionAgentPool } from "./session-pool.js";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { latencyTracker, inFlightCounter, computeHedgingCount, recordHedgeWin, recordHedgeLosses } from './hedging.js';
+import { latencyTracker, inFlightCounter, computeHedgingCount, recordHedgeWin, recordHedgeLosses, getAdaptiveDelay } from './hedging.js';
 import { warmupProvider } from './pool.js';
 import { resolveAdaptiveTTFB } from './adaptive-timeout.js';
 import { recordHealthEvent } from './health-score.js';
@@ -1225,8 +1225,8 @@ export async function forwardRequest(
   let streamCreated = false;
 
   try {
-    // Use session-scoped agent when available (per-session, per-model connection isolation),
-    const dispatcher = sessionPool?.get(ctx.sessionId, poolModel) ?? getOrCreateAgent(provider, poolModel);
+    // Use session-scoped agent when available (per-session, per-model+provider connection isolation),
+    const dispatcher = sessionPool?.get(ctx.sessionId, poolModel, provider.name) ?? getOrCreateAgent(provider, poolModel);
     const undiciResponse = await Promise.race([
       undiciRequest(url, {
         method: "POST",
@@ -1727,7 +1727,7 @@ export async function forwardRequest(
           // Decrement in-flight count so the stale refresh knows this stream is done.
           // This is safe to call multiple times since release() is idempotent.
           if (sessionPool && ctx.sessionId) {
-            sessionPool.release(ctx.sessionId, ctx.actualModel ?? ctx.model);
+            sessionPool.release(ctx.sessionId, ctx.actualModel ?? ctx.model, provider.name);
           }
           // Transition stream state to "complete" and broadcast for GUI.
           // Only fire for normal stream completion (state was "streaming"),
@@ -1829,7 +1829,7 @@ export async function forwardRequest(
         // Guard against double-release: safeClose() (from passThrough "close" event)
         // may have already released if cancel() fires after the stream ended.
         if (sessionPool && ctx.sessionId && !controllerClosed) {
-          sessionPool.release(ctx.sessionId, ctx.actualModel ?? ctx.model);
+          sessionPool.release(ctx.sessionId, ctx.actualModel ?? ctx.model, provider.name);
         }
       },
     });
@@ -1952,7 +1952,7 @@ export async function forwardRequest(
     // the release — finally does NOT release there (would cause count=0 while stream
     // is still active → sweep() could close the agent mid-stream).
     if (sessionPool && ctx.sessionId && !streamCreated) {
-      sessionPool.release(ctx.sessionId, poolModel);
+      sessionPool.release(ctx.sessionId, poolModel, provider.name);
     }
   }
 }
@@ -2038,7 +2038,7 @@ async function forwardWithRetry(
       // to this provider. The session pool eviction gives the retry a fresh
       // session-scoped connection while leaving the shared pool intact.
       if (sessionPool && ctx.sessionId) {
-        sessionPool.evict(ctx.sessionId, ctx.actualModel ?? ctx.model);
+        sessionPool.evict(ctx.sessionId, ctx.actualModel ?? ctx.model, provider.name);
       }
 
       const delay = CONNECTION_RETRY_BASE_MS * Math.pow(2, attempt);
@@ -2292,7 +2292,7 @@ export async function forwardWithFallback(
           console.warn(`[proxy] Single-provider chain detected transient body error on "${provider.name}" (HTTP ${response.status}): ${errBody.slice(0, 300)} — retrying with fresh pool`);
           // Evict session agent to force a new connection on retry
           if (sessionPool && ctx.sessionId) {
-            sessionPool.evict(ctx.sessionId, ctx.actualModel ?? ctx.model);
+            sessionPool.evict(ctx.sessionId, ctx.actualModel ?? ctx.model, provider.name);
             ctx.sessionId = undefined;
           }
           // Retry once with fresh pool
@@ -2539,13 +2539,15 @@ export async function forwardWithFallback(
 
   // Build staggered race promises:
   //   Provider 0 starts immediately
-  //   Provider 1+ start after SPECULATIVE_DELAY (if race not already won)
+  //   Provider 1+ start after adaptive delay (based on provider p50, capped at speculativeDelay)
   const races: Promise<{ response: Response; index: number }>[] = [];
 
   for (let i = 0; i < chain.length; i++) {
     if (i === 0) {
       races.push(attemptProvider(0));
     } else {
+      const entry = chain[i];
+      const delay = getAdaptiveDelay(entry.provider, hedging, DEFAULT_SPECULATIVE_DELAY);
       races.push(
         new Promise<{ response: Response; index: number }>((resolve) => {
           setTimeout(() => {
@@ -2558,7 +2560,7 @@ export async function forwardWithFallback(
               return;
             }
             attemptProvider(i).then(resolve);
-          }, hedging?.speculativeDelay ?? DEFAULT_SPECULATIVE_DELAY);
+          }, delay);
         }),
       );
     }

@@ -39,6 +39,15 @@ export class LatencyTracker {
     }
   }
 
+  /** P50 (median) latency in ms. Returns 0 if insufficient data. */
+  getP50(provider: string): number {
+    const window = this.samples.get(provider);
+    if (!window || window.length < 5) return 0;
+    const sorted = window.map(s => s.ttfbMs).sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 !== 0 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+  }
+
   /** Coefficient of variation (stddev / mean). Returns 0 if insufficient data. */
   getCV(provider: string): number {
     const window = this.samples.get(provider);
@@ -149,6 +158,18 @@ export function computeHedgingCount(
   // Linear scale: cv=0.5 → 2 copies, cv=1.0 → 3, cv=1.5+ → 4
   const adaptive = Math.min(maxHedge, Math.floor((cv - cvThreshold) * 2 + 2));
   return Math.max(1, Math.min(adaptive, available));
+}
+
+/**
+ * Compute adaptive speculative delay based on provider's p50 latency.
+ * Falls back to static `speculativeDelay` when insufficient samples (<5).
+ */
+export function getAdaptiveDelay(providerName: string, config: { speculativeDelay: number; speculativeDelayFactor?: number } | undefined, fallbackMs: number): number {
+  const staticDelay = config?.speculativeDelay ?? fallbackMs;
+  const p50 = latencyTracker.getP50(providerName);
+  if (p50 <= 0) return staticDelay;
+  const factor = config?.speculativeDelayFactor ?? 0.5;
+  return Math.min(Math.round(p50 * factor), staticDelay);
 }
 
 // --- Hedge win/loss tracking ---

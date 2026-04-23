@@ -145,17 +145,9 @@ export class MetricsStore {
         }
       }
 
-      // Decrement session counter for evicted entry
-      if (evicted.sessionId) {
-        const sEntry = this._sessionMap.get(evicted.sessionId);
-        if (sEntry) {
-          sEntry.count--;
-          if (sEntry.count <= 0) {
-            this._sessionMap.delete(evicted.sessionId);
-            if (this._sessionMapMin.current === evicted.sessionId) this._sessionMapMin.current = null;
-          }
-        }
-      }
+      // NOTE: session counter is NOT decremented on eviction — it tracks lifetime
+      // request count, not ring-buffer-window count. Cleanup happens via SESSION_IDLE_TTL_MS
+      // in getSummary() which removes entries idle beyond the threshold.
     }
 
     // Increment counters for new entry
@@ -224,7 +216,8 @@ export class MetricsStore {
       } else {
         this._sessionMap.set(metrics.sessionId, { count: 1, lastSeen: metrics.timestamp });
       }
-      this.pruneMap(this._sessionMap, (e) => e.count, this._sessionMapMin);
+      // Prune by lastSeen (oldest idle first) since count is now a lifetime counter
+      this.pruneMap(this._sessionMap, (e) => e.lastSeen, this._sessionMapMin);
     }
 
     // Enforce size caps on maps
