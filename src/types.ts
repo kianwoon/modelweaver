@@ -38,6 +38,8 @@ export interface ProviderConfig {
   /** Custom body patterns (case-insensitive) that indicate transient errors on 400/413 responses.
    *  Matched responses are treated as retriable and trigger fallback to the next provider. */
   retryableErrorPatterns?: string[];
+  /** Pre-warm connection on startup/reload (HEAD request to establish TLS). Default: true */
+  prewarm?: boolean;
 }
 
 export interface RoutingEntry {
