@@ -30,6 +30,10 @@ No config file editing. No provider SDK installs. The wizard tests your API key 
 
 
 
+## What's New — v0.3.91
+
+- **3-level concurrency control** — limit in-flight requests per provider+model, model, or tier with queueing and timeout-based 503 rejection (#282)
+
 ## What's New — v0.3.83
 
 - **Empty response detection** — detects when upstream providers return empty `end_turn` (0 output tokens, no content) and automatically retries with the next provider in the fallback chain (#248)
@@ -91,6 +95,7 @@ Claude Code  ──→  ModelWeaver  ──→  Anthropic (primary)       [Anthr
 - **Model name rewriting** — each provider in the chain can use a different model name
 - **Weighted distribution** — spread traffic across providers by weight percentage
 - **Circuit breaker** — per-provider circuit breaker with closed/open/half-open states, prevents hammering unhealthy providers
+- **Concurrency control** — limit in-flight requests per provider+model, model, or tier with queueing and timeout-based rejection
 - **Request hedging** — sends multiple copies when a provider shows high latency variance (CV > 0.5), returns the fastest response (skipped for single-provider chains to avoid rate-limit amplification)
 - **TTFB timeout** — fails slow providers before full timeout elapses (configurable per provider)
 - **Stall detection** — detects stalled streams and aborts them, triggering fallback
@@ -512,6 +517,42 @@ providers:
 | Fireworks | Bearer | `https://api.fireworks.ai/inference/v1` |
 
 Any OpenAI/Anthropic-compatible API works — set `baseUrl`, `authType`, and `apiFormat` appropriately. For OpenAI-compatible endpoints, set `apiFormat: openai-chat` or `apiFormat: openai-responses`.
+
+### Concurrency Control
+
+Limit how many requests can be in-flight simultaneously at three levels. When the limit is reached, new requests queue with a timeout. If the timeout expires, a **503** with a `Retry-After` header is returned.
+
+```yaml
+# Per provider+model (most specific — takes precedence)
+providerConcurrency:
+  glm:glm-5.1:
+    max_inflight: 1
+    queueTimeoutMs: 15000
+  glm_openai:glm-5.1:
+    max_inflight: 2
+    queueTimeoutMs: 15000
+
+# Per model (catch-all for providers not in providerConcurrency)
+modelConcurrency:
+  glm-5:
+    max_inflight: 3
+    queueTimeoutMs: 15000
+
+# Per tier (broadest — fallback if neither above matches)
+tierConcurrency:
+  tier1:
+    max_inflight: 2
+    queueTimeoutMs: 30000
+```
+
+**Lookup order**: `providerConcurrency[provider:model]` → `modelConcurrency[model]` → `tierConcurrency[tier]` → no limit.
+
+| Field | Description |
+|-------|-------------|
+| `max_inflight` | Max concurrent in-flight requests. Set to `0` to disable the limit at that level. |
+| `queueTimeoutMs` | How long to wait for a slot before returning 503. Minimum: `1000`. Default: `30000`. |
+
+Each level uses independent semaphores — `glm:glm-5.1` and `glm_openai:glm-5.1` have separate counters even though they serve the same model.
 
 ### Config hot-reload
 
