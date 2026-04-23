@@ -161,7 +161,7 @@ export async function warmupProvider(provider: ProviderConfig): Promise<boolean>
  */
 export async function warmupAll(providers: Map<string, ProviderConfig>): Promise<Map<string, boolean>> {
   const results = new Map<string, boolean>();
-  const entries = [...providers.entries()];
+  const entries = [...providers.entries()].filter(([, p]) => p.prewarm !== false);
 
   if (entries.length === 0) return results;
 

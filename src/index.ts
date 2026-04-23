@@ -441,6 +441,8 @@ async function main() {
             pruneHealthScores([...newConfig.providers.keys()]);
             pruneWarmupStates([...newConfig.providers.keys()]);
             clearHedgeStats();
+            // Pre-warm connections for new/changed providers
+            warmupAll(newConfig.providers).catch(() => {});
           },
         })
       : { cleanup: () => {} };
@@ -454,6 +456,7 @@ async function main() {
         latencyTracker.prune([...newConfig.providers.keys()]);
         pruneProviderLatencySamples([...newConfig.providers.keys()]);
         clearHedgeStats();
+        warmupAll(newConfig.providers).catch(() => {});
         logger.info("Config reloaded (SIGUSR1)", { path: configPath });
       } catch (err) {
         if (err instanceof ConfigValidationError) {
@@ -613,6 +616,8 @@ async function main() {
           latencyTracker.prune([...newConfig.providers.keys()]);
           pruneProviderLatencySamples([...newConfig.providers.keys()]);
           clearHedgeStats();
+          // Pre-warm connections for new/changed providers
+          warmupAll(newConfig.providers).catch(() => {});
         },
       })
     : { cleanup: () => {} };
