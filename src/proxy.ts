@@ -189,11 +189,6 @@ function isConnectionError502FromBody(body: string): boolean {
 // Detection happens inside the passThrough data handler via a Promise-based inspection.
 const HAS_TOOL_USE_RE = /"type"\s*:\s*"tool_use"/;
 
-// Max wait (ms) for the SSE stream to reveal whether it's empty.
-// Empty GLM responses complete in <1s (no content to generate).
-// Normal responses show content_block_start within ~2-3s of first byte.
-const EMPTY_RESPONSE_INSPECT_MS = 5000;
-
 /** Async: clone a response and check if its body indicates a connection-level error. */
 async function isConnectionErrorBody(response: Response): Promise<boolean> {
   if (response.status !== 502) return false;
@@ -866,12 +861,14 @@ export async function forwardRequest(
   // JSON.stringify changes whitespace / key order, breaking cache hits.
   let body: string;
   let parsedForTrim: Record<string, unknown> | undefined;
+  let parsedBodyCache: Record<string, unknown> | undefined;
   const contentType = incomingRequest.headers.get("content-type") || "";
 
   if (contentType.includes("application/json")) {
     try {
       const parsed = (ctx as RequestContext & { parsedBody?: Record<string, unknown> }).parsedBody
         ?? JSON.parse(ctx.rawBody);
+      parsedBodyCache = parsed;
 
       // Determine whether any body modification is needed
       let needsModification = false;
@@ -992,7 +989,7 @@ export async function forwardRequest(
   if (provider.maxContextMessages) {
     try {
       // Reuse already-parsed object if available (avoids double JSON.parse)
-      const parsed = parsedForTrim ?? JSON.parse(body);
+      const parsed = parsedForTrim ?? parsedBodyCache ?? JSON.parse(body);
       if (Array.isArray(parsed.messages) && parsed.messages.length > provider.maxContextMessages) {
         const allMsgs = parsed.messages;
         const original = allMsgs.length;
@@ -1093,7 +1090,16 @@ export async function forwardRequest(
               role: "user",
               content: [{ type: "text", text: `[System: ${trimmedCount} earlier messages were trimmed to fit context window. Continue working on the original task — do not stop until it is fully complete.]` }],
             };
-            trimmed = [trimmed[0], hint, ...trimmed.slice(1)];
+            // Insert hint before the first user message to preserve role alternation.
+            // If trimmed[0] is assistant (hard-cut fallback), inserting at [1] would
+            // produce assistant→user→assistant, violating Anthropic's role alternation.
+            const firstUserIdx = trimmed.findIndex((m: any) => m.role === "user");
+            if (firstUserIdx >= 0) {
+              trimmed = [...trimmed.slice(0, firstUserIdx), hint, ...trimmed.slice(firstUserIdx)];
+            } else {
+              // No user message found — prepend as fallback
+              trimmed = [hint, ...trimmed];
+            }
           }
 
           parsed.messages = trimmed;
@@ -1166,7 +1172,7 @@ export async function forwardRequest(
   let removeAbortListener: (() => void) | undefined;
   let upstreamBody: import("node:stream").Readable | undefined;
   let passThrough: PassThrough | undefined;
-  let stallTimerRef: ReturnType<typeof setTimeout> | undefined;
+  let stallTimerRef: ReturnType<typeof setInterval> | undefined;
   if (externalSignal) {
     if (externalSignal.aborted) {
       // Already aborted — don't even start the request
@@ -1181,7 +1187,7 @@ export async function forwardRequest(
     const onExternalAbort = () => {
       clearTimeout(timeout);
       if (ttfbTimer) clearTimeout(ttfbTimer);
-      if (stallTimerRef) clearTimeout(stallTimerRef);
+      if (stallTimerRef) clearInterval(stallTimerRef);
       console.log(`[hedge] Cancelling provider "${provider.name}" — race winner found`);
       // Mark upstream as intentionally closed to prevent undici from
       // propagating "socket closed unexpectedly" during hedge cancellation
@@ -1253,7 +1259,7 @@ export async function forwardRequest(
     // When _intentionalClose is set (hedge cancel or stall abort), swallow
     // undici's "socket closed unexpectedly" warning — the close is expected.
     upstreamBody.on("error", (err: Error) => {
-      if (stallTimerRef) clearTimeout(stallTimerRef);
+      if (stallTimerRef) clearInterval(stallTimerRef);
       if ((upstreamBody as any)._intentionalClose) return; // expected — suppress
       console.warn(`[proxy] Upstream body error on "${provider.name}": ${err.message}`);
 
@@ -1468,15 +1474,52 @@ export async function forwardRequest(
     let sawRealContent = false; // true only when text_delta has non-empty text or tool_use appears
     let _rollingTail = "";
 
-    // Empty response inspection: resolves when we know whether the upstream
-    // response is empty (no content) or normal. Used to trigger fallback
-    // for empty end_turn responses before the 200 status reaches the client.
-    let inspectResolve: ((result: "empty" | "normal") => void) | undefined;
-    const emptyResponseInspect = new Promise<"empty" | "normal">((resolve) => {
-      inspectResolve = resolve;
-    });
+    // Snapshot of upstream state BEFORE any synthetic events are injected.
+    // handleStall() writes graceful-termination events (including message_stop)
+    // which corrupt the saw* flags. These snapshots preserve the real upstream state.
+    let upstreamHadRealContent = false;
+    let upstreamSentMessageStop = false;
+
+    // Empty response detection: uses a flag set when the stream ends without
+    // real content. No timing/race involved — purely deterministic.
+    let streamDetectedEmpty = false;
+    // streamEndedResolve is called when the stream ends or errors, used for
+    // cleanup. The promise itself is not awaited (non-blocking design).
+    let streamEndedResolve: (() => void) | undefined;
+    const streamEndedPromise: Promise<void> = new Promise((resolve) => { streamEndedResolve = resolve; });
+
+    // Early empty-response detection: fires in the data handler as soon as the
+    // pattern is recognized, BEFORE the stream ends. No timers, no blocking.
+    // Since the Response is already streaming to the client (HTTP 200 headers sent),
+    // we can't return 502. Instead, we inject a complete SSE error message into the
+    // stream so the client sees "[Proxy error: ...]" instead of crashing.
+    let earlyEmptyDetected = false;
+    const detectEarlyEmpty = (reason: string) => {
+      if (earlyEmptyDetected || streamDetectedEmpty) return;
+      earlyEmptyDetected = true;
+      streamDetectedEmpty = true;
+      console.warn(`[empty-response] EARLY detection: ${reason} — injecting error SSE (requestId=${ctx.requestId})`);
+      (passThrough as any)._intentionalClose = true;
+      if (upstreamBody && !upstreamBody.destroyed) {
+        (upstreamBody as any)._intentionalClose = true;
+      }
+      // Unpipe and end passThrough to stop data flow — matches handleStall pattern.
+      // safeClose will still fire on the "end" event and inject error SSE.
+      try { undiciResponse.body.unpipe(passThrough); } catch { /* already unpiped */ }
+      try { passThrough!.end(); } catch { /* already ended */ }
+      // Resolve stream-ended promise for cleanup
+      if (streamEndedResolve) { streamEndedResolve(); streamEndedResolve = undefined; }
+    };
+
+    // Deferred enqueue callback — set by the ReadableStream start() below.
+    // This lets us merge the enqueue logic into the first data handler,
+    // eliminating a second EventEmitter dispatch per chunk.
+    let enqueueChunk: ((chunk: Buffer) => void) | undefined;
 
     passThrough.on("data", (chunk: Buffer) => {
+      // Update stall detection timestamp — no timer churn, just a timestamp.
+      lastDataTime = Date.now();
+
       // Lightweight SSE state tracking via rolling tail buffer.
       // Accumulate last ~500 bytes across chunks to detect event types
       // that may span chunk boundaries.
@@ -1487,13 +1530,17 @@ export async function forwardRequest(
         if (!sawMessageStart && _rollingTail.includes('"message_start"')) sawMessageStart = true;
         if (!sawContentBlockStart && _rollingTail.includes('"content_block_start"')) sawContentBlockStart = true;
         if (!sawContentBlockStop && _rollingTail.includes('"content_block_stop"')) sawContentBlockStop = true;
-        if (_rollingTail.includes('"message_stop"')) sawMessageStop = true;
+        if (_rollingTail.includes('"message_stop"')) {
+          sawMessageStop = true;
+          upstreamSentMessageStop = true;
+        }
         // Detect real content: text_delta with non-empty text, or tool_use blocks.
         // OpenAI adapters emit synthetic text_delta events even for empty responses,
         // so we must check that actual text content exists.
         if (!sawRealContent) {
           if (HAS_TOOL_USE_RE.test(chunkText)) {
             sawRealContent = true;
+            upstreamHadRealContent = true;
           } else {
             // Parse SSE data lines to find text_delta with non-empty text.
             // Avoids regex that assumes JSON key ordering and breaks on escaped quotes.
@@ -1503,8 +1550,12 @@ export async function forwardRequest(
               if (!payload || payload === "[DONE]") continue;
               try {
                 const evt = JSON.parse(payload);
-                if (evt.type === "content_block_delta" && evt.delta?.type === "text_delta" && evt.delta.text && evt.delta.text.length > 0) {
+                if (evt.type === "content_block_delta" && (
+                  (evt.delta?.type === "text_delta" && evt.delta.text && evt.delta.text.length > 0) ||
+                  evt.delta?.type === "thinking_delta"
+                )) {
                   sawRealContent = true;
+                  upstreamHadRealContent = true;
                   break;
                 }
               } catch { /* not valid JSON — skip */ }
@@ -1513,21 +1564,31 @@ export async function forwardRequest(
         }
       }
 
-      // Empty response inspection: check if this is an empty end_turn.
+      // Empty response detection: check if this is an empty end_turn.
       // sawRealContent means we got actual text or tool_use — definitely normal.
-      // sawContentBlockStart without sawRealContent means the OpenAI transform
-      // emitted synthetic events for an empty upstream — keep inspecting.
-      // Once we see message_stop without real content, trigger fallback.
-      if (inspectResolve) {
-        if (sawRealContent) {
-          // Real content flowing — normal response
-          inspectResolve("normal");
-          inspectResolve = undefined;
-        } else if (sawMessageStop && !sawRealContent && !(passThrough as any)._intentionalClose) {
+      // Once we see message_stop without real content, flag as empty.
+      if (!streamDetectedEmpty) {
+        if (sawMessageStop && !sawRealContent && !(passThrough as any)._intentionalClose) {
           // Stream completed without any real content (not a stall-handled close)
-          console.warn(`[empty-response] Provider "${provider.name}" returned empty/malformed response (no real content) — triggering fallback`);
-          inspectResolve("empty");
-          inspectResolve = undefined;
+          console.warn(`[empty-response] Provider "${provider.name}" returned empty/malformed response (no real content) — flagging as empty`);
+          streamDetectedEmpty = true;
+        }
+      }
+
+      // ── Early empty detection (no timers — pure pattern matching) ──────
+      // Catch empty responses as soon as the pattern is recognizable in the
+      // data handler, BEFORE the stream ends. No blocking, no waiting.
+      // NOTE: We do NOT detect on ping events — ping is a valid keepalive
+      // that can arrive between message_start and content_block_start in
+      // normal streams. Rely on safeClose + upstream snapshots for that case.
+      // Skip if intentionally closed — stall handler writes synthetic SSE
+      // (message_delta + stop_reason) which would trigger a false positive.
+      if (!streamDetectedEmpty && sawMessageStart && !(passThrough as any)._intentionalClose) {
+        const text = chunk.toString("utf8");
+        // Pattern: message_delta with stop_reason but no real content.
+        // A provider completing the message without ever sending content = empty.
+        if (text.includes('"message_delta"') && text.includes('"stop_reason"') && !sawRealContent) {
+          detectEarlyEmpty(`Provider "${provider.name}" sent message_delta with stop_reason but no real content`);
         }
       }
 
@@ -1535,10 +1596,9 @@ export async function forwardRequest(
       if (((passThrough as any)._bytesForwarded ?? 0) <= chunk.length) {
         console.warn(`[tracking] First chunk (${chunk.length}b): ${chunk.toString("utf8").slice(0, 400)}`);
       }
-      // Debug: dump ALL chunks for non-anthropic adapters to compare format
-      if (adapter.format !== "anthropic") {
-        console.warn(`[openai-out] ${chunk.toString("utf8")}`);
-      }
+
+      // Forward to ReadableStream — merged from handler 3 to avoid extra dispatch.
+      if (enqueueChunk) enqueueChunk(chunk);
     });
 
     // If upstream errored before passThrough was created (earlyUpstreamError),
@@ -1627,48 +1687,47 @@ export async function forwardRequest(
     };
 
     // One-shot stall timer: fires once after stallTimeout ms of no data.
-    // Re-schedules itself on each data event (see passThrough "data" handler below).
-    const scheduleStallTimer = () => {
-      if (stallTimerRef) clearTimeout(stallTimerRef);
-      stallTimerRef = setTimeout(() => {
-        stallTimerRef = undefined;
-        if (Date.now() - lastDataTime >= stallTimeout) {
-          handleStall();
-        }
-      }, stallTimeout);
-    };
-    scheduleStallTimer();
-
-    // Monitor PassThrough for data events — update timestamp and reschedule one-shot stall timer
-    passThrough!.on("data", () => {
-      lastDataTime = Date.now();
-      scheduleStallTimer();
-    });
+    // Instead of per-chunk clearTimeout+setTimeout (timer churn), we use a single
+    // interval that checks the lastDataTime. When data arrives, only the timestamp
+    // is updated — no timer operations per chunk.
+    const stallCheckInterval = setInterval(() => {
+      if (Date.now() - lastDataTime >= stallTimeout) {
+        clearInterval(stallCheckInterval);
+        if (stallTimerRef) { stallTimerRef = undefined; }
+        handleStall();
+      }
+    }, Math.min(stallTimeout, 5000));
+    stallTimerRef = stallCheckInterval as unknown as NodeJS.Timeout;
 
     passThrough.on("end", () => {
-      if (stallTimerRef) { clearTimeout(stallTimerRef); stallTimerRef = undefined; }
-      // Stream ended without any SSE data — resolve as empty so the inspection
-      // path triggers fallback instead of forwarding a blank response.
-      const bytes = (passThrough as any)._bytesForwarded ?? 0;
-      if (inspectResolve && bytes === 0) {
-        console.warn(`[empty-response] Provider "${provider.name}" returned zero-byte response (HTTP 200) — triggering fallback`);
-        inspectResolve("empty");
-        inspectResolve = undefined;
-      } else if (inspectResolve && !sawMessageStart && bytes > 0) {
-        // Got bytes but no valid SSE — malformed response
-        console.warn(`[empty-response] Provider "${provider.name}" returned ${bytes}b with no message_start (malformed SSE) — triggering fallback`);
-        inspectResolve("empty");
-        inspectResolve = undefined;
+      if (stallTimerRef) { clearInterval(stallTimerRef); stallTimerRef = undefined; }
+      // Stream ended — detect empty/malformed responses deterministically.
+      // Skip if the stream was intentionally closed (stall handler, early empty detection).
+      const isStallHandled = !!(passThrough as any)._intentionalClose;
+      if (!isStallHandled) {
+        const bytes = (passThrough as any)._bytesForwarded ?? 0;
+        if (bytes === 0) {
+          console.warn(`[empty-response] Provider "${provider.name}" returned zero-byte response (HTTP 200) — flagging as empty`);
+          streamDetectedEmpty = true;
+        } else if (!upstreamSentMessageStop && !upstreamHadRealContent) {
+          // No message_stop and no real content — either empty or interrupted.
+          console.warn(`[empty-response] Provider "${provider.name}" returned ${bytes}b with no message_stop and no real content — flagging as empty`);
+          streamDetectedEmpty = true;
+        }
       }
+      // Signal that the stream has ended so the inspection await can proceed.
+      if (streamEndedResolve) { streamEndedResolve(); streamEndedResolve = undefined; }
     });
 
     passThrough.on("error", () => {
-      if (stallTimerRef) { clearTimeout(stallTimerRef); stallTimerRef = undefined; }
+      if (stallTimerRef) { clearInterval(stallTimerRef); stallTimerRef = undefined; }
       // Mark intentional close BEFORE destroy so safeError() in the
       // ReadableStream wrapper suppresses the raw error instead of
       // propagating "socket closed unexpectedly" to the client.
       (passThrough as any)._intentionalClose = true;
       try { passThrough!.destroy(); } catch { /* already destroyed */ }
+      // Resolve the stream-ended promise so the inspection await doesn't hang.
+      if (streamEndedResolve) { streamEndedResolve(); streamEndedResolve = undefined; }
     });
 
     // If upstream errored before passThrough, the passThrough already has the SSE
@@ -1721,6 +1780,18 @@ export async function forwardRequest(
             for (const chunk of errorChunks) {
               try { controller.enqueue(new TextEncoder().encode(chunk)); } catch { /* already closed */ }
             }
+            }
+          } else if (!upstreamSentMessageStop && !upstreamHadRealContent) {
+            // Upstream ended without message_stop and no real content — interrupted stream.
+            // Use upstream snapshots — handleStall may have injected synthetic events.
+            // Flag as empty so the inspection path returns 502 and triggers fallback.
+            console.warn(`[safeClose] Interrupted stream (no upstream content, no upstream message_stop): bytes=${(passThrough as any)._bytesForwarded} start=${sawMessageStart} blockStart=${sawContentBlockStart} requestId=${ctx.requestId}`);
+            streamDetectedEmpty = true;
+            // Inject minimal closing events to prevent client-side crash while
+            // the inspection path handles the 502 fallback.
+            const missing = buildMissingSSEEvents(sawMessageStart, sawContentBlockStart, sawContentBlockStop);
+            for (const evt of missing) {
+              try { controller.enqueue(evt); } catch { /* already closed */ }
             }
           } else if (!sawMessageStop) {
             console.warn(`[safeClose] Injecting closing events: bytes=${(passThrough as any)._bytesForwarded} start=${sawMessageStart} blockStart=${sawContentBlockStart} blockStop=${sawContentBlockStop} msgStop=${sawMessageStop}`);
@@ -1787,19 +1858,16 @@ export async function forwardRequest(
           );
         }
 
-        passThrough.on("data", (chunk: Buffer) => {
-          // Guard: don't enqueue data if stream is already in a terminal state
+        // Wire up the deferred enqueue — called from the merged data handler
+        // instead of a separate listener, saving one EventEmitter dispatch per chunk.
+        enqueueChunk = (chunk: Buffer) => {
           if (ctx._streamState === "error" || ctx._streamState === "complete") return;
-
-          // Pure passthrough — forward bytes without modification.
-          const outChunk = new Uint8Array(chunk);
-
           if (sseBuffer) {
-            sseBuffer.write(outChunk);
+            sseBuffer.write(chunk);
           } else {
-            try { controller.enqueue(outChunk); } catch { /* already closed */ }
+            try { controller.enqueue(chunk); } catch { /* already closed */ }
           }
-        });
+        };
         passThrough.on("end", () => {
           if (sseBuffer) sseBuffer.end();
           safeClose();
@@ -1820,6 +1888,13 @@ export async function forwardRequest(
           } else {
             undiciResponse.body.pipe(passThrough);
           }
+          // Synchronous post-pipe check: if the upstream body already ended
+          // during pipe() (fast empty responses like GLM ~364ms), the "end"
+          // event may fire synchronously within start(), setting streamDetectedEmpty
+          // before we exit. Check here so the 502 path below catches it.
+          // If the end event fires asynchronously (after start() returns),
+          // safeClose() injects error SSE into the stream as a fallback.
+          // NOTE: this is a best-effort check — it only catches the sync case.
         }
       },
       cancel() {
@@ -1842,29 +1917,25 @@ export async function forwardRequest(
     });
 
     // ── Empty response inspection ──────────────────────────────────────────
-    // Wait for the SSE data handler to determine whether the response is empty
-    // or normal. Empty GLM responses complete in <1s; normal responses show
-    // content_block_start within ~2-3s. Timeout after 5s and assume normal
-    // (safe fallback — doesn't break anything, just misses the empty detection).
+    // Fast-empty providers (e.g. GLM Anthropic) can return empty in <400ms.
+    // The "end" event fires asynchronously after start() returns, so the
+    // synchronous streamDetectedEmpty check below misses it.
+    //
+    // Solution: race the stream-ended signal against a short deadline (500ms).
+    // If the stream ends within that window, check for emptiness and return 502
+    // (enabling fallback). Otherwise, proceed with normal streaming — safeClose()
+    // handles mid-stream empty detection by injecting error SSE.
     if (undiciResponse.statusCode >= 200 && undiciResponse.statusCode < 300) {
-      const inspectTimeout = new Promise<"normal">((resolve) => {
-        setTimeout(() => resolve("normal"), EMPTY_RESPONSE_INSPECT_MS);
-      });
-      const result = await Promise.race([emptyResponseInspect, inspectTimeout]);
-
-      if (result === "empty") {
-        // Empty end_turn detected — destroy streams and return 502 so
-        // the fallback chain retries with the next provider.
+      if (streamDetectedEmpty) {
+        // Synchronous check: upstream already closed with empty response during
+        // ReadableStream start() (the pipe + events fire synchronously within start()).
         clearTimeout(timeout);
         if (ttfbTimer) clearTimeout(ttfbTimer);
-        if (stallTimerRef) clearTimeout(stallTimerRef);
-        // Mark streams as intentionally closed to suppress error propagation
+        if (stallTimerRef) clearInterval(stallTimerRef);
         (passThrough as any)._intentionalClose = true;
         if (upstreamBody && !upstreamBody.destroyed) {
           (upstreamBody as any)._intentionalClose = true;
         }
-        // Cancel the wrappedStream — this triggers the cancel() handler
-        // which releases the session pool connection.
         try { wrappedStream.cancel(); } catch { /* already cancelled */ }
         try { passThrough.destroy(); } catch { /* already done */ }
         try { (undiciResponse.body as any).destroy(); } catch { /* already done */ }
@@ -1873,6 +1944,35 @@ export async function forwardRequest(
           true,
         );
       }
+
+      // Async empty check: race stream end against 500ms deadline.
+      // Catches fast-empty responses where the "end" event fires asynchronously
+      // after start() returns (GLM Anthropic ~364ms).
+      const EMPTY_CHECK_MS = 500;
+      const racedEmpty = await Promise.race([
+        streamEndedPromise.then(() => true),
+        new Promise<boolean>((r) => setTimeout(() => r(false), EMPTY_CHECK_MS)),
+      ]);
+      if (racedEmpty && streamDetectedEmpty) {
+        // Stream ended within deadline and was empty — return 502 for fallback.
+        clearTimeout(timeout);
+        if (ttfbTimer) clearTimeout(ttfbTimer);
+        if (stallTimerRef) clearInterval(stallTimerRef);
+        (passThrough as any)._intentionalClose = true;
+        if (upstreamBody && !upstreamBody.destroyed) {
+          (upstreamBody as any)._intentionalClose = true;
+        }
+        try { wrappedStream.cancel(); } catch { /* already cancelled */ }
+        try { passThrough.destroy(); } catch { /* already done */ }
+        try { (undiciResponse.body as any).destroy(); } catch { /* already done */ }
+        return makeErrorResponse(502, "overloaded_error",
+          `empty_response: Provider "${provider.name}" returned empty end_turn`,
+          true,
+        );
+      }
+      // Stream is still flowing — safeClose handles mid-stream empty detection.
+    } else {
+      if (streamEndedResolve) { streamEndedResolve(); streamEndedResolve = undefined; }
     }
 
     const response = new Response(wrappedStream, {
@@ -1886,7 +1986,7 @@ export async function forwardRequest(
   } catch (error) {
     clearTimeout(timeout);
     if (ttfbTimer) clearTimeout(ttfbTimer);
-    if (stallTimerRef) clearTimeout(stallTimerRef);
+    if (stallTimerRef) clearInterval(stallTimerRef);
 
     // Clean up upstream body if it was assigned before the error.
     // If undiciRequest resolved (setting upstreamBody at line ~724) but the TTFB
@@ -2011,7 +2111,7 @@ async function forwardWithRetry(
 
     // Check if this is a connection error vs an actual upstream 502/504
     const body = await result.text().catch(() => "");
-    const isConnectionError = body.includes("timed out") || body.includes("connection failed") || body.includes("stalled");
+    const isConnectionError = body.includes("timed out") || body.includes("connection failed") || body.includes("stalled") || body.includes("empty_response");
 
     if (!isConnectionError) {
       // Actual 502/504 from upstream — return as-is, let caller handle fallback

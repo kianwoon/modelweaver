@@ -801,6 +801,9 @@ export function createOpenAIResponsesToAnthropicStream() {
 
   // Buffer for incomplete lines across chunks
   let lineBuffer = "";
+  // Must be closure-scoped (not local to transform()) so event type survives
+  // chunk boundary splits — an event: line and data: line can span two chunks.
+  let currentEvent = "";
 
   return new Transform({
     transform(chunk: Buffer, _encoding: BufferEncoding, callback: () => void) {
@@ -811,7 +814,6 @@ export function createOpenAIResponsesToAnthropicStream() {
 
       const push = this.push.bind(this);
 
-      let currentEvent = "";
       for (const line of lines) {
         const trimmed = line.trim();
 
@@ -917,12 +919,14 @@ export function createOpenAIResponsesToAnthropicStream() {
 
     flush(callback: () => void) {
       const push = this.push.bind(this);
-      // Process any remaining buffered line
+      // Process any remaining buffered line — extract usage before closing
       if (lineBuffer.trim()) {
         const line = lineBuffer.trim();
         if (line.startsWith("data: ")) {
           try {
-            JSON.parse(line.slice(6).trim());
+            const parsed = JSON.parse(line.slice(6).trim());
+            if (parsed?.usage?.input_tokens !== undefined) inputTokens = parsed.usage.input_tokens;
+            if (parsed?.usage?.output_tokens !== undefined) outputTokens = parsed.usage.output_tokens;
           } catch {
             // Ignore
           }
