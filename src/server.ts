@@ -5,7 +5,7 @@ import { classifyTier, extractLastUserMessage } from "./classifier.js";
 import { forwardWithFallback, setMetricsStore as setProxyMetricsStore, type FallbackResult, recordProviderLatency } from "./proxy.js";
 import { SessionAgentPool, DEFAULT_STALE_AGENT_THRESHOLD_MS } from "./session-pool.js";
 import { createLogger, type LogLevel } from "./logger.js";
-import type { AppConfig, ProviderConfig, RequestContext, StreamState } from "./types.js";
+import type { AppConfig, RequestContext } from "./types.js";
 import { transitionStreamState } from "./types.js";
 import { resolveConcurrency, getSemaphore, resetSemaphores } from "./concurrency.js";
 import { randomUUID } from "node:crypto";
@@ -100,7 +100,7 @@ function parseUsageFromData(data: Record<string, unknown>): { inputTokens: numbe
  * For non-streaming JSON responses, uses a bounded sliding-window regex scan.
  */
 function createMetricsTransform(
-  ctx: { requestId: string; model: string; actualModel?: string; tier: string; startTime: number; fallbackMode?: "sequential" | "race"; sessionId?: string; _streamState?: StreamState; _streamStartTime?: number },
+  ctx: RequestContext,
   provider: string,
   targetProvider: string,
   metricsStore: MetricsStore,
