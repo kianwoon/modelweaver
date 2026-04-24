@@ -305,6 +305,7 @@ function createMetricsTransform(
   };
 
   const processChunk = (decoded: string, isFinal: boolean, controller: TransformStreamDefaultController<Uint8Array>) => {
+    const chunkStart = performance.now();
     if (isSSE === null) {
       // First chunk — detect format
       isSSE = contentType.includes("text/event-stream") || decoded.startsWith("event:") || decoded.startsWith("data:");
@@ -345,6 +346,9 @@ function createMetricsTransform(
         if (firstChunk) ctx._streamStartTime = now; // capture streaming start (excludes TTFB)
         firstChunk = false;
         const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
+        const streamDur = (now - (ctx._streamStartTime ?? now)) / 1000;
+        const tps = streamDur > 0 ? tokens.output / streamDur : 0;
+        const overheadMs = Math.round((performance.now() - chunkStart) * 100) / 100;
         setImmediate(() => {
           if (ctx._streamState !== "streaming") {
             ctx._streamState = transitionStreamState(ctx, "streaming", ctx.requestId);
@@ -358,6 +362,8 @@ function createMetricsTransform(
             outputTokens: tokens.output,
             timestamp: now,
             preview: responsePreview,
+            tokensPerSec: Math.round(tps * 10) / 10,
+            proxyOverheadMs: overheadMs,
             cacheHitRate: computeCacheHitRate(tokens.cacheRead, tokens.cacheCreation, tokens.input),
             contextPercent: computeContextPercent(tokens.input, tokens.cacheRead, tokens.cacheCreation, tokens.output, contextWindow),
             contextWindowSize: contextWindow || undefined,
@@ -381,6 +387,9 @@ function createMetricsTransform(
         if (firstChunk) ctx._streamStartTime = nowJson; // capture streaming start (excludes TTFB)
         firstChunk = false;
         const contextWindow = getContextWindow(ctx.actualModel || ctx.model);
+        const jsonStreamDur = (nowJson - (ctx._streamStartTime ?? nowJson)) / 1000;
+        const jsonTps = jsonStreamDur > 0 ? outputTokens / jsonStreamDur : 0;
+        const jsonOverheadMs = Math.round((performance.now() - chunkStart) * 100) / 100;
         setImmediate(() => {
           if (ctx._streamState !== "streaming") {
             ctx._streamState = transitionStreamState(ctx, "streaming", ctx.requestId);
@@ -394,6 +403,8 @@ function createMetricsTransform(
             outputTokens,
             timestamp: nowJson,
             preview: responsePreview,
+            tokensPerSec: Math.round(jsonTps * 10) / 10,
+            proxyOverheadMs: jsonOverheadMs,
             cacheHitRate: computeCacheHitRate(cacheReadTokens, cacheCreationTokens, inputTokens),
             contextPercent: computeContextPercent(inputTokens, cacheReadTokens, cacheCreationTokens, outputTokens, contextWindow),
             contextWindowSize: contextWindow || undefined,

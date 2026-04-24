@@ -327,4 +327,5 @@ export interface StreamEvent {
   contextWindowSize?: number;
   headerSize?: number;
   maxTokens?: number;
+  proxyOverheadMs?: number;
 }
