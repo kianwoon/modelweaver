@@ -12,6 +12,7 @@ interface LatencySample {
 
 export class LatencyTracker {
   private samples = new Map<string, LatencySample[]>();
+  private p50Cache = new Map<string, number>();
   private readonly maxSize: number;
   private readonly MAX_PROVIDERS = 50;
 
@@ -24,7 +25,10 @@ export class LatencyTracker {
     if (this.samples.size >= this.MAX_PROVIDERS && !this.samples.has(provider)) {
       // Remove the first (oldest) provider key
       const firstKey = this.samples.keys().next().value;
-      if (firstKey !== undefined) this.samples.delete(firstKey);
+      if (firstKey !== undefined) {
+        this.samples.delete(firstKey);
+        this.p50Cache.delete(firstKey);
+      }
     }
 
     let window = this.samples.get(provider);
@@ -37,15 +41,21 @@ export class LatencyTracker {
     if (excess > 0) {
       window.splice(0, excess);
     }
+    this.p50Cache.delete(provider);
   }
 
   /** P50 (median) latency in ms. Returns 0 if insufficient data. */
   getP50(provider: string): number {
+    const cached = this.p50Cache.get(provider);
+    if (cached !== undefined) return cached;
+
     const window = this.samples.get(provider);
     if (!window || window.length < 5) return 0;
     const sorted = window.map(s => s.ttfbMs).sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 !== 0 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+    const p50 = sorted.length % 2 !== 0 ? sorted[mid] : Math.round((sorted[mid - 1] + sorted[mid]) / 2);
+    this.p50Cache.set(provider, p50);
+    return p50;
   }
 
   /** Coefficient of variation (stddev / mean). Returns 0 if insufficient data. */
@@ -83,6 +93,7 @@ export class LatencyTracker {
 
   clear(provider: string): void {
     this.samples.delete(provider);
+    this.p50Cache.delete(provider);
   }
 
   /** Remove entries for providers no longer in the current config. */
@@ -91,6 +102,7 @@ export class LatencyTracker {
     for (const key of this.samples.keys()) {
       if (!active.has(key)) {
         this.samples.delete(key);
+        this.p50Cache.delete(key);
       }
     }
   }
