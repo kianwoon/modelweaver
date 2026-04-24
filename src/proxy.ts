@@ -2658,6 +2658,7 @@ export async function forwardWithFallback(
   //   Provider 0 starts immediately
   //   Provider 1+ start after adaptive delay (based on provider p50, capped at speculativeDelay)
   const races: Promise<{ response: Response; index: number }>[] = [];
+  const staggerTimers: ReturnType<typeof setTimeout>[] = [];
 
   for (let i = 0; i < chain.length; i++) {
     if (i === 0) {
@@ -2667,7 +2668,7 @@ export async function forwardWithFallback(
       const delay = getAdaptiveDelay(entry.provider, hedging, DEFAULT_SPECULATIVE_DELAY);
       races.push(
         new Promise<{ response: Response; index: number }>((resolve) => {
-          setTimeout(() => {
+          staggerTimers.push(setTimeout(() => {
             if (sharedController.signal.aborted) {
               // Race already won — resolve with a cancelled placeholder
               resolve({
@@ -2677,7 +2678,7 @@ export async function forwardWithFallback(
               return;
             }
             attemptProvider(i).then(resolve);
-          }, delay);
+          }, delay));
         }),
       );
     }
@@ -2693,6 +2694,7 @@ export async function forwardWithFallback(
 
       if (winner.response.status >= 200 && winner.response.status < 300) {
         sharedController.abort();
+        staggerTimers.forEach(t => clearTimeout(t));
         // Circuit breaker recording is handled inside hedgedForwardRequest()
         // (both single-copy and multi-copy paths record via recordResult).
         // Skip recording here to avoid double-recording in race+hedge mode.
@@ -2712,6 +2714,7 @@ export async function forwardWithFallback(
 
       if (!isRetriable(winner.response.status)) {
         sharedController.abort();
+        staggerTimers.forEach(t => clearTimeout(t));
         const winnerEntry = chain[winner.index];
         if (winner.response.body) {
           try {
