@@ -1,17 +1,24 @@
 export interface SSEBufferOptions {
   bufferBytes: number;  // 0 = disabled
   bufferMs: number;      // 0 = disabled
+  /** Hard cap — force-flush regardless of boundary when exceeded. Defaults to 1MB. */
+  maxBufferBytes?: number;
 }
+
+const DEFAULT_MAX_BUFFER_BYTES = 1024 * 1024; // 1MB
 
 export class SSEBuffer {
   private chunks: Uint8Array[] = [];
   private byteLength = 0;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private readonly maxBytes: number;
 
   constructor(
     private enqueue: (chunk: Uint8Array) => void,
     private opts: SSEBufferOptions,
-  ) {}
+  ) {
+    this.maxBytes = opts.maxBufferBytes ?? DEFAULT_MAX_BUFFER_BYTES;
+  }
 
   private scheduleTimer(): void {
     if (!this.opts.bufferMs) return;
@@ -71,7 +78,12 @@ export class SSEBuffer {
         this.scheduleTimer();
         return;
       }
-      // Size threshold met but no boundary — hold until next write or timer
+      // Size threshold met but no boundary — check hard cap before holding
+      if (this.byteLength >= this.maxBytes) {
+        this.flushAll();
+        return;
+      }
+      // Below hard cap — hold until next write or timer
       return;
     }
   }
