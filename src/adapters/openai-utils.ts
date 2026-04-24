@@ -603,24 +603,27 @@ export function createOpenAIChatToAnthropicStream() {
     // We just capture the finish_reason for stop_reason mapping.
   }
 
-  // Buffer for incomplete lines across chunks
-  let lineBuffer = "";
+  // Incomplete line remainder kept as Buffer to avoid toString() + string concat on every chunk.
+  let pending: Buffer | null = null;
 
   return new Transform({
     transform(chunk: Buffer, _encoding: BufferEncoding, callback: () => void) {
-      const text = lineBuffer + chunk.toString();
-      const lines = text.split("\n");
-      // Last element might be incomplete — save for next chunk
-      lineBuffer = lines.pop() ?? "";
-
       const push: PushFn = this.push.bind(this);
       let lastFinishReason: string | null = null;
 
-      for (const line of lines) {
+      // Combine with any pending remainder from previous chunk
+      const buf = pending ? Buffer.concat([pending, chunk]) : chunk;
+      pending = null;
+
+      let lineStart = 0;
+      for (let i = 0; i < buf.length; i++) {
+        if (buf[i] !== 0x0A) continue; // scan for \n
+        const line = buf.subarray(lineStart, i).toString("utf8");
+        lineStart = i + 1;
+
         const trimmed = line.trim();
         if (!trimmed.startsWith("data:")) continue;
 
-        // Handle both "data: ..." and "data:..." (with/without space)
         const data = trimmed.startsWith("data: ") ? trimmed.slice(6).trim() : trimmed.slice(5).trim();
         if (data === "[DONE]") {
           emitMessageStart(push);
@@ -631,7 +634,6 @@ export function createOpenAIChatToAnthropicStream() {
 
         try {
           const parsed = JSON.parse(data);
-          // Capture finish_reason from the chunk for stop_reason mapping
           const choice = parsed.choices?.[0];
           if (choice?.finish_reason) {
             lastFinishReason = choice.finish_reason;
@@ -639,9 +641,14 @@ export function createOpenAIChatToAnthropicStream() {
           processChunk(parsed, push);
         } catch {
           // Skip invalid JSON — likely a partial chunk that spans boundaries
-          // (handled by lineBuffer on next chunk)
         }
       }
+
+      // Save incomplete remainder as Buffer for next chunk
+      if (lineStart < buf.length) {
+        pending = buf.subarray(lineStart);
+      }
+
       callback();
     },
 
