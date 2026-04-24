@@ -2171,7 +2171,14 @@ async function forwardWithRetry(
   // Stall errors are recorded in handleStall() (per-request, no retry amplification).
 
   console.warn(`[proxy] All ${maxRetries + 1} attempts failed for "${provider.name}" — escalating to fallback`);
-  return lastResult!;
+  // Reconstruct Response — lastResult's body was consumed by .text() above.
+  // Caller (forwardWithFallback, race) needs a readable body for isConnectionErrorBody()
+  // and health scoring. Without this, clone() throws on consumed body, causing
+  // connection errors to be misclassified as real upstream 502s.
+  return new Response(lastBody, {
+    status: lastResult!.status,
+    headers: lastResult!.headers,
+  });
 }
 
 /**
