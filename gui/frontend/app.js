@@ -711,6 +711,7 @@ function applyStreamingUpdate(requestId, data) {
   let meta = tok > 0
     ? tok + ' tok' + (tps ? ' \u00b7 ' + tps : '') + ' \u00b7 ' + secs
     : secs;
+  if (data.proxyOverheadMs != null && data.proxyOverheadMs >= 0.01) meta += ' \u00b7 ' + data.proxyOverheadMs.toFixed(2) + 'ms proxy';
   // Cache hit rate and context usage (only show when non-zero)
   const cacheHit = data.cacheHitRate;
   const ctxPct = data.contextPercent;
@@ -816,6 +817,7 @@ function handleStreamEvent(data) {
     const tps = data.tokensPerSec ? data.tokensPerSec.toFixed(0) + ' tok/s' : '';
     const latency = data.latencyMs >= 1000 ? (data.latencyMs / 1000).toFixed(1) + 's' : data.latencyMs + 'ms';
     let finalMeta = (data.outputTokens || 0) + ' tok \u00b7 ' + tps + ' \u00b7 ' + latency;
+    if (data.proxyOverheadMs != null && data.proxyOverheadMs >= 0.01) finalMeta += ' \u00b7 ' + data.proxyOverheadMs.toFixed(2) + 'ms proxy';
     if (data.cacheHitRate != null && data.cacheHitRate > 0) finalMeta += ' \u00b7 ' + data.cacheHitRate.toFixed(0) + '% cache';
     if (data.contextPercent != null && data.contextPercent > 0) finalMeta += ' \u00b7 ' + data.contextPercent.toFixed(0) + '% ctx';
     entry.statusSpan.textContent = finalMeta;
