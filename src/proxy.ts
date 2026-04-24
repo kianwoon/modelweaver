@@ -1520,17 +1520,26 @@ export async function forwardRequest(
       // Update stall detection timestamp — no timer churn, just a timestamp.
       lastDataTime = Date.now();
 
+      // Decode once — reused by state tracking, empty detection, and debug logging.
+      const chunkText = chunk.toString("utf8");
+
       // Lightweight SSE state tracking via rolling tail buffer.
       // Accumulate last ~500 bytes across chunks to detect event types
       // that may span chunk boundaries.
       (passThrough as any)._bytesForwarded = ((passThrough as any)._bytesForwarded || 0) + chunk.length;
       if (!sawMessageStop) {
-        const chunkText = chunk.toString("utf8");
-        _rollingTail = (_rollingTail + chunkText).slice(-500);
-        if (!sawMessageStart && _rollingTail.includes('"message_start"')) sawMessageStart = true;
-        if (!sawContentBlockStart && _rollingTail.includes('"content_block_start"')) sawContentBlockStart = true;
-        if (!sawContentBlockStop && _rollingTail.includes('"content_block_stop"')) sawContentBlockStop = true;
-        if (_rollingTail.includes('"message_stop"')) {
+        // Only maintain the rolling tail while state flags are still being detected.
+        // Once message_start/content_block_start/content_block_stop are all true,
+        // the rolling tail serves no purpose — message_stop is a short event
+        // that won't span chunk boundaries.
+        if (!sawMessageStart || !sawContentBlockStart || !sawContentBlockStop) {
+          _rollingTail = (_rollingTail + chunkText).slice(-500);
+          if (!sawMessageStart && _rollingTail.includes('"message_start"')) sawMessageStart = true;
+          if (!sawContentBlockStart && _rollingTail.includes('"content_block_start"')) sawContentBlockStart = true;
+          if (!sawContentBlockStop && _rollingTail.includes('"content_block_stop"')) sawContentBlockStop = true;
+        }
+        // message_stop is always a complete SSE event (~55 bytes) — detect from chunkText directly.
+        if (chunkText.includes('"message_stop"')) {
           sawMessageStop = true;
           upstreamSentMessageStop = true;
         }
@@ -1584,17 +1593,16 @@ export async function forwardRequest(
       // Skip if intentionally closed — stall handler writes synthetic SSE
       // (message_delta + stop_reason) which would trigger a false positive.
       if (!streamDetectedEmpty && sawMessageStart && !(passThrough as any)._intentionalClose) {
-        const text = chunk.toString("utf8");
         // Pattern: message_delta with stop_reason but no real content.
         // A provider completing the message without ever sending content = empty.
-        if (text.includes('"message_delta"') && text.includes('"stop_reason"') && !sawRealContent) {
+        if (chunkText.includes('"message_delta"') && chunkText.includes('"stop_reason"') && !sawRealContent) {
           detectEarlyEmpty(`Provider "${provider.name}" sent message_delta with stop_reason but no real content`);
         }
       }
 
       // Debug: dump first chunk to see actual SSE content
       if (((passThrough as any)._bytesForwarded ?? 0) <= chunk.length) {
-        console.warn(`[tracking] First chunk (${chunk.length}b): ${chunk.toString("utf8").slice(0, 400)}`);
+        console.warn(`[tracking] First chunk (${chunk.length}b): ${chunkText.slice(0, 400)}`);
       }
 
       // Forward to ReadableStream — merged from handler 3 to avoid extra dispatch.
