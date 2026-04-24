@@ -1903,6 +1903,9 @@ export async function forwardRequest(
         if (upstreamBody && !upstreamBody.destroyed) {
           (upstreamBody as any)._intentionalClose = true;
         }
+        // Clear stall timer — destroy() skips "end" event so the normal cleanup
+        // path is unreachable. Without this, the interval leaks on client disconnect.
+        if (stallTimerRef) { clearInterval(stallTimerRef); stallTimerRef = undefined; }
         if (passThrough) {
           (passThrough as any)._intentionalClose = true;
           try { passThrough.destroy(); } catch { /* already done */ }
