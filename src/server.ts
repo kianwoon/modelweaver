@@ -402,6 +402,8 @@ function createMetricsTransform(
 
       if (isFinal) {
         recordMetrics(inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens);
+        ctx._finalOutputTokens = outputTokens;
+        ctx._finalInputTokens = inputTokens;
       }
     }
   };
@@ -827,6 +829,11 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     });
 
     const latency = Date.now() - ctx.startTime;
+    const outTok = ctx._finalOutputTokens ?? 0;
+    const inTok = ctx._finalInputTokens ?? 0;
+    const ttfbMs = ctx._streamStartTime ? ctx._streamStartTime - ctx.startTime : undefined;
+    const streamMs = ttfbMs != null ? latency - ttfbMs : undefined;
+    const tokPerSec = outTok > 0 && streamMs != null && streamMs > 0 ? Math.round(outTok / (streamMs / 1000)) : undefined;
     logger.info("Request completed", {
       requestId,
       model,
@@ -834,6 +841,10 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
       status: finalResponse.status,
       latencyMs: latency,
       ...(resolvedProvider ? { provider: resolvedProvider } : {}),
+      ...(outTok > 0 ? { outputTokens: outTok } : {}),
+      ...(inTok > 0 ? { inputTokens: inTok } : {}),
+      ...(ttfbMs != null ? { ttfbMs } : {}),
+      ...(tokPerSec != null ? { tokPerSec } : {}),
     });
 
     return finalResponse;

@@ -135,6 +135,10 @@ export interface RequestContext {
   /** Set when all providers in the chain have health < UNHEALTHY_THRESHOLD.
    *  Triggers immediate 503 response without attempting the chain. */
   _globalBackoff?: boolean;
+  /** Final output token count from the metrics transform, set at stream end. */
+  _finalOutputTokens?: number;
+  /** Final input token count from the metrics transform, set at stream end. */
+  _finalInputTokens?: number;
 }
 
 export interface RequestMetrics {

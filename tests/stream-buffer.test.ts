@@ -44,7 +44,28 @@ describe("SSEBuffer", () => {
 
     buf.write(e2);
     // Now at ~40 bytes, over 25 — should flush at last boundary
-    expect(enqueue.mock.calls.length).toBeGreaterThanOrEqual(1);
+    expect(enqueue).toHaveBeenCalledTimes(1);
+
+    // Flushed chunk must end at \n\n boundary (SSE correctness)
+    const flushed = enqueue.mock.calls[0][0] as Uint8Array;
+    const flushedStr = new TextDecoder().decode(flushed);
+    expect(flushedStr.endsWith("\n\n")).toBe(true);
+    expect(flushedStr).toContain("event: msg\ndata: a\n\n");
+
+    // Remainder (e2) is retained — writing e3 crosses threshold again
+    buf.write(sseEvent("msg", "c"));
+    expect(enqueue).toHaveBeenCalledTimes(2);
+    const secondFlush = enqueue.mock.calls[1][0] as Uint8Array;
+    const secondStr = new TextDecoder().decode(secondFlush);
+    expect(secondStr.endsWith("\n\n")).toBe(true);
+    expect(secondStr).toContain("event: msg\ndata: b\n\n");
+
+    // end() flushes any remaining buffered data
+    buf.end();
+    const finalFlush = enqueue.mock.calls[2][0] as Uint8Array;
+    const finalStr = new TextDecoder().decode(finalFlush);
+    expect(finalStr.endsWith("\n\n")).toBe(true);
+    expect(finalStr).toContain("event: msg\ndata: c\n\n");
   });
 
   it("holds partial event when size threshold hit mid-event", () => {
