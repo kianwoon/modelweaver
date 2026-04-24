@@ -117,7 +117,7 @@ function createMetricsTransform(
   // --- SSE state ---
   const tokens = { input: 0, output: 0, cacheRead: 0, cacheCreation: 0 };
   let lineBuf = "";
-  let eventBuf = "";
+  let eventLines: string[] = [];
 
   // --- JSON state ---
   const WINDOW_SIZE = 4096;
@@ -317,21 +317,24 @@ function createMetricsTransform(
 
       for (const line of lines) {
         if (line === "") {
-          if (eventBuf) {
-            drainEvents(eventBuf);
+          if (eventLines.length > 0) {
+            const eventText = eventLines.join("\n");
+            drainEvents(eventText);
             // Pure passthrough — forward event unchanged
-            controller.enqueue(te.encode(eventBuf + "\n\n"));
-            eventBuf = "";
+            controller.enqueue(te.encode(eventText + "\n\n"));
+            eventLines.length = 0;
           }
         } else {
-          eventBuf += (eventBuf ? "\n" : "") + line;
+          eventLines.push(line);
         }
       }
 
       if (isFinal) {
-        if (eventBuf.trim()) {
-          drainEvents(eventBuf);
-          controller.enqueue(te.encode(eventBuf));
+        if (eventLines.length > 0) {
+          const eventText = eventLines.join("\n");
+          drainEvents(eventText);
+          controller.enqueue(te.encode(eventText));
+          eventLines.length = 0;
         }
         recordMetrics(tokens.input, tokens.output, tokens.cacheRead, tokens.cacheCreation);
         return;
