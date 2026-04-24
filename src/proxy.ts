@@ -1090,7 +1090,16 @@ export async function forwardRequest(
               role: "user",
               content: [{ type: "text", text: `[System: ${trimmedCount} earlier messages were trimmed to fit context window. Continue working on the original task — do not stop until it is fully complete.]` }],
             };
-            trimmed = [trimmed[0], hint, ...trimmed.slice(1)];
+            // Insert hint before the first user message to preserve role alternation.
+            // If trimmed[0] is assistant (hard-cut fallback), inserting at [1] would
+            // produce assistant→user→assistant, violating Anthropic's role alternation.
+            const firstUserIdx = trimmed.findIndex((m: any) => m.role === "user");
+            if (firstUserIdx >= 0) {
+              trimmed = [...trimmed.slice(0, firstUserIdx), hint, ...trimmed.slice(firstUserIdx)];
+            } else {
+              // No user message found — prepend as fallback
+              trimmed = [hint, ...trimmed];
+            }
           }
 
           parsed.messages = trimmed;
@@ -1572,7 +1581,9 @@ export async function forwardRequest(
       // NOTE: We do NOT detect on ping events — ping is a valid keepalive
       // that can arrive between message_start and content_block_start in
       // normal streams. Rely on safeClose + upstream snapshots for that case.
-      if (!streamDetectedEmpty && sawMessageStart) {
+      // Skip if intentionally closed — stall handler writes synthetic SSE
+      // (message_delta + stop_reason) which would trigger a false positive.
+      if (!streamDetectedEmpty && sawMessageStart && !(passThrough as any)._intentionalClose) {
         const text = chunk.toString("utf8");
         // Pattern: message_delta with stop_reason but no real content.
         // A provider completing the message without ever sending content = empty.
@@ -1691,21 +1702,18 @@ export async function forwardRequest(
     passThrough.on("end", () => {
       if (stallTimerRef) { clearInterval(stallTimerRef); stallTimerRef = undefined; }
       // Stream ended — detect empty/malformed responses deterministically.
-      // Use upstream snapshots (not saw* flags) because handleStall may have
-      // injected synthetic events that corrupted sawMessageStop/sawRealContent.
-      const bytes = (passThrough as any)._bytesForwarded ?? 0;
-      if (bytes === 0) {
-        console.warn(`[empty-response] Provider "${provider.name}" returned zero-byte response (HTTP 200) — flagging as empty`);
-        streamDetectedEmpty = true;
-      } else if (!sawMessageStart) {
-        // Got bytes but no valid SSE — malformed response
-        console.warn(`[empty-response] Provider "${provider.name}" returned ${bytes}b with no message_start (malformed SSE) — flagging as empty`);
-        streamDetectedEmpty = true;
-      } else if (!upstreamSentMessageStop && !upstreamHadRealContent) {
-        // Upstream ended without message_stop and no real content — interrupted/empty.
-        // GLM sends message_start + ping then closes the connection without content.
-        console.warn(`[empty-response] Provider "${provider.name}" returned ${bytes}b with no upstream message_stop and no content (interrupted stream) — flagging as empty`);
-        streamDetectedEmpty = true;
+      // Skip if the stream was intentionally closed (stall handler, early empty detection).
+      const isStallHandled = !!(passThrough as any)._intentionalClose;
+      if (!isStallHandled) {
+        const bytes = (passThrough as any)._bytesForwarded ?? 0;
+        if (bytes === 0) {
+          console.warn(`[empty-response] Provider "${provider.name}" returned zero-byte response (HTTP 200) — flagging as empty`);
+          streamDetectedEmpty = true;
+        } else if (!upstreamSentMessageStop && !upstreamHadRealContent) {
+          // No message_stop and no real content — either empty or interrupted.
+          console.warn(`[empty-response] Provider "${provider.name}" returned ${bytes}b with no message_stop and no real content — flagging as empty`);
+          streamDetectedEmpty = true;
+        }
       }
       // Signal that the stream has ended so the inspection await can proceed.
       if (streamEndedResolve) { streamEndedResolve(); streamEndedResolve = undefined; }
