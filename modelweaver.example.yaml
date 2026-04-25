@@ -79,6 +79,10 @@ routing:
   sonnet:
     - provider: anthropic
       model: claude-sonnet-4-20250514
+      # Context management — reduce tokens sent to provider:
+      # compressOldTurns: 10   # keep last 10 turns verbatim, skeleton older ones
+      # maxContextMessages: 60 # hard limit on total messages (runs after compression)
+      # toolResultLimit: 8000  # max chars per tool_result block
     - provider: openrouter
       model: anthropic/claude-sonnet-4
   opus:

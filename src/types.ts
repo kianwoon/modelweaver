@@ -19,6 +19,8 @@ export interface ProviderConfig {
   maxContextMessages?: number;
   /** Max characters per tool_result content block. Head+tail truncation if exceeded. */
   toolResultLimit?: number;
+  /** Number of recent turns to keep verbatim. Older turns are compressed to skeleton summaries. */
+  compressOldTurns?: number;
 
   /** Runtime-only cached fields — not serialized to config */
   _cachedHost?: string;

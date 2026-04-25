@@ -665,6 +665,120 @@ const COMPRESSORS: Record<CompressionBucket, (text: string, limit: number, toolN
   default: compressDefault,
 };
 
+/**
+ * Compress old conversation turns to skeleton summaries.
+ * Keeps the most recent `keepTurns` turns verbatim. Older turns are replaced with
+ * one-line summaries (role structure preserved). Tool chain messages (tool_use,
+ * tool_result pairs) in old turns are removed entirely — the assistant skeleton
+ * mentions which tools were used.
+ *
+ * Mutates body.messages in-place. Run cleanOrphanedToolMessages() after.
+ */
+export function compressOldTurns(body: Record<string, unknown>, keepTurns: number): void {
+  const messages = body.messages as any[] | undefined;
+  if (!Array.isArray(messages) || messages.length === 0) return;
+
+  // Identify turn boundaries: a "turn" starts at each user text message
+  // (not tool_result, not injected hint)
+  const isTurnStart = (msg: any): boolean => {
+    if (msg.role !== "user") return false;
+    if (Array.isArray(msg.content) && msg.content.some((b: any) => b?.type === "tool_result")) return false;
+    if (Array.isArray(msg.content) && msg.content.length === 1 && msg.content[0]?.type === "text" &&
+        typeof msg.content[0].text === "string" && msg.content[0].text.startsWith("[System:")) return false;
+    return true;
+  };
+
+  // Collect turn boundary indices
+  const turnStarts: number[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    if (isTurnStart(messages[i])) turnStarts.push(i);
+  }
+
+  // Nothing to compress if we're within the limit
+  if (turnStarts.length <= keepTurns) return;
+
+  // Determine which turns to compress: all except the last `keepTurns`
+  const firstKeptTurnIdx = turnStarts.length - keepTurns;
+
+  // Build index of which message indices belong to old turns (before firstKeptMsgIdx)
+  // For each old turn, we'll generate a skeleton pair: user summary + assistant summary
+  const skeletons: any[] = [];
+  const removeIndices = new Set<number>();
+
+  for (let t = 0; t < firstKeptTurnIdx; t++) {
+    const start = turnStarts[t];
+    const end = t + 1 < turnStarts.length ? turnStarts[t + 1] : messages.length;
+
+    // Collect this turn's messages
+    let userPreview = "";
+    let assistantToolNames: string[] = [];
+    let assistantTextPreview = "";
+
+    for (let i = start; i < end; i++) {
+      const msg = messages[i];
+      removeIndices.add(i);
+
+      // Extract user text preview
+      if (msg.role === "user") {
+        const text = typeof msg.content === "string" ? msg.content :
+          Array.isArray(msg.content) ? msg.content
+            .filter((b: any) => b?.type === "text")
+            .map((b: any) => b.text)
+            .join("") : "";
+        userPreview = text.slice(0, 80);
+      }
+
+      // Extract assistant info
+      if (msg.role === "assistant" && Array.isArray(msg.content)) {
+        for (const block of msg.content) {
+          if (block.type === "tool_use" && block.name) {
+            assistantToolNames.push(block.name);
+          }
+          if (block.type === "text" && block.text && !assistantTextPreview) {
+            assistantTextPreview = String(block.text).slice(0, 60);
+          }
+        }
+      }
+    }
+
+    // Build skeleton user message
+    const userText = userPreview
+      ? `[Earlier: user asked "${userPreview}${userPreview.length >= 80 ? "..." : ""}"]`
+      : "[Earlier: user message]";
+    skeletons.push({
+      role: "user",
+      content: [{ type: "text", text: userText }],
+    });
+
+    // Build skeleton assistant message
+    let assistantText: string;
+    if (assistantToolNames.length > 0) {
+      assistantText = `[Earlier: assistant used ${assistantToolNames.join(", ")}]`;
+    } else if (assistantTextPreview) {
+      assistantText = `[Earlier: assistant responded "${assistantTextPreview}..."]`;
+    } else {
+      assistantText = "[Earlier: assistant responded]";
+    }
+    skeletons.push({
+      role: "assistant",
+      content: [{ type: "text", text: assistantText }],
+    });
+  }
+
+  // Splice: replace old messages with skeletons + kept messages
+  // No hint message — skeletons use "[Earlier: ...]" prefix to signal compression.
+  // A hint message would break role alternation (user→user with first kept message).
+  const keptMessages = messages.filter((_: any, i: number) => !removeIndices.has(i));
+  const newMessages = [...skeletons, ...keptMessages];
+
+  (body as any).messages = newMessages;
+
+  const compressedCount = removeIndices.size;
+  console.warn(
+    `[context-compress] Compressed ${firstKeptTurnIdx} old turns (${compressedCount} messages) to ${skeletons.length} skeleton messages, kept ${keptMessages.length} verbatim (limit: ${keepTurns} turns)`,
+  );
+}
+
 function compressToolResults(body: Record<string, unknown>, limit: number): void {
   const messages = body.messages;
   if (!Array.isArray(messages)) return;
@@ -739,6 +853,7 @@ function applyTargetedReplacements(
     if (entry.model) mutable.model = entry.model;
     if (needsOrphanClean) cleanOrphanedToolMessages(mutable);
     if (provider.toolResultLimit) compressToolResults(mutable, provider.toolResultLimit);
+    if (provider.compressOldTurns) compressOldTurns(mutable, provider.compressOldTurns);
     if (provider.modelLimits) {
       const { maxOutputTokens } = provider.modelLimits;
       const requested = typeof mutable.max_tokens === "number" ? mutable.max_tokens : maxOutputTokens;
@@ -901,9 +1016,13 @@ export async function forwardRequest(
       if (needsThinkingStrip) needsModification = true;
 
       // Check 5: Tool result compression needed?
-      // Only trigger full mutation when tool_result blocks actually exist AND are oversized.
+      // Only trigger full mutation when tool_result blocks actually exist AND are oversized,
+      // or when turn compression is configured.
       // Avoids forcing JSON.stringify on every request (breaks prompt cache).
       let needsCompression = false;
+      if (provider.compressOldTurns) {
+        needsCompression = true;
+      }
       if (provider.toolResultLimit && Array.isArray(parsed.messages)) {
         for (const msg of parsed.messages) {
           if (msg.role !== "user" || !Array.isArray(msg.content)) continue;
@@ -956,6 +1075,10 @@ export async function forwardRequest(
 
           if (provider.toolResultLimit) {
             compressToolResults(mutable, provider.toolResultLimit);
+          }
+
+          if (provider.compressOldTurns) {
+            compressOldTurns(mutable, provider.compressOldTurns);
           }
 
           if (provider.modelLimits) {
