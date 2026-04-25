@@ -138,6 +138,7 @@ const providerSchema = z.object({
   concurrentLimit: z.number().int().min(1).optional(),
   maxContextMessages: z.number().int().positive().optional(),
   toolResultLimit: z.number().int().positive().optional(),
+  compressOldTurns: z.number().int().positive().optional(),
   poolSize: z.number().int().min(1).max(100).optional(),
   modelPools: z.record(z.string(), z.number().int().min(1).max(50)).optional(),
   connectionRetries: z.number().int().min(0).max(10).optional(),
@@ -541,6 +542,7 @@ export async function loadConfig(configPath?: string, cwd?: string): Promise<{ c
       modelPools: p.modelPools !== undefined ? { ...p.modelPools } : undefined,
       maxContextMessages: p.maxContextMessages,
       toolResultLimit: p.toolResultLimit,
+      compressOldTurns: p.compressOldTurns,
       prewarm: p.prewarm,
     };
     try {
