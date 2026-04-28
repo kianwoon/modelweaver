@@ -675,36 +675,44 @@ const COMPRESSORS: Record<CompressionBucket, (text: string, limit: number, toolN
  * Mutates body.messages in-place. Run cleanOrphanedToolMessages() after.
  */
 /**
- * Detects user-role messages that carry MEMORY.md content injected by Claude Code.
- * These appear as <system-reminder> blocks with "MEMORY.md" or "auto-memory" references.
- * Must survive all trimming/compression so the model doesn't repeat past mistakes.
+ * Detects user-role messages that carry critical system content injected by Claude Code.
+ * These appear as <system-reminder> blocks and must survive all trimming/compression:
+ * - CLAUDE.md: project instructions, user rules, preferences (without these, the agent
+ *   ignores all project conventions and user expectations)
+ * - MEMORY.md: cross-session learnings (without these, the model repeats past mistakes)
+ *
+ * Claude Code injects these as user-role messages with <system-reminder> tags.
+ * We match on known section markers rather than the raw <system-reminder> tag itself,
+ * since many ephemeral reminders (tool hints, session notices) should still be trimmed.
  */
-function isMemoryBearingMessage(msg: any): boolean {
+function isProtectedSystemMessage(msg: any): boolean {
   if (msg.role !== "user") return false;
   const text = typeof msg.content === "string" ? msg.content :
     Array.isArray(msg.content) ? msg.content
       .filter((b: any) => b?.type === "text")
       .map((b: any) => b.text)
       .join("") : "";
-  return /MEMORY\.md|auto-memory/.test(text);
+  // CLAUDE.md injections: "claudeMd", "Contents of ...CLAUDE.md", "Codebase and user instructions"
+  // MEMORY.md injections: "MEMORY.md", "auto-memory"
+  return /MEMORY\.md|auto-memory|CLAUDE\.md|claudeMd|Codebase and user instructions/.test(text);
 }
 
 /**
- * Extracts memory-bearing messages from a message array, returning the remaining
- * messages (with memory messages removed) and the extracted memory messages.
- * Memory messages are rare (1-2 per conversation) so this is effectively zero-cost.
+ * Extracts protected system messages from a message array, returning the remaining
+ * messages (with protected messages removed) and the extracted protected messages.
+ * These are rare (2-4 per conversation) so effectively zero-cost.
  */
-function extractMemoryMessages(messages: any[]): { remaining: any[]; memory: any[] } {
-  const memory: any[] = [];
+function extractProtectedMessages(messages: any[]): { remaining: any[]; protected: any[] } {
+  const protected_: any[] = [];
   const remaining: any[] = [];
   for (const msg of messages) {
-    if (isMemoryBearingMessage(msg)) {
-      memory.push(msg);
+    if (isProtectedSystemMessage(msg)) {
+      protected_.push(msg);
     } else {
       remaining.push(msg);
     }
   }
-  return { remaining, memory };
+  return { remaining, protected: protected_ };
 }
 
 export function compressOldTurns(body: Record<string, unknown>, keepTurns: number): void {
@@ -731,8 +739,8 @@ export function compressOldTurns(body: Record<string, unknown>, keepTurns: numbe
   if (turnStarts.length <= keepTurns) return;
 
   // Protect memory-bearing messages — they must survive compression
-  const { memory: preservedMemory } = extractMemoryMessages(messages);
-  const memorySet = new Set(preservedMemory);
+  const { protected: preservedMessages } = extractProtectedMessages(messages);
+  const protectedSet = new Set(preservedMessages);
 
   // Determine which turns to compress: all except the last `keepTurns`
   const firstKeptTurnIdx = turnStarts.length - keepTurns;
@@ -749,7 +757,7 @@ export function compressOldTurns(body: Record<string, unknown>, keepTurns: numbe
 
     // Skip turns that are purely memory-bearing messages
     const turnMsgs = messages.slice(start, end);
-    const allMemory = turnMsgs.every((m: any) => memorySet.has(m));
+    const allMemory = turnMsgs.every((m: any) => protectedSet.has(m));
     if (allMemory) continue;
 
     // Collect this turn's messages
@@ -759,7 +767,7 @@ export function compressOldTurns(body: Record<string, unknown>, keepTurns: numbe
 
     for (let i = start; i < end; i++) {
       // Never remove memory-bearing messages
-      if (memorySet.has(messages[i])) continue;
+      if (protectedSet.has(messages[i])) continue;
       const msg = messages[i];
       removeIndices.add(i);
 
@@ -816,21 +824,21 @@ export function compressOldTurns(body: Record<string, unknown>, keepTurns: numbe
   const keptMessages = messages.filter((_: any, i: number) => !removeIndices.has(i));
   const newMessages = [...skeletons, ...keptMessages];
 
-  // Reinject memory messages at the front so they're always present
-  if (preservedMemory.length > 0) {
+  // Reinject protected system messages at the front so they're always present
+  if (preservedMessages.length > 0) {
     // Find the first user message index to maintain role alternation
     const firstUserIdx = newMessages.findIndex((m: any) => m.role === "user");
     if (firstUserIdx >= 0) {
-      newMessages.splice(firstUserIdx, 0, ...preservedMemory);
+      newMessages.splice(firstUserIdx, 0, ...preservedMessages);
     } else {
-      newMessages.unshift(...preservedMemory);
+      newMessages.unshift(...preservedMessages);
     }
   }
 
   (body as any).messages = newMessages;
 
   const compressedCount = removeIndices.size;
-  const memoryNote = preservedMemory.length > 0 ? `, preserved ${preservedMemory.length} memory messages` : "";
+  const memoryNote = preservedMessages.length > 0 ? `, preserved ${preservedMessages.length} protected system messages` : "";
   console.warn(
     `[context-compress] Compressed ${firstKeptTurnIdx} old turns (${compressedCount} messages) to ${skeletons.length} skeleton messages, kept ${keptMessages.length} verbatim (limit: ${keepTurns} turns${memoryNote})`,
   );
@@ -1266,7 +1274,7 @@ export async function forwardRequest(
           // Preserve memory-bearing messages that were trimmed away.
           // MEMORY.md content must survive trimming — losing it means the model
           // repeats the same mistakes those memories were created to prevent.
-          const lostMemory = allMsgs.slice(0, bestStart).filter(isMemoryBearingMessage);
+          const lostMemory = allMsgs.slice(0, bestStart).filter(isProtectedSystemMessage);
           if (lostMemory.length > 0) {
             // Insert before first user message to maintain role alternation
             const firstUserIdx = trimmed.findIndex((m: any) => m.role === "user");
@@ -1302,7 +1310,7 @@ export async function forwardRequest(
           body = JSON.stringify(parsed);
           const finalCount = (parsed.messages as any[]).length;
           const turnsKept = turnStarts.filter(s => s >= bestStart).length;
-          const memoryNote = lostMemory.length > 0 ? `, preserved ${lostMemory.length} memory msgs` : "";
+          const memoryNote = lostMemory.length > 0 ? `, preserved ${lostMemory.length} protected system msgs` : "";
           console.warn(`[context-trim] Trimmed messages from ${original} to ${finalCount} (${turnsKept} turns, limit: ${limit}, instruction preserved: ${bestInstruction !== null}${memoryNote}) for provider ${provider.name}`);
         }
       }
