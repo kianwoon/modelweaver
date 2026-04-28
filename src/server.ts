@@ -2,7 +2,7 @@
 import { Hono } from "hono";
 import { resolveRequest, clearRoutingCache } from "./router.js";
 import { classifyTier, extractLastUserMessage } from "./classifier.js";
-import { forwardWithFallback, setMetricsStore as setProxyMetricsStore, type FallbackResult, recordProviderLatency } from "./proxy.js";
+import { forwardWithFallback, setMetricsStore as setProxyMetricsStore, type FallbackResult, recordProviderLatency, compressToolResults, compressOldTurns } from "./proxy.js";
 import { SessionAgentPool, DEFAULT_STALE_AGENT_THRESHOLD_MS } from "./session-pool.js";
 import { createLogger, type LogLevel } from "./logger.js";
 import type { AppConfig, RequestContext } from "./types.js";
@@ -508,12 +508,21 @@ export function createApp(initConfig: AppConfig, logLevel: LogLevel, metricsStor
     let rawBody: string;
     try {
       rawBody = await c.req.text();
-      if (rawBody.length > MAX_BODY_SIZE) {
-        return anthropicError("invalid_request_error", `Request body exceeds maximum size of ${maxBodyMB}MB`, requestId);
-      }
       body = JSON.parse(rawBody);
     } catch {
       return anthropicError("invalid_request_error", "Invalid JSON body", requestId);
+    }
+
+    // Oversized body: try compression before rejecting.
+    // Normal-sized requests keep the original rawBody (preserves prompt caching).
+    if (rawBody.length > MAX_BODY_SIZE) {
+      const parsed = body as Record<string, unknown>;
+      compressToolResults(parsed, 6000);
+      compressOldTurns(parsed, 5);
+      rawBody = JSON.stringify(parsed);
+      if (rawBody.length > MAX_BODY_SIZE * 2) {
+        return anthropicError("invalid_request_error", `Request body exceeds maximum size of ${maxBodyMB}MB even after compression`, requestId);
+      }
     }
 
     const model = body.model;
