@@ -674,6 +674,39 @@ const COMPRESSORS: Record<CompressionBucket, (text: string, limit: number, toolN
  *
  * Mutates body.messages in-place. Run cleanOrphanedToolMessages() after.
  */
+/**
+ * Detects user-role messages that carry MEMORY.md content injected by Claude Code.
+ * These appear as <system-reminder> blocks with "MEMORY.md" or "auto-memory" references.
+ * Must survive all trimming/compression so the model doesn't repeat past mistakes.
+ */
+function isMemoryBearingMessage(msg: any): boolean {
+  if (msg.role !== "user") return false;
+  const text = typeof msg.content === "string" ? msg.content :
+    Array.isArray(msg.content) ? msg.content
+      .filter((b: any) => b?.type === "text")
+      .map((b: any) => b.text)
+      .join("") : "";
+  return /MEMORY\.md|auto-memory/.test(text);
+}
+
+/**
+ * Extracts memory-bearing messages from a message array, returning the remaining
+ * messages (with memory messages removed) and the extracted memory messages.
+ * Memory messages are rare (1-2 per conversation) so this is effectively zero-cost.
+ */
+function extractMemoryMessages(messages: any[]): { remaining: any[]; memory: any[] } {
+  const memory: any[] = [];
+  const remaining: any[] = [];
+  for (const msg of messages) {
+    if (isMemoryBearingMessage(msg)) {
+      memory.push(msg);
+    } else {
+      remaining.push(msg);
+    }
+  }
+  return { remaining, memory };
+}
+
 export function compressOldTurns(body: Record<string, unknown>, keepTurns: number): void {
   const messages = body.messages as any[] | undefined;
   if (!Array.isArray(messages) || messages.length === 0) return;
@@ -697,11 +730,16 @@ export function compressOldTurns(body: Record<string, unknown>, keepTurns: numbe
   // Nothing to compress if we're within the limit
   if (turnStarts.length <= keepTurns) return;
 
+  // Protect memory-bearing messages — they must survive compression
+  const { memory: preservedMemory } = extractMemoryMessages(messages);
+  const memorySet = new Set(preservedMemory);
+
   // Determine which turns to compress: all except the last `keepTurns`
   const firstKeptTurnIdx = turnStarts.length - keepTurns;
 
   // Build index of which message indices belong to old turns (before firstKeptMsgIdx)
   // For each old turn, we'll generate a skeleton pair: user summary + assistant summary
+  // Memory-bearing messages are excluded from removal
   const skeletons: any[] = [];
   const removeIndices = new Set<number>();
 
@@ -709,12 +747,19 @@ export function compressOldTurns(body: Record<string, unknown>, keepTurns: numbe
     const start = turnStarts[t];
     const end = t + 1 < turnStarts.length ? turnStarts[t + 1] : messages.length;
 
+    // Skip turns that are purely memory-bearing messages
+    const turnMsgs = messages.slice(start, end);
+    const allMemory = turnMsgs.every((m: any) => memorySet.has(m));
+    if (allMemory) continue;
+
     // Collect this turn's messages
     let userPreview = "";
     let assistantToolNames: string[] = [];
     let assistantTextPreview = "";
 
     for (let i = start; i < end; i++) {
+      // Never remove memory-bearing messages
+      if (memorySet.has(messages[i])) continue;
       const msg = messages[i];
       removeIndices.add(i);
 
@@ -765,21 +810,33 @@ export function compressOldTurns(body: Record<string, unknown>, keepTurns: numbe
     });
   }
 
-  // Splice: replace old messages with skeletons + kept messages
+  // Splice: replace old messages with skeletons + kept messages + preserved memory
   // No hint message — skeletons use "[Earlier: ...]" prefix to signal compression.
   // A hint message would break role alternation (user→user with first kept message).
   const keptMessages = messages.filter((_: any, i: number) => !removeIndices.has(i));
   const newMessages = [...skeletons, ...keptMessages];
 
+  // Reinject memory messages at the front so they're always present
+  if (preservedMemory.length > 0) {
+    // Find the first user message index to maintain role alternation
+    const firstUserIdx = newMessages.findIndex((m: any) => m.role === "user");
+    if (firstUserIdx >= 0) {
+      newMessages.splice(firstUserIdx, 0, ...preservedMemory);
+    } else {
+      newMessages.unshift(...preservedMemory);
+    }
+  }
+
   (body as any).messages = newMessages;
 
   const compressedCount = removeIndices.size;
+  const memoryNote = preservedMemory.length > 0 ? `, preserved ${preservedMemory.length} memory messages` : "";
   console.warn(
-    `[context-compress] Compressed ${firstKeptTurnIdx} old turns (${compressedCount} messages) to ${skeletons.length} skeleton messages, kept ${keptMessages.length} verbatim (limit: ${keepTurns} turns)`,
+    `[context-compress] Compressed ${firstKeptTurnIdx} old turns (${compressedCount} messages) to ${skeletons.length} skeleton messages, kept ${keptMessages.length} verbatim (limit: ${keepTurns} turns${memoryNote})`,
   );
 }
 
-function compressToolResults(body: Record<string, unknown>, limit: number): void {
+export function compressToolResults(body: Record<string, unknown>, limit: number): void {
   const messages = body.messages;
   if (!Array.isArray(messages)) return;
 
@@ -1206,6 +1263,20 @@ export async function forwardRequest(
             trimmed = [bestInstruction, ...trimmed];
           }
 
+          // Preserve memory-bearing messages that were trimmed away.
+          // MEMORY.md content must survive trimming — losing it means the model
+          // repeats the same mistakes those memories were created to prevent.
+          const lostMemory = allMsgs.slice(0, bestStart).filter(isMemoryBearingMessage);
+          if (lostMemory.length > 0) {
+            // Insert before first user message to maintain role alternation
+            const firstUserIdx = trimmed.findIndex((m: any) => m.role === "user");
+            if (firstUserIdx >= 0) {
+              trimmed = [...trimmed.slice(0, firstUserIdx), ...lostMemory, ...trimmed.slice(firstUserIdx)];
+            } else {
+              trimmed = [...lostMemory, ...trimmed];
+            }
+          }
+
           // Inject continuation hint as array content (not plain string) so it doesn't
           // create a fake turn boundary in future requests' turn detection.
           if (trimmedCount > 0 && trimmed.length > 0) {
@@ -1231,7 +1302,8 @@ export async function forwardRequest(
           body = JSON.stringify(parsed);
           const finalCount = (parsed.messages as any[]).length;
           const turnsKept = turnStarts.filter(s => s >= bestStart).length;
-          console.warn(`[context-trim] Trimmed messages from ${original} to ${finalCount} (${turnsKept} turns, limit: ${limit}, instruction preserved: ${bestInstruction !== null}) for provider ${provider.name}`);
+          const memoryNote = lostMemory.length > 0 ? `, preserved ${lostMemory.length} memory msgs` : "";
+          console.warn(`[context-trim] Trimmed messages from ${original} to ${finalCount} (${turnsKept} turns, limit: ${limit}, instruction preserved: ${bestInstruction !== null}${memoryNote}) for provider ${provider.name}`);
         }
       }
     } catch {
@@ -1611,6 +1683,12 @@ export async function forwardRequest(
     let streamEndedResolve: (() => void) | undefined;
     const streamEndedPromise: Promise<void> = new Promise((resolve) => { streamEndedResolve = resolve; });
 
+    // Content gate: resolves the moment real content arrives (text_delta with
+    // non-empty text or tool_use). Used by the empty-response inspection to
+    // deterministically wait for content vs. stream end — no timers involved.
+    let realContentResolve: (() => void) | undefined;
+    const realContentPromise: Promise<void> = new Promise((resolve) => { realContentResolve = resolve; });
+
     // Early empty-response detection: fires in the data handler as soon as the
     // pattern is recognized, BEFORE the stream ends. No timers, no blocking.
     // Since the Response is already streaming to the client (HTTP 200 headers sent),
@@ -1673,6 +1751,7 @@ export async function forwardRequest(
           if (HAS_TOOL_USE_RE.test(chunkText)) {
             sawRealContent = true;
             upstreamHadRealContent = true;
+            if (realContentResolve) { realContentResolve(); realContentResolve = undefined; }
           } else {
             // Parse SSE data lines to find text_delta with non-empty text.
             // Avoids regex that assumes JSON key ordering and breaks on escaped quotes.
@@ -1683,11 +1762,11 @@ export async function forwardRequest(
               try {
                 const evt = JSON.parse(payload);
                 if (evt.type === "content_block_delta" && (
-                  (evt.delta?.type === "text_delta" && evt.delta.text && evt.delta.text.length > 0) ||
-                  evt.delta?.type === "thinking_delta"
+                  evt.delta?.type === "text_delta" && evt.delta.text && evt.delta.text.length > 0
                 )) {
                   sawRealContent = true;
                   upstreamHadRealContent = true;
+                  if (realContentResolve) { realContentResolve(); realContentResolve = undefined; }
                   break;
                 }
               } catch { /* not valid JSON — skip */ }
@@ -1697,7 +1776,8 @@ export async function forwardRequest(
       }
 
       // Empty response detection: check if this is an empty end_turn.
-      // sawRealContent means we got actual text or tool_use — definitely normal.
+      // sawRealContent only counts text_delta with actual text or tool_use.
+      // thinking_delta alone does NOT count — a thinking-only response is empty.
       // Once we see message_stop without real content, flag as empty.
       if (!streamDetectedEmpty) {
         if (sawMessageStop && !sawRealContent && !(passThrough as any)._intentionalClose) {
@@ -2051,14 +2131,12 @@ export async function forwardRequest(
     });
 
     // ── Empty response inspection ──────────────────────────────────────────
-    // Fast-empty providers (e.g. GLM Anthropic) can return empty in <400ms.
-    // The "end" event fires asynchronously after start() returns, so the
-    // synchronous streamDetectedEmpty check below misses it.
+    // Providers (e.g. GLM Anthropic) can return empty streams with HTTP 200.
+    // The stream ends with message_start but no real content and no message_stop.
     //
-    // Solution: race the stream-ended signal against a short deadline (500ms).
-    // If the stream ends within that window, check for emptiness and return 502
-    // (enabling fallback). Otherwise, proceed with normal streaming — safeClose()
-    // handles mid-stream empty detection by injecting error SSE.
+    // Solution: wait deterministically for either real content or stream end.
+    // No timers — catches empty responses at any speed. Valid streams proceed
+    // immediately once the first real content arrives (zero added latency).
     if (undiciResponse.statusCode >= 200 && undiciResponse.statusCode < 300) {
       if (streamDetectedEmpty) {
         // Synchronous check: upstream already closed with empty response during
@@ -2079,15 +2157,15 @@ export async function forwardRequest(
         );
       }
 
-      // Async empty check: race stream end against 500ms deadline.
-      // Catches fast-empty responses where the "end" event fires asynchronously
-      // after start() returns (GLM Anthropic ~364ms).
-      const EMPTY_CHECK_MS = 500;
-      const racedEmpty = await Promise.race([
-        streamEndedPromise.then(() => true),
-        new Promise<boolean>((r) => setTimeout(() => r(false), EMPTY_CHECK_MS)),
+      // Deterministic empty check: wait for either real content or stream end.
+      // No timers — catches empty responses at any speed (GLM native ~950ms,
+      // fast empties ~364ms, slow empties >5s). Valid streams pass through
+      // immediately once the first real content arrives.
+      const winner = await Promise.race([
+        realContentPromise.then(() => "content" as const),
+        streamEndedPromise.then(() => "ended" as const),
       ]);
-      if (racedEmpty && streamDetectedEmpty) {
+      if (winner === "ended" && streamDetectedEmpty) {
         // Stream ended within deadline and was empty — return 502 for fallback.
         clearTimeout(timeout);
         if (ttfbTimer) clearTimeout(ttfbTimer);
@@ -2105,6 +2183,7 @@ export async function forwardRequest(
         );
       }
       // Stream is still flowing — safeClose handles mid-stream empty detection.
+      // Real content arrived, so the stream is valid — proceed normally.
     } else {
       if (streamEndedResolve) { streamEndedResolve(); streamEndedResolve = undefined; }
     }
