@@ -818,29 +818,19 @@ export function compressOldTurns(body: Record<string, unknown>, keepTurns: numbe
     });
   }
 
-  // Splice: replace old messages with skeletons + kept messages + preserved memory
+  // Splice: replace old messages with skeletons + kept messages
   // No hint message — skeletons use "[Earlier: ...]" prefix to signal compression.
   // A hint message would break role alternation (user→user with first kept message).
+  // Protected system messages were excluded from removeIndices so they're already in keptMessages.
   const keptMessages = messages.filter((_: any, i: number) => !removeIndices.has(i));
   const newMessages = [...skeletons, ...keptMessages];
-
-  // Reinject protected system messages at the front so they're always present
-  if (preservedMessages.length > 0) {
-    // Find the first user message index to maintain role alternation
-    const firstUserIdx = newMessages.findIndex((m: any) => m.role === "user");
-    if (firstUserIdx >= 0) {
-      newMessages.splice(firstUserIdx, 0, ...preservedMessages);
-    } else {
-      newMessages.unshift(...preservedMessages);
-    }
-  }
 
   (body as any).messages = newMessages;
 
   const compressedCount = removeIndices.size;
-  const memoryNote = preservedMessages.length > 0 ? `, preserved ${preservedMessages.length} protected system messages` : "";
+  const protectedNote = preservedMessages.length > 0 ? `, ${preservedMessages.length} protected system messages kept` : "";
   console.warn(
-    `[context-compress] Compressed ${firstKeptTurnIdx} old turns (${compressedCount} messages) to ${skeletons.length} skeleton messages, kept ${keptMessages.length} verbatim (limit: ${keepTurns} turns${memoryNote})`,
+    `[context-compress] Compressed ${firstKeptTurnIdx} old turns (${compressedCount} messages) to ${skeletons.length} skeleton messages, kept ${keptMessages.length} verbatim (limit: ${keepTurns} turns${protectedNote})`,
   );
 }
 
