@@ -406,6 +406,10 @@ export function createOpenAIChatToAnthropicStream() {
   let currentBlockType: "text" | "thinking" | null = null;
   let currentBlockIndex = 0;
   let hasToolCalls = false;
+  // Track whether any real content (text, thinking, tool_use) was emitted.
+  // When upstream drops without content, emit nothing so the proxy's
+  // empty-response detection returns 502 instead of double-injecting events.
+  let hadRealContent = false;
 
   // Track tool calls by OpenAI index → block index mapping
   const toolBlockIndices = new Map<number, number>();
@@ -500,11 +504,11 @@ export function createOpenAIChatToAnthropicStream() {
     const choice = parsed.choices?.[0];
     if (!choice) return;
 
-    emitMessageStart(push);
     const delta = choice.delta;
-
     // Handle reasoning_content -> thinking block
     if (delta?.reasoning_content) {
+      hadRealContent = true;
+      emitMessageStart(push);
       // Close text block if we're transitioning from text to thinking
       if (currentBlockType === "text") {
         closeCurrentBlock(push);
@@ -531,6 +535,8 @@ export function createOpenAIChatToAnthropicStream() {
 
     // Handle text content
     if (delta?.content) {
+      hadRealContent = true;
+      emitMessageStart(push);
       // Close thinking block if we're transitioning from thinking to text
       if (currentBlockType === "thinking") {
         closeCurrentBlock(push);
@@ -557,6 +563,8 @@ export function createOpenAIChatToAnthropicStream() {
 
     // Handle tool_calls
     if (delta?.tool_calls) {
+      hadRealContent = true;
+      emitMessageStart(push);
       for (const tc of delta.tool_calls) {
         const tcIndex = tc.index ?? 0;
 
@@ -626,8 +634,13 @@ export function createOpenAIChatToAnthropicStream() {
 
         const data = trimmed.startsWith("data: ") ? trimmed.slice(6).trim() : trimmed.slice(5).trim();
         if (data === "[DONE]") {
-          emitMessageStart(push);
-          emitClosingEvents(push, lastFinishReason ?? undefined);
+          // Only emit closing events if real content was processed.
+          // If upstream sent [DONE] with no content chunks, emit nothing
+          // so the proxy's empty-response detection returns 502 for fallback.
+          if (hadRealContent) {
+            emitMessageStart(push);
+            emitClosingEvents(push, lastFinishReason ?? undefined);
+          }
           callback();
           return;
         }
@@ -653,9 +666,14 @@ export function createOpenAIChatToAnthropicStream() {
     },
 
     flush(callback: () => void) {
-      const push = this.push.bind(this);
-      emitMessageStart(push);
-      emitClosingEvents(push);
+      // Only emit if real content was seen. When upstream drops without
+      // content (GOAWAY, TLS reset), emitting skeleton events causes the
+      // proxy's safeClose to double-inject, producing a malformed stream.
+      if (hadRealContent) {
+        const push = this.push.bind(this);
+        emitMessageStart(push);
+        emitClosingEvents(push);
+      }
       callback();
     },
   });
@@ -760,6 +778,7 @@ export function createOpenAIResponsesToAnthropicStream() {
   let started = false;
   let closed = false;
   let blockOpen = false;
+  let hadRealContent = false;
 
   type PushFn = (data: string) => boolean;
 
@@ -874,6 +893,7 @@ export function createOpenAIResponsesToAnthropicStream() {
 
         // response.output_text.delta → content_block_delta (text_delta)
         if (currentEvent === "response.output_text.delta" && parsed.delta !== undefined) {
+          hadRealContent = true;
           if (!started) emitMessageStart(push);
           if (!blockOpen) {
             blockOpen = true;
@@ -897,6 +917,7 @@ export function createOpenAIResponsesToAnthropicStream() {
 
         // response.function_call_arguments.delta → content_block_delta (input_json_delta)
         if (currentEvent === "response.function_call_arguments.delta" && parsed.delta !== undefined) {
+          hadRealContent = true;
           if (!started) emitMessageStart(push);
           push(
             `event: content_block_delta\ndata: ${JSON.stringify({
@@ -916,8 +937,10 @@ export function createOpenAIResponsesToAnthropicStream() {
 
         // response.completed → message_delta + message_stop
         if (currentEvent === "response.completed") {
-          emitMessageStart(push);
-          emitClosingEvents(push);
+          if (hadRealContent) {
+            emitMessageStart(push);
+            emitClosingEvents(push);
+          }
           continue;
         }
       }
@@ -925,22 +948,25 @@ export function createOpenAIResponsesToAnthropicStream() {
     },
 
     flush(callback: () => void) {
-      const push = this.push.bind(this);
-      // Process any remaining buffered line — extract usage before closing
-      if (lineBuffer.trim()) {
-        const line = lineBuffer.trim();
-        if (line.startsWith("data: ")) {
-          try {
-            const parsed = JSON.parse(line.slice(6).trim());
-            if (parsed?.usage?.input_tokens !== undefined) inputTokens = parsed.usage.input_tokens;
-            if (parsed?.usage?.output_tokens !== undefined) outputTokens = parsed.usage.output_tokens;
-          } catch {
-            // Ignore
+      // Only emit if real content was seen — same guard as Chat adapter.
+      if (hadRealContent) {
+        const push = this.push.bind(this);
+        // Process any remaining buffered line — extract usage before closing
+        if (lineBuffer.trim()) {
+          const line = lineBuffer.trim();
+          if (line.startsWith("data: ")) {
+            try {
+              const parsed = JSON.parse(line.slice(6).trim());
+              if (parsed?.usage?.input_tokens !== undefined) inputTokens = parsed.usage.input_tokens;
+              if (parsed?.usage?.output_tokens !== undefined) outputTokens = parsed.usage.output_tokens;
+            } catch {
+              // Ignore
+            }
           }
         }
+        emitMessageStart(push);
+        emitClosingEvents(push);
       }
-      emitMessageStart(push);
-      emitClosingEvents(push);
       callback();
     },
   });
