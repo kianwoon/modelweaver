@@ -834,6 +834,36 @@ export function compressOldTurns(body: Record<string, unknown>, keepTurns: numbe
   );
 }
 
+/** Strip thinking blocks from completed assistant turns, preserving only the last. */
+function stripThinkingFromCompletedTurns(messages: unknown[]): void {
+  if (!Array.isArray(messages) || messages.length < 2) return;
+
+  let lastAssistantIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if ((messages[i] as any).role === "assistant") {
+      lastAssistantIdx = i;
+      break;
+    }
+  }
+  if (lastAssistantIdx < 0) return;
+
+  let stripped = 0;
+  for (let i = 0; i < messages.length; i++) {
+    if ((messages[i] as any).role !== "assistant" || i === lastAssistantIdx) continue;
+    const content = (messages[i] as any).content;
+    if (!Array.isArray(content)) continue;
+
+    const before = content.length;
+    (messages[i] as any).content = content.filter(
+      (block: any) => block.type !== "thinking"
+    );
+    stripped += before - (messages[i] as any).content.length;
+  }
+  if (stripped > 0) {
+    console.log(`[thinking-strip] Removed ${stripped} thinking block(s) from completed turns (preserved last assistant at idx ${lastAssistantIdx})`);
+  }
+}
+
 export function compressToolResults(body: Record<string, unknown>, limit: number): void {
   const messages = body.messages;
   if (!Array.isArray(messages)) return;
@@ -909,6 +939,7 @@ function applyTargetedReplacements(
     if (needsOrphanClean) cleanOrphanedToolMessages(mutable);
     if (provider.toolResultLimit) compressToolResults(mutable, provider.toolResultLimit);
     if (provider.compressOldTurns) compressOldTurns(mutable, provider.compressOldTurns);
+    if (Array.isArray(mutable.messages)) stripThinkingFromCompletedTurns(mutable.messages as unknown[]);
     if (provider.modelLimits) {
       const { maxOutputTokens } = provider.modelLimits;
       const requested = typeof mutable.max_tokens === "number" ? mutable.max_tokens : maxOutputTokens;
@@ -1134,6 +1165,10 @@ export async function forwardRequest(
 
           if (provider.compressOldTurns) {
             compressOldTurns(mutable, provider.compressOldTurns);
+          }
+
+          if (Array.isArray(mutable.messages)) {
+            stripThinkingFromCompletedTurns(mutable.messages as unknown[]);
           }
 
           if (provider.modelLimits) {
@@ -1665,6 +1700,7 @@ export async function forwardRequest(
     let sawContentBlockStop = false;
     let sawMessageStop = false;
     let sawRealContent = false; // true only when text_delta has non-empty text or tool_use appears
+    let sawThinkingContent = false; // true when thinking_delta appears (thinking-only is valid, not empty)
     let _rollingTail = "";
 
     // Snapshot of upstream state BEFORE any synthetic events are injected.
@@ -1760,6 +1796,10 @@ export async function forwardRequest(
               try {
                 const evt = JSON.parse(payload);
                 if (evt.type === "content_block_delta" && (
+                  evt.delta?.type === "thinking_delta" && evt.delta.thinking && evt.delta.thinking.length > 0
+                )) {
+                  sawThinkingContent = true;
+                } else if (evt.type === "content_block_delta" && (
                   evt.delta?.type === "text_delta" && evt.delta.text && evt.delta.text.length > 0
                 )) {
                   sawRealContent = true;
@@ -1774,11 +1814,12 @@ export async function forwardRequest(
       }
 
       // Empty response detection: check if this is an empty end_turn.
-      // sawRealContent only counts text_delta with actual text or tool_use.
-      // thinking_delta alone does NOT count — a thinking-only response is empty.
-      // Once we see message_stop without real content, flag as empty.
+      // sawRealContent counts text_delta with actual text or tool_use.
+      // sawThinkingContent counts thinking_delta — a thinking-only response is valid,
+      // NOT empty (the model chose to only reason without generating text).
+      // Only flag as empty when there's NO content at all (no text, no tool_use, no thinking).
       if (!streamDetectedEmpty) {
-        if (sawMessageStop && !sawRealContent && !(passThrough as any)._intentionalClose) {
+        if (sawMessageStop && !sawRealContent && !sawThinkingContent && !(passThrough as any)._intentionalClose) {
           // Stream completed without any real content (not a stall-handled close)
           console.warn(`[empty-response] Provider "${provider.name}" returned empty/malformed response (no real content) — flagging as empty`);
           streamDetectedEmpty = true;
@@ -1796,15 +1837,13 @@ export async function forwardRequest(
       if (!streamDetectedEmpty && sawMessageStart && !(passThrough as any)._intentionalClose) {
         // Pattern: message_delta with stop_reason but no real content.
         // A provider completing the message without ever sending content = empty.
-        if (chunkText.includes('"message_delta"') && chunkText.includes('"stop_reason"') && !sawRealContent) {
+        if (chunkText.includes('"message_delta"') && chunkText.includes('"stop_reason"') && !sawRealContent && !sawThinkingContent) {
           detectEarlyEmpty(`Provider "${provider.name}" sent message_delta with stop_reason but no real content`);
         }
       }
 
-      // Debug: dump first chunk to see actual SSE content
-      if (((passThrough as any)._bytesForwarded ?? 0) <= chunk.length) {
-        console.warn(`[tracking] First chunk (${chunk.length}b): ${chunkText.slice(0, 400)}`);
-      }
+      // Track chunk count for safeClose diagnostics
+      (passThrough as any)._chunkCount = ((passThrough as any)._chunkCount ?? 0) + 1;
 
       // Forward to ReadableStream — merged from handler 3 to avoid extra dispatch.
       if (enqueueChunk) enqueueChunk(chunk);
@@ -1959,24 +1998,26 @@ export async function forwardRequest(
         const safeClose = () => {
           if (controllerClosed) return;
           controllerClosed = true;
+          console.warn(`[safeClose] bytes=${(passThrough as any)._bytesForwarded} msgStart=${sawMessageStart} msgStop=${sawMessageStop} real=${sawRealContent} think=${sawThinkingContent} chunks=${(passThrough as any)._chunkCount} state=${ctx._streamState}`);
           // Zero-byte or no message_start: upstream returned an empty/malformed response.
           // Inject a complete synthetic SSE message so Claude Code gets a parseable
           // response instead of crashing on empty content.
           const bytes = (passThrough as any)._bytesForwarded ?? 0;
           const isStallHandled = !!(passThrough as any)._intentionalClose;
-          if ((bytes === 0 || !sawMessageStart || (sawMessageStop && !sawRealContent)) && !isStallHandled) {
+          if ((bytes === 0 || !sawMessageStart || (sawMessageStop && !sawRealContent && !sawThinkingContent)) && !isStallHandled) {
             // Zero-byte or upstream completed without real content.
             // Inject a complete synthetic SSE message so Claude Code gets a parseable
             // response instead of crashing on empty content.
             // Skip when _intentionalClose — stall/hedge handlers already wrote graceful
             // termination events; injecting more would corrupt the stream.
-            // Skip when sawRealContent — real content proves the stream was valid;
+            // Skip when sawRealContent or sawThinkingContent — real content proves the stream was valid;
             // !sawMessageStart with sawRealContent is a detection gap, not a malformed stream.
-            if (sawRealContent) {
-              console.warn(`[safeClose] Stream had real content but msgStart=${sawMessageStart} — likely detection gap, skipping error injection (requestId=${ctx.requestId}, bytes=${bytes})`);
+            // Thinking-only responses are valid — the model chose to reason without generating text.
+            if (sawRealContent || sawThinkingContent) {
+              console.warn(`[safeClose] Stream had content (real=${sawRealContent}, thinking=${sawThinkingContent}) but msgStart=${sawMessageStart} — likely detection gap, skipping error injection (requestId=${ctx.requestId}, bytes=${bytes})`);
               // Fall through to normal closing events below
             } else {
-            console.warn(`[safeClose] Empty/malformed stream: bytes=${bytes} msgStart=${sawMessageStart} realContent=${sawRealContent} stallHandled=${isStallHandled} requestId=${ctx.requestId} — injecting error message`);
+            console.warn(`[safeClose] Empty/malformed stream: bytes=${bytes} msgStart=${sawMessageStart} realContent=${sawRealContent} thinking=${sawThinkingContent} stallHandled=${isStallHandled} requestId=${ctx.requestId} — injecting error message`);
             const msgId = `msg_proxy_empty_${Date.now()}`;
             const errorChunks = [
               `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { id: msgId, type: "message", role: "assistant", model: "proxy", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 0, output_tokens: 0 } } })}\n\n`,
@@ -2070,11 +2111,16 @@ export async function forwardRequest(
         // Wire up the deferred enqueue — called from the merged data handler
         // instead of a separate listener, saving one EventEmitter dispatch per chunk.
         enqueueChunk = (chunk: Buffer) => {
-          if (ctx._streamState === "error" || ctx._streamState === "complete") return;
+          if (ctx._streamState === "error" || ctx._streamState === "complete") {
+            console.warn(`[enqueue-skip] state=${ctx._streamState}, chunk=${chunk.toString().slice(0, 60)}`);
+            return;
+          }
           if (sseBuffer) {
             sseBuffer.write(chunk);
           } else {
-            try { controller.enqueue(chunk); } catch { /* already closed */ }
+            try {
+              controller.enqueue(chunk);
+            } catch (e: any) { console.warn(`[enqueue-err] ${e.message}`); /* already closed */ }
           }
         };
         passThrough.on("end", () => {
