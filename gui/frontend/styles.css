@@ -394,11 +394,11 @@ body {
   color: var(--text-dim);
   text-transform: uppercase;
   letter-spacing: 0.8px;
-  margin-bottom: 8px;
+  margin-bottom: 4px;
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-bottom: 6px;
+  padding-bottom: 3px;
   border-bottom: 0.5px solid var(--border-subtle);
 }
 
@@ -785,6 +785,10 @@ body {
   overflow-y: auto;
 }
 
+#providers-section {
+  flex: 1.2;
+}
+
 #providers {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -873,7 +877,7 @@ body {
 .app-credit {
   flex-shrink: 0;
   margin-top: auto;
-  padding: 8px 12px;
+  padding: 3px 12px;
   display: flex;
   justify-content: space-between;
   font-size: 11px;
@@ -913,9 +917,31 @@ body {
 #app.compact-mode > .section:nth-of-type(-n+2) {
   max-height: 2000px;
   opacity: 1;
-  padding: 8px 12px;
+  padding: 5px 12px;
   overflow: visible;
   pointer-events: auto;
+}
+
+#app.compact-mode > #providers-section {
+  flex: 2;
+}
+
+#app.compact-mode > #models-section {
+  flex: 0.6;
+}
+
+#app.compact-mode > #recent-section {
+  max-height: 2000px;
+  opacity: 1;
+  padding: 5px 12px;
+  overflow: visible;
+  pointer-events: auto;
+  flex: 3;
+}
+
+#app.compact-mode > .stats {
+  padding: 6px 12px;
+  gap: 6px;
 }
 
 #app > .section {
