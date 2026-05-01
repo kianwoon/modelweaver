@@ -26,7 +26,7 @@ function getPlistContent(): string {
   <array>
     <string>${process.execPath}</string>
     <string>${nodePath}</string>
-    <string>start</string>
+    <string>--monitor</string>
   </array>
   <key>KeepAlive</key>
   <dict>
@@ -84,7 +84,7 @@ export function install(): void {
     console.log(`  Try manually: launchctl load ${PLIST_PATH}`);
   }
 
-  console.log(`  Auto-starts on login and auto-restarts if stopped (KeepAlive gated by entry script existence)`);
+  console.log(`  Auto-starts on login and auto-restarts if stopped (runs monitor directly via launchd)`);
   console.log(`  Logs: ${LOG_DIR}/stdout.log and ${LOG_DIR}/stderr.log`);
 }
 
