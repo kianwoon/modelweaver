@@ -22,7 +22,7 @@ jobs:
     steps:
       # - Checkout repository code
       - name: Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       # - Setup Node.js with npm caching for faster installs
       - name: Setup Node.js ${{ matrix.node-version }}
